@@ -2,7 +2,7 @@
 import { h, reconcile, setText, setClass, setHidden, startTicker } from '../dom.js';
 import { icon } from '../icons.js';
 import { state, sel, lsGet, lsSet } from '../store.js';
-import { dismissQuestion } from '../actions.js';
+import { dismissQuestion, decideGate } from '../actions.js';
 import { fmtAgo, cwdTail, truncate } from '../format.js';
 import { emptyState } from '../ui.js';
 import { createNotesPanel } from '../notes.js';
@@ -11,6 +11,7 @@ import { navigate, openTask } from '../router.js';
 const KIND = {
   ask: { icon: 'question', label: 'Asked you' },
   waiting: { icon: 'pause', label: 'Waiting for you' },
+  approval: { icon: 'gate', label: 'Approval needed' }, // v0.9: a workflow gate
 };
 
 export function mount(container) {
@@ -55,6 +56,12 @@ export function mount(container) {
     r.reply = h('button', { class: 'btn btn-accent btn-sm', type: 'button', 'aria-expanded': 'false' }, icon('note', 14), 'Reply via note');
     r.dismiss = h('button', { class: 'btn btn-quiet btn-sm q-dismiss', type: 'button' }, icon('close', 14), 'Dismiss');
     r.actions = h('div', { class: 'q-actions' }, r.thread, r.reply, r.dismiss);
+    // v0.9: a workflow gate is decided right here
+    r.comment = h('input', { class: 'wf-input', type: 'text', placeholder: 'Comment (optional)', maxlength: '1000', 'aria-label': 'Comment for the decision' });
+    r.approve = h('button', { class: 'btn btn-sm wf-approve', type: 'button' }, icon('check', 14), 'Approve');
+    r.reject = h('button', { class: 'btn btn-sm wf-reject', type: 'button' }, icon('close', 13), 'Reject');
+    r.canvas = h('button', { class: 'btn btn-quiet btn-sm', type: 'button' }, icon('workflow', 14), 'Open run');
+    r.gate = h('div', { class: 'q-approve-box', hidden: true }, r.comment, h('div', { class: 'q-approve-row' }, r.approve, r.reject, r.canvas));
     r.panelSlot = h('div', { class: 'q-panel', hidden: true });
     const el = h('article', { class: 'q-row', role: 'listitem', 'data-id': q.id },
       r.kind,
@@ -62,8 +69,13 @@ export function mount(container) {
         h('div', { class: 'q-head' }, r.label, r.age),
         r.text,
         h('div', { class: 'q-meta' }, r.sess, r.task),
-        r.actions, r.panelSlot));
+        r.actions, r.gate, r.panelSlot));
     el.__r = r;
+    const decide = (d) => { const x = el.__q; decideGate(x.runId, x.nodeId, d, r.comment.value); r.comment.value = ''; };
+    r.approve.addEventListener('click', () => decide('approve'));
+    r.reject.addEventListener('click', () => decide('reject'));
+    r.comment.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); decide('approve'); } });
+    r.canvas.addEventListener('click', () => { const x = el.__q; const run = state.runs.get(x.runId); if (run) navigate('workflows', [run.workflowId], { run: x.runId }); });
     r.thread.addEventListener('click', () => {
       const x = el.__q;
       navigate('threads', x.agentId ? [x.sessionId, x.agentId] : [x.sessionId]);
@@ -147,9 +159,13 @@ export function mount(container) {
     r.age.setAttribute('data-ago', at);
     r.age.setAttribute('data-ago-prefix', answered ? 'answered ' : '');
     setText(r.age, (answered ? 'answered ' : '') + fmtAgo(at));
-    setHidden(r.thread, !s);
-    setHidden(r.reply, answered);
-    setHidden(r.dismiss, answered);
+    const gate = q.kind === 'approval';
+    setHidden(r.gate, !gate || answered);
+    setHidden(r.thread, !s || gate);
+    setHidden(r.reply, answered || gate);
+    setHidden(r.dismiss, answered || gate);
+    setHidden(r.actions, gate);
+    if (gate) { const run = state.runs.get(q.runId); setHidden(r.canvas, !run); }
     if (answered && panels.has(q.id)) togglePanel(el, false);
   }
 
@@ -192,7 +208,7 @@ export function mount(container) {
   render();
 
   return {
-    watch: ['question', 'session', 'project', 'task', 'ui', 'ready'],
+    watch: ['question', 'session', 'project', 'task', 'ui', 'ready', 'run'],
     update: render,
     setRoute(r) { const id = r.args[0] || null; if (id !== focusId) focusRow(id); },
     destroy() { for (const p of panels.values()) p.destroy(); panels.clear(); root.remove(); },

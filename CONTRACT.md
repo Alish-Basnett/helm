@@ -13,6 +13,8 @@ helm/
   hub/helmd.mjs                   hub entry: node hub/helmd.mjs [--seed] [--port 7777]
   hub/*.mjs                       hub internals (db, projections, http, sse, search)
   hub/seed.mjs                    demo data for UI work without live sessions
+  hub/wfgraph.mjs, workflows.mjs, wfengine.mjs   v0.9 workflows: graph validator, reducer, decision engine
+  web/views/workflows.js, web/wf/*.js, web/wf.css   v0.9 workflows canvas and run UI
   hub/test/*.test.mjs             node --test
   web/index.html, web/*.js, web/*.css   served by the hub at /
 ```
@@ -438,3 +440,183 @@ behaviour changes.
   `GET /v1/stream` carries `row: null` (the page refetches `/v1/state`).
 - **Web**: Settings > Phone access: toggle, warning ("Anyone with this link on your network can add tasks and message your sessions."),
   the link, Copy, and a QR code from `web/qr.js` (own encoder: byte mode, level M, versions 1-10 = up to 213 bytes; a longer link falls back to text).
+
+## v0.9 additions — Workflows (graphs of agents, checks, gates and reviews)
+
+A **workflow** is a saved graph (`helm.workflow/1`); a **run** executes one pinned version of it. The hub is the engine: it
+decides what runs next and queues **steps**; a live mod (any session) claims steps, does the work and reports back with
+`wf.step.result`. The hub never calls a model. Everything below is built and tested (`hub/test/v09wf.test.mjs`).
+
+### Rows
+```ts
+type Workflow = { id: string /* W-n */; projectId: string; name: string; currentVersion: number;
+  createdAt: number; updatedAt: number; archived: boolean }
+type WorkflowVersion = { workflowId: string; version: number; graph: Graph; author: 'user' | 'model'; summary: string;
+  parentVersion: number | null /* the version it was saved on top of, or the one it restores */; createdAt: number }
+type RunStatus = 'running' | 'paused' | 'waiting' | 'done' | 'failed' | 'aborted'
+//  waiting = nothing is in flight: a gate is open, or a ready step has no live session. paused = by the user, or the budget.
+type NodeState = 'pending' | 'ready' | 'queued' | 'running' | 'ok' | 'failed' | 'skipped' | 'waiting_gate' | 'abandoned'
+type Run = { id: string /* R-n */; workflowId: string; version: number; projectId: string; status: RunStatus;
+  params: Record<string, string>; driverSessionId: string | null; budgetUsd: number | null; costUsd: number;
+  startedAt: number; endedAt: number | null; error: string | null;
+  nodes: RunNode[] }                                   // inlined in /v1/state, GET /v1/runs and the SSE `run` row
+type RunNode = { runId: string; nodeId: string; state: NodeState; attempt: number /* 0 until first queued */;
+  taskId: string | null; agentId: string | null; startedAt: number | null; endedAt: number | null;
+  output: Output | null; error: string | null; costUsd: number; questionId: string | null /* open gate question */ }
+type Output = { ok?: boolean; text?: string; filesChanged?: string[]; taskId?: string;
+  check?: { exitCode?: number; stdout?: string; stderr?: string; passed?: boolean; timedOut?: boolean };
+  verdict?: 'pass' | 'changes' | null; findings?: string; approved?: boolean; comment?: string;
+  gate?: { message: string; show: string; taskIds: string[]; files: string[] }; skipped?: true }
+type Step = { id: string /* <runId>:<nodeId>:<attempt> */; runId: string; nodeId: string; attempt: number;
+  kind: 'agent' | 'shell' | 'review'; sessionId: string; state: 'queued' | 'running' | 'done' | 'failed';
+  input: StepInput; result: object | null; error: string | null; taskId: string | null;
+  createdAt: number; claimedAt: number | null; doneAt: number | null; notBefore: number | null }
+```
+- `Run.costUsd` is exactly the sum of its nodes' `costUsd`; a node's cost is the sum of the usage rows booked against it.
+- `Task` gains `runId: string | null` and `nodeId: string | null` (all task rows; `null` for ordinary cards).
+- `Question` gains `kind: 'approval'`. Approval questions (only) carry `runId` and `nodeId`; other questions keep their v0.2 shape.
+  `sessionId` of an approval question is the run's driver session. `POST /v1/questions/:id/dismiss` on an **open** approval is
+  409 (`approve or reject it instead`); session end or agent completion never answers an approval. Search indexes it as
+  `Approval: <message>`.
+
+### Graph schema `helm.workflow/1` (validator: `hub/wfgraph.mjs`, dependency-free)
+```jsonc
+{ "schema": "helm.workflow/1", "name": "…",
+  "params": [{ "key": "brief", "label": "What to build", "type": "text" | "line", "default"?: "…", "required"?: true }],
+  "nodes": [{ "id": "build", "type": "agent|shell|gate|review|note", "label": "Build feature", "position": {"x":80,"y":160},
+              "config": { … per type … }, "retry"?: {"max":0-5,"backoffMs":0-600000}, "timeoutMs"?: 1000-21600000, "sessionId"?: "…" }],
+  "edges": [{ "id": "e1", "from": "build", "to": "test", "when": "ok" }] }
+```
+| type | config | notes |
+|---|---|---|
+| `agent` | `agent: 'builder' \| 'scout'` (default builder), `prompt` (required, templated), `cwd?`, `isolation?: 'worktree'` | builder = `helm:builder`/Sonnet, scout = `helm:scout`/Haiku |
+| `shell` | exactly one of `argv: string[]` or `script: string` (run as `sh -c`), `cwd?`, `timeoutMs` (1000–600000, default 30000), `passIf: 'exit0' \| 'regex'`, `pattern?` (required with regex) | CLI only in the engine (see below) |
+| `gate` | `message` (required, templated), `show: 'files' \| 'diff' \| 'text' \| 'none'` (default files) | opens an approval question; no retry/timeout/session |
+| `review` | `rubric` (required, templated), `inputs: ('text'\|'files'\|'check')[]` (default text, files) | Opus via `model.complete` |
+| `note` | `text` (markdown) | never executed, no edges, no run row |
+- Edges: `when ∈ ok, fail, approved, rejected`; from a **gate** only `approved`/`rejected` (default `approved`), from every other node only `ok`/`fail`
+  (default `ok`). Notes have no edges. No self edges; no two edges with the same (from, to, when).
+- Validator rules (errors block save and run; warnings do not): unique node/edge ids (`^[A-Za-z0-9_-]{1,40}$`), known node types (unknown types are
+  rejected, never dropped), valid config per type, `retry`/`timeoutMs` ranges, edge endpoints exist, **no cycles** (loops are phase 3), at least one entry
+  node when there are executable nodes, templates resolve: `{{params.key}}` must be a declared param; `{{inputs.node.key}}` must name an **upstream**
+  executable node that can produce `key` (agent: `text ok filesChanged taskId`; shell: `text ok check`; review: `text ok verdict findings`; gate: `approved comment`).
+  Limits: 60 nodes, 200 edges, 256 KB. An empty graph is a warning (a blank workflow can be created and saved; it cannot be run).
+- The stored graph is the validator's **normalised** copy (defaults filled, unknown config keys dropped with a warning, edge `when` defaulted).
+- Template strings are rendered by the hub when it builds a step, so mods only ever see final text.
+
+### Engine rules (decided in `hub/wfengine.mjs`, applied by `hub/workflows.mjs`)
+- A node is **ready** when all its incoming edges are resolved and at least one is *taken*; an entry node is ready at once. An edge is taken when its source
+  finished with the matching outcome: `ok`/`fail` for work nodes, `approved`/`rejected` for a gate, and a user-**skipped** node counts as ok/approved. If
+  every incoming edge is resolved and none was taken, the node becomes `skipped` (no output) and its own outgoing edges are all dead. Several incoming edges
+  mean "wait for all that can still arrive".
+- A finished step becomes a node outcome: agent `ok` = `result.ok !== false`; shell `ok` is **re-derived by the hub** from `check` (`exitCode === 0`, or the
+  `pattern` regex against stdout+stderr; a timeout fails) and only falls back to `result.ok`/`check.passed` when no exit code was sent; review `ok` =
+  `result.ok !== false` **and** verdict `pass` (verdict = `result.verdict`, else the last `VERDICT: PASS|CHANGES` line of `text`; none = fail closed, `changes` = fail).
+- **Failure**: while `attempt <= retry.max` the node goes `ready` again (error kept as `attempt N failed: …`) and a new step `attempt+1` is queued, preferring a
+  different live session when one exists, delayed by `retry.backoffMs` (`Step.notBefore`; not claimable earlier). After the last retry the node is `failed`
+  and follows its `fail` (gate: `rejected`) edge if there is one; **with none the run ends `failed`** (`error: "<label> failed: <reason>"`), in-flight nodes
+  become `abandoned` and their steps fail `run failed`. A failed shell/review node gets a blocked Board card so the failure is visible.
+- **Run controls** (`pause` only while running/waiting; `resume` only while paused): pause holds *new* work (queuing, gates, retries); results still land and
+  nodes settle. `abort` marks active nodes `abandoned`, fails queued/running steps (`run aborted`), answers open gate questions, run `aborted` (final).
+  `retry` (node `failed`/`abandoned`) and `skip` (also `pending`/`ready`) are refused 409 once any later step has started; a retry/skip on a `failed` run reopens it
+  (`running`). A late `wf.step.result` never revives an aborted run (the step is already failed).
+- **Budget**: `budgetUsd` is checked before each launch; once `Run.costUsd >= budgetUsd` the run pauses with `error: "budget reached ($X)"`. `resume` then lifts the limit.
+- **Driver session**: at run start `sessionId` (must exist and not be `ended`, else 404/409) or the Jobs rule (project's newest active/idle session, else any
+  active; none → **409 `no live session`**). A node's `sessionId` pins its steps (not running → the node fails at once, no retry); otherwise steps go to the
+  driver, re-picked (and `Run.driverSessionId` updated) when it has ended. No live session → run `waiting` with `error: "waiting for a live session"`.
+- **Timeouts / liveness** (hub sweep, every 30 s and after every committed ingest/command): a *queued* step older than `HELM_JOB_MS` (default 5 min; from
+  `max(createdAt, notBefore)`) fails `not picked up by a live session`; a *running* step older than `node.timeoutMs + 60 s` (shell: `config.timeoutMs + 60 s`;
+  default `HELM_STEP_MS` = 60 min) fails `timed out`; any queued/running step whose session is `ended` fails `session ended`. Paused runs do not time out queued
+  steps. A failed step is final: a late result for it is ignored (the node may already have retried).
+- **Restart**: all state is in SQLite. After a restart the hub re-evaluates live runs on start, in the sweep and after the next commit; nothing is re-queued
+  and no step is created twice (a node has at most one non-final step; step ids are `<runId>:<nodeId>:<attempt>`).
+
+### Mod step runner contract (what the mod implements)
+**Claim** — `GET /v1/sessions/:id/steps` → `{ steps: Step[] }`. Atomically moves this session's **due** `queued` steps (run `running`/`waiting`, `notBefore` passed)
+to `running` (`claimedAt` set) and returns them oldest first. Poll in the existing 2 s tick; a hub without the endpoint answers 404 → re-check every 60 s
+(never break the mod). Like `/inbox` and `/jobs` this GET mutates, so it carries the CSRF guard. Never execute a step that was not claimed.
+
+**`Step.input`** (always `runId`, `nodeId`, `attempt`, `label`; everything templated is already rendered):
+| kind | fields | how to run it |
+|---|---|---|
+| `agent` | `agent` `'builder'\|'scout'`, `subagentType` (`helm:builder`/`helm:scout`), `model` (`sonnet`/`haiku`), `prompt`, **`description`** = `"[helm:T-n] <label>"`, `taskId`, `cwd?`, `isolation?: 'worktree'` | `$.agent.spawn({ prompt, description, subagentType, model, cwd })`. The hub already created card `taskId` (status `in_progress`, `Task.runId`/`nodeId` set); the **tag in `description`** makes the existing `agent.spawned` handler bind to it, so no second card appears and the card lifecycle (`agent.completed` → review/blocked) is unchanged. Remember `agentId → stepId`; when the agent's `turn.complete` arrives report the result. |
+| `shell` | `argv?: string[]` **or** `script?: string`, `cwd?`, `timeoutMs`, `passIf: 'exit0'\|'regex'`, `pattern?` | `$.process.run(argv or ['sh','-c',script], { cwd, timeoutMs })`. CLI only: in the desktop app degrade to a `helm:scout` agent told to run it and report the exit code (flag it, it costs tokens). Report raw `check`; the hub decides pass/fail. |
+| `review` | `model: 'opus'`, `system`, `prompt`, `maxTokens` (4096), `timeoutMs`, `rubric` | `$.model.complete({ model, system, prompt, maxTokens, timeoutMs })`; send the answer as `text` (it ends with `VERDICT: PASS` or `VERDICT: CHANGES`) and the exact `usage`. `isAnswered` false → `ok:false` with the reason as `error`. |
+
+**Result** — mod event `wf.step.result` (the **only** `wf.*` type a mod may send; every other `wf.*` and `hub.*` type is rejected at ingest):
+```ts
+{ stepId: string; ok: boolean;                      // ok:false = the step failed (error says why)
+  text?: string;                                    // agent: final answer; shell: combined output (optional, derived from check); review: the model's reply (≤ 8000 chars kept, tail)
+  filesChanged?: string[];                          // agent: from the FILES: line (≤ 200)
+  check?: { exitCode: number; stdout: string; stderr: string; passed?: boolean; timedOut?: boolean };  // shell (stdout/stderr tail 4000 each)
+  verdict?: 'pass' | 'changes'; findings?: string;  // review (optional: the hub also parses `text`)
+  agentId?: string; taskId?: string; error?: string;
+  usage?: { model: string; inputTokens?: number; outputTokens?: number; cacheReadTokens?: number; costUsd: number } }
+```
+- **Idempotent by `stepId`**: the first result for a step in `queued`/`running` wins; later ones (and results for unknown steps) are ignored, so the outbox may replay freely.
+  The event's `sessionId` is whoever reports it; it is not checked against `Step.sessionId`.
+- `usage` is booked as one usage row against the node: kind `wf_review` for a review step, `wf_step` otherwise (`runId`/`nodeId`/`taskId` filled in). If the mod
+  prefers to report cost separately it may send `helm.usage` instead — **one or the other for a given cost, never both**.
+- **Usage events** — `helm.usage` gains optional `runId`, `nodeId` and kinds `wf_step | wf_review | wf_draft`. Rows with both ids add to that run node and the run
+  total (ids that match no run node still book the row, nothing else). Cost meter: `wf_step` counts as *requested* work next to `note_turn`; `wf_review` and
+  `wf_draft` are overhead. `agent.completed.costUsd` is accepted and **ignored** (it would double-count).
+- Time limit for the mod to answer a claimed step: see Timeouts above. If the session ends, its steps fail `session ended`.
+
+### Events recorded in the log (session `_hub`; replay applies them and never decides)
+| type | data | effect |
+|---|---|---|
+| `wf.created` | `{ projectId, name, graph, author, summary }` | Workflow `W-n` + version 1 |
+| `wf.saved` | `{ workflowId, graph, author, summary, parentVersion? }` | version n+1, `currentVersion` moves |
+| `wf.updated` | `{ workflowId, name?, archived? }` | rename / archive |
+| `wf.run.started` | `{ workflowId, version, projectId, params, driverSessionId, budgetUsd }` | Run `R-n`, one `pending` RunNode per executable node |
+| `wf.run.status` | `{ runId, status, error?, budgetUsd?, reopen? }` | non-final status changes (`paused`, `waiting`, `running`) |
+| `wf.run.finished` | `{ runId, status: 'done'\|'failed'\|'aborted', error? }` | final |
+| `wf.node.state` | `{ runId, nodeId, state, attempt?, output?, error?, taskId? }` | the engine's decision about a node; terminal states stamp `endedAt` and settle its card (`ok`/user-skip → done, `failed` → blocked with the reason, `abandoned` → blocked "run stopped") and answer its gate question |
+| `wf.step.created` | `{ stepId, runId, nodeId, attempt, kind, sessionId, input, taskId, notBefore?, driverSessionId? }` | Step `queued`; node → `queued` |
+| `wf.step.claimed` | `{ ids, sessionId }` | steps → `running`, nodes → `running` |
+| `wf.step.failed` | `{ stepId, error }` | hub-decided failure (timeout, session ended, abort) |
+| `wf.step.result` | mod event above | step → `done`/`failed`, usage booked; the engine then settles the node |
+| `wf.gate.opened` | `{ runId, nodeId, message, show, taskId, taskIds, files }` | approval Question `Q-n`, node `waiting_gate` (`output.gate` = the context), gate card → Review |
+| `wf.gate.decided` | `{ runId, nodeId, decision: 'approve'\|'reject', comment? }` | node `ok` (output.approved true) or `failed` ("rejected: …"), question answered, gate card → done |
+| `hub.task.create` | gains `runId?`, `nodeId?` | cards made for a run |
+Because every decision is an event, `helmd --rebuild` reproduces runs exactly (`dump()` of the five workflow tables is identical; tested).
+
+### Board and Inbox
+- Agent nodes get a card when their first step is queued: title = node label, description = rendered prompt + `(Workflow run R-n, step id)`, status `in_progress`,
+  `dependsOn` = cards of its direct upstream nodes. Retries reuse the card. When the node finishes **ok** the card moves to **done** (it was consumed by the
+  workflow); a failure blocks it. (Note for Auto mode: a running agent card counts as `in_progress`, so a project's Up next waits for it.)
+- A gate gets a card (`Approve: <label>`, status **review**, `Task.runId/nodeId`) and an open approval Question. `needsYou()` for that card reads *Approval needed*.
+  Web: Board card chip `R-n · node`, a green Approve button on the card, "Group by run" toggle (one collapsible header per run, `R-n <workflow> (done/total)`), Inbox
+  row with Approve / Reject (+comment) and "Open run".
+
+### Endpoints
+- `GET /v1/workflows?projectId=` → `{ workflows }` · `POST /v1/workflows` `{ projectId, name?, graph?, template?: 'build-test-review', author? }` → 201 `{ workflow }`
+  (no graph/template = an empty canvas; invalid graph → **400 `{ error, issues[] }`**; `issues[i] = { level: 'error'|'warn', code, message, nodeId?, edgeId?, field? }`)
+- `POST /v1/workflows/validate` `{ graph }` → `{ ok, issues }` (never fails on a bad graph)
+- `GET /v1/workflows/:id` → `{ workflow, versions: WorkflowVersion[] /* newest first, with graphs */ }`
+- `PUT /v1/workflows/:id` `{ graph, summary? }` → `{ workflow, version }` (new version, `author: 'user'`, summary default `Edited`; a graph identical to the current one → `{ …, unchanged: true }` and no new version; 400 with issues)
+- `PATCH /v1/workflows/:id` `{ name?, archived? }` → `{ workflow }` · `POST /v1/workflows/:id/restore` `{ version }` → `{ workflow, version }` (new version `Restored vN`, `parentVersion: N`)
+- `POST /v1/workflows/:id/run` `{ version?, params?, sessionId?, budgetUsd? }` → 201 `{ run }`. 400: invalid version/graph, unknown or missing required param, bad budget;
+  404 unknown session/version; 409 archived workflow, session ended, **no live session**.
+- `GET /v1/runs?workflowId=&status=a,b` → `{ runs }` (newest first, ≤ 200, nodes inlined) · `GET /v1/runs/:id` → `{ run, nodes, steps }`
+- `POST /v1/runs/:id/pause | resume | abort` → `{ run }` (409 in the wrong state) · `POST /v1/runs/:id/nodes/:nodeId/retry | skip` → `{ run }` (404 unknown node, 409 wrong state / later steps started)
+- `POST /v1/runs/:id/gates/:nodeId` `{ decision: 'approve' | 'reject', comment? ≤ 1000 }` → `{ run }` (409 when the gate is not waiting)
+- `GET /v1/sessions/:id/steps` → `{ steps }` (the mod claim, above)
+- `/v1/state` gains `workflows` (all, archived flagged) and `runs` (every active run plus the last 20 finished, nodes inlined); both honour `?projectId=`.
+  SSE entities `workflow` (Workflow row) and `run` (Run row with `nodes`); a run row is re-sent on every change to it, its nodes or its cost.
+  Search results gain `kind: 'workflow'` (title = name, body = step labels and prompts, `projectId` set).
+- Sweep additions: see Timeouts. New config: `HELM_STEP_MS` (`stepMs`, default 60 min). Hub tests: 178 (26 new).
+
+### Migration
+Opening an older database creates `workflows`, `workflow_versions`, `runs`, `run_nodes`, `steps` and adds nullable `tasks.run_id/node_id`, `questions.run_id/node_id`,
+`usage.run_id/node_id` in place (idempotent; tested by dropping them). Old rows read back with `runId`/`nodeId` null. No old event mentions a run, so `--rebuild`
+back-fills nothing.
+
+### Web (as built)
+`#/workflows[/:id][?run=R-n&tl=0]`. Left: workflows (New / New from template, rename, duplicate, archive) and the selected workflow's runs. Middle: toolbar (name,
+version history with restore, undo/redo, tidy, problems, Runs, Save with a summary prompt, Run with params/session/budget), palette (drag or click), dotted-grid canvas
+(pan by drag or Space-drag or wheel, ⌘/ctrl-wheel and pinch zoom to the cursor, Fit / 100%, marquee with ⇧-drag or the Select tool, snap to 16 px, ⌘C/⌘V/⌘D, Delete, arrows nudge 8 px,
+⌘Z / ⇧⌘Z, `/` quick add, double-click quick add), SVG edges labelled by kind, drag from a step's right dot to connect (then choose the kind), minimap. Right: inspector
+(per-type forms with inline validation, connection editor, run inputs, problems). Run mode shows the exact version a run started on, read-only, with node states, flowing/pulsing
+edges, a ticking cost, inline Approve/Reject on gates and Retry/Skip on failures; the **Dock `run` panel** (order 0.7) is the timeline. Files: `web/views/workflows.js`,
+`web/wf/{graph,canvas,palette,inspector,results,runpanel,rundata,labels,pop}.js`, `web/wf.css`.

@@ -4,6 +4,21 @@ All notable changes to Helm are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/). Shapes and endpoints are defined in `CONTRACT.md`.
 
+## [0.12.0] - 2026-10-10
+
+### Added
+
+- Mod step runner: live sessions claim workflow steps and run them. Agent steps go to a Sonnet or Haiku agent bound
+  to the step's card, shell steps run the command, and review steps make an Opus call. The agent's cost is booked
+  to the run. Verified end to end: builder → `node --test` → gate approved in the canvas → Opus review PASS.
+- Opening a workflow that has a live or waiting run shows that run's overlay automatically.
+- Workflows (hub + web, contract v0.9): a canvas for graphs of agent, shell-check, gate, Opus-review and note steps with ok / fail / approved /
+  rejected edges and retry; versions with a summary and restore; a deterministic run engine in the hub (steps queued per live session, claimed
+  through `GET /v1/sessions/:id/steps`, results reported as `wf.step.result`); gates that open an approval question and are decided from the
+  canvas, the Inbox or the Board card; pause, resume, abort, retry and skip; per-run budget; cost rolled up from `helm.usage` rows that carry
+  `runId` and `nodeId`; a run timeline in the Dock; a run chip and a "Group by run" toggle on the Board. One built-in template
+  (Build, Test, Gate, Review, Merge). The mod's step runner is a separate task.
+
 ## [0.11.0] - 2026-10-10
 
 ### Added

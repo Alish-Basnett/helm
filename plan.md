@@ -219,3 +219,8 @@ via a follow-up spawn that continues from the task's context.
   widths. Incident: a builder stopped the live hub with `--stop` minus `HELM_HOME`; the mod restarted it
   within seconds, no data lost (backup `helm-pre-v06.db`). Builders are now told to always pass `HELM_HOME`.
   Follow-up: Timeline axis should zoom to the visible range (bars are thin over a full day).
+- 2026-10-10 — **v0.12: Workflows (T-28).** Hub engine (decide-then-record `wf.*` events, rebuild identical),
+  canvas + run UI (builder), mod step runner (lead). First real run R-1 on a scratch repo: Sonnet builder added
+  `add()` → shell `node --test` passed → gate approved from the canvas → Opus review VERDICT: PASS, $0.017.
+  Fixes from the run: agent step cost now booked to the run; opening a workflow auto-selects its live run.
+  Follow-ups: mod tests for the step runner; review prompt should include the gate decision.

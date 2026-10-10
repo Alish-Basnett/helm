@@ -10,6 +10,7 @@ Mission control for Claude Code. Every session reports into one live board. You 
 - **Recaps + Learn**: every finished task gets What · How · Learned, written by Haiku. Learn adds "Explain deeper", a daily digest and concept filters.
 - **Spotlight (⌘K)**: full-text search across every session's tasks, notes, recaps, activity, questions and digests. Type `>` for commands.
 - **Extras**: a radar that flags two agents editing the same file, a questions inbox (`AskUserQuestion` calls and waiting agents), task replay, and an optional export of recaps to Obsidian.
+- **Workflows**: draw a graph of steps (builder or scout agents, shell checks, gates that wait for you, an Opus review) on a canvas, save it as versions, and press Run. The hub decides what runs next and queues steps for a live session; nodes light up as they go, a gate waits for Approve (in the Inbox, on the Board card or on the node), and the run's cost ticks live. Cards a run creates carry a run chip, and the Board can group them by run. `CONTRACT.md` v0.9 has the step contract.
 - **Model routing**: the session runs on Opus. `helm:builder` uses Sonnet and `helm:scout` uses Haiku, and Opus subagents are downgraded to Sonnet.
 
 ## How it fits together

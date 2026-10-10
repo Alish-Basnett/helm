@@ -40,8 +40,13 @@ export function clearDraft(key) {
   if (key in all) { delete all[key]; writeAll(all); }
 }
 
+const busyHooks = new Set();
+/** Let a view say "I hold unsaved work" (the Workflows canvas does). Returns an unregister function. */
+export function onBusy(fn) { busyHooks.add(fn); return () => busyHooks.delete(fn); }
+
 /** True when any composer on screen holds unsent text or has focus: never reload under the user's hands. */
 export function userIsBusy() {
+  for (const fn of busyHooks) { try { if (fn()) return true; } catch { /* ignore a broken hook */ } }
   const el = document.activeElement;
   if (el && (/^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName) || el.isContentEditable)) return true;
   return [...document.querySelectorAll('textarea')].some((t) => t.value.trim());

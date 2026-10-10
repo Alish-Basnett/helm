@@ -13,6 +13,7 @@ export function lsSet(key, value) {
 const KEYS = {
   project: 'projects', session: 'sessions', agent: 'agents', task: 'tasks', note: 'notes',
   question: 'questions', job: 'jobs', digest: 'digests', // v0.2 (missing keys from an older hub are treated as empty)
+  workflow: 'workflows', run: 'runs', // v0.9
 };
 
 export const state = {
@@ -24,6 +25,8 @@ export const state = {
   questions: new Map(),
   jobs: new Map(),
   digests: new Map(),
+  workflows: new Map(),
+  runs: new Map(), // Run rows with `nodes` inlined
   activity: new Map(), // id -> Activity (bounded)
   usageToday: { overheadUsd: 0, requestedUsd: 0 }, // v0.4 Helm overhead meter
   seq: 0,
@@ -36,7 +39,7 @@ export const state = {
   },
 };
 
-const ver = { project: 0, session: 0, agent: 0, task: 0, note: 0, question: 0, job: 0, digest: 0, activity: 0, usage: 0 };
+const ver = { project: 0, session: 0, agent: 0, task: 0, note: 0, question: 0, job: 0, digest: 0, workflow: 0, run: 0, activity: 0, usage: 0 };
 
 /* ---------- subscriptions ---------- */
 const listeners = new Set();
@@ -71,6 +74,14 @@ export function normalizeRow(entity, row) {
     if (row.autoStartedAt === undefined) row.autoStartedAt = null; // v0.7
   } else if (entity === 'project') {
     if (row.autoStart === undefined) row.autoStart = false; // v0.7 Up next auto mode
+  } else if (entity === 'run') {
+    if (!Array.isArray(row.nodes)) row.nodes = []; // v0.9
+  } else if (entity === 'workflow') {
+    if (row.archived === undefined) row.archived = false;
+  }
+  if (entity === 'task') {
+    if (row.runId === undefined) row.runId = null; // v0.9: a workflow run made this card
+    if (row.nodeId === undefined) row.nodeId = null;
   }
   return row;
 }
@@ -266,7 +277,7 @@ export const sel = {
     if (nc) add('choices', nc === 1 ? '1 choice' : `${nc} choices`);
     const agent = sel.agentOfTask(task);
     for (const q of state.questions.values()) {
-      if (q.state !== 'open') continue;
+      if (q.state !== 'open' || q.kind === 'approval') continue; // a gate is shown as `gate` below
       if (q.taskId === task.id || (agent && q.agentId === agent.id)) add(q.kind === 'waiting' ? 'waiting' : 'question', q.kind === 'waiting' ? 'Waiting for you' : 'Question');
     }
     if (agent && agent.status === 'waiting') add('waiting', 'Waiting for you');
@@ -278,8 +289,32 @@ export const sel = {
       const sn = task.startNoteId && state.notes.get(task.startNoteId);
       if (sn && sn.state === 'failed') add('autostart', 'Auto-start failed');
     }
-    if (task.status === 'review') add('review', 'Review');
+    // v0.9: a workflow gate waiting for a decision (its card sits in Review with an Approve button)
+    if (sel.gateOfTask(task)) add('gate', 'Approval needed');
+    else if (task.status === 'review') add('review', 'Review');
     return out;
+  },
+  /* ----- v0.9: workflows + runs ----- */
+  workflows(includeArchived = false) {
+    return Array.from(state.workflows.values()).filter((w) => includeArchived || !w.archived)
+      .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0) || String(a.id).localeCompare(String(b.id), undefined, { numeric: true }));
+  },
+  scopedWorkflows(includeArchived = false) { return sel.workflows(includeArchived).filter(sel.inScope); },
+  /** Runs of one workflow, newest first. */
+  runsOf(workflowId) {
+    return Array.from(state.runs.values()).filter((r) => r.workflowId === workflowId)
+      .sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0) || String(b.id).localeCompare(String(a.id), undefined, { numeric: true }));
+  },
+  activeRuns(scoped = true) {
+    return Array.from(state.runs.values()).filter((r) => ['running', 'waiting', 'paused'].includes(r.status) && (!scoped || sel.inScope(r)));
+  },
+  runOfTask(task) { return task && task.runId ? state.runs.get(task.runId) || null : null; },
+  /** { run, node } when this card is the card of a gate that is waiting for a decision, else null. */
+  gateOfTask(task) {
+    const run = sel.runOfTask(task);
+    if (!run || run.status === 'done' || run.status === 'failed' || run.status === 'aborted') return null;
+    const node = run.nodes.find((n) => n.nodeId === task.nodeId && n.state === 'waiting_gate');
+    return node ? { run, node } : null;
   },
   sessionWaiting(sid) { return sel.agentsOfSession(sid).some((a) => a.status === 'waiting'); },
 

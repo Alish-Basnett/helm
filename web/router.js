@@ -1,6 +1,6 @@
 // router.js — hash router: #/<view>/<arg…>?task=T-1&chat=1  (task details + chat are query params so they are linkable).
 import { lsGet, lsSet } from './store.js';
-export const VIEWS = ['board', 'projects', 'office', 'threads', 'inbox', 'learn', 'settings'];
+export const VIEWS = ['board', 'projects', 'office', 'threads', 'workflows', 'inbox', 'learn', 'settings'];
 
 export function parseHash(hash = location.hash) {
   const raw = (hash || '').replace(/^#/, '') || '/board';
@@ -103,6 +103,13 @@ export function setTaskQuery(patch) {
   }
   if (!query.task) { delete query.chat; delete query.diff; }
   go(buildHash({ view: r.view, args: r.args, query }), true);
+}
+/** Patch arbitrary query keys of the current route (null removes one). Used by Workflows for `?run=R-3`. */
+export function setQuery(patch, opts = {}) {
+  const r = current;
+  const query = {}; r.query.forEach((v, k) => { query[k] = v; });
+  for (const k in patch) { if (patch[k] == null || patch[k] === '') delete query[k]; else query[k] = patch[k]; }
+  go(buildHash({ view: r.view, args: r.args, query }), opts.replace !== false);
 }
 export function setArgs(args, opts = {}) {
   const r = current;

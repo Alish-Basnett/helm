@@ -19,17 +19,20 @@ import * as board from './views/board.js';
 import * as projects from './views/projects.js';
 import * as office from './views/office.js';
 import * as threads from './views/threads.js';
+import * as workflows from './views/workflows.js';
+import { createRunPanel } from './wf/runpanel.js';
 import * as learn from './views/learn.js';
 import * as inbox from './views/inbox.js';
 import * as settings from './views/settings.js';
 import { getPref, applyPrefs, cycleTheme, onPrefs } from './prefs.js';
 
-const VIEW_MODS = { board, projects, office, threads, inbox, learn, settings };
+const VIEW_MODS = { board, projects, office, threads, workflows, inbox, learn, settings };
 const VIEW_META = {
   board: { label: 'Board', icon: 'board' },
   projects: { label: 'Projects', icon: 'folder' },
   office: { label: 'Office', icon: 'office' },
   threads: { label: 'Threads', icon: 'threads' },
+  workflows: { label: 'Workflows', icon: 'workflow' },
   inbox: { label: 'Inbox', icon: 'inbox' },
   learn: { label: 'Learn', icon: 'learn' },
   settings: { label: 'Settings', icon: 'gear' },
@@ -73,6 +76,8 @@ const sheet = createSheet(dock);
 const taskChat = createTaskChat(dock);
 const diffPanel = createDiffPanel(dock);
 const talk = createTalkSheet(dock);
+const runPanel = createRunPanel(dock);
+bus.on('wf-run-panel', ({ runId, want }) => runPanel.show(runId, want)); // the Workflows view says which run's timeline to show
 const shelf = createShelf({ dock, talk, sheet, taskChat, diffPanel });
 bus.on('toggle-panels', () => shelf.toggleAll());
 startTaskLinks();
@@ -169,6 +174,8 @@ function renderChrome() {
   badge('office', running, 'accent', `${running} running`);
   const waiting = sel.openQuestions().length + sel.choiceTasks().length;
   badge('inbox', waiting, 'indigo', `${waiting} waiting for you`);
+  const liveRuns = sel.activeRuns().length;
+  badge('workflows', liveRuns, 'accent', `${liveRuns} run${liveRuns === 1 ? '' : 's'} in progress`);
 }
 function badge(v, n, tone, title) {
   const b = navBadges[v];

@@ -120,6 +120,7 @@ export async function startHub(opts = {}) {
   }
 
   await remote.init(); // phone access comes back only if it was on when the hub last stopped
+  try { hub.wf.tick(); } catch (e) { log.error('workflow resume failed', e); } // v0.9: runs in flight when the hub stopped carry on
 
   let timer = null;
   if (cfg.sweep) {

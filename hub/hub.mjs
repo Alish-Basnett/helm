@@ -9,10 +9,10 @@ import {
 } from './projections.mjs';
 import { computeDiff, diffStat } from './diff.mjs';
 import { search as ftsSearch, learn as ftsLearn } from './search.mjs';
+import { WfEngine } from './wfengine.mjs';
 
-export class HttpError extends Error {
-  constructor(status, message) { super(message); this.status = status; }
-}
+import { HttpError } from './errors.mjs';
+export { HttpError };
 const bad = (m) => new HttpError(400, m);
 const notFound = (m) => new HttpError(404, m);
 
@@ -21,6 +21,7 @@ const isObj = (v) => v && typeof v === 'object' && !Array.isArray(v);
 const TABLES = [
   'projects', 'sessions', 'agents', 'tasks', 'notes', 'activity', 'late_completions',
   'agent_files', 'conflicts', 'questions', 'jobs', 'digests', 'attachments', 'usage', 'task_diffs',
+  'workflows', 'workflow_versions', 'runs', 'run_nodes', 'steps',
 ];
 const START_FROM = ['backlog', 'next', 'later', 'blocked'];
 const DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
@@ -42,6 +43,8 @@ export class Hub {
     this.closed = false;
     this.inAuto = false;            // re-entrancy guard for autoTick (also held during rebuild)
     this.lastAuto = [];             // task ids the most recent autoTick started
+    this.replaying = false;         // true during rebuild(): replay applies recorded workflow events and never decides
+    this.wf = new WfEngine(this);   // v0.9 workflows: decisions + commands (the reducer lives in workflows.mjs)
   }
   now() { return this.clock(); }
   setClock(fn) { this.clock = fn; }
@@ -54,7 +57,7 @@ export class Hub {
       onRollback: () => { this.p.dirty = false; },
     });
     // v0.7: every committed ingest / command may free the project's slot, so re-evaluate auto mode.
-    if (outer) this.autoTick();
+    if (outer) { this.autoTick(); this.wf.tick(); } // v0.9: results/steps/sessions may have unblocked a workflow run
     return r;
   }
   seqNow() {
@@ -106,6 +109,7 @@ export class Hub {
     if (!Number.isSafeInteger(e.seq) || e.seq < 0) return 'seq must be a non-negative integer';
     if (!isStr(e.type) || !e.type || e.type.length > 64) return 'type must be a non-empty string';
     if (e.type.startsWith('hub.')) return 'reserved event type';
+    if (e.type.startsWith('wf.') && e.type !== 'wf.step.result') return 'reserved event type'; // only step results come from mods
     if (e.at !== undefined && !(typeof e.at === 'number' && Number.isFinite(e.at))) return 'at must be a number';
     if (e.data !== undefined && !isObj(e.data)) return 'data must be an object';
     return null;
@@ -242,7 +246,8 @@ export class Hub {
     const t0 = Date.now();
     let replayed = 0;
     this.inAuto = true; // replay must never emit new events
-    try { this.rebuildInner(() => replayed++); } finally { this.inAuto = false; }
+    this.replaying = true;
+    try { this.rebuildInner(() => replayed++); } finally { this.inAuto = false; this.replaying = false; }
     return { replayed, ms: Date.now() - t0 };
   }
   rebuildInner(count) {
@@ -325,6 +330,7 @@ export class Hub {
   sweep(now = this.now()) {
     const r = this.sweepCore(now);
     this.autoTick(now); // backoff / starting windows expire with time, not with an event
+    this.wf.tick(now);  // unclaimed / overdue workflow steps time out, waiting runs are re-evaluated
     return r;
   }
   sweepCore(now) {
@@ -398,10 +404,12 @@ export class Hub {
       jobs = q(jSql('1 = 1'));
       digests = q('SELECT * FROM digests ORDER BY date DESC, created_at DESC, rowid DESC LIMIT 14');
     }
+    const { workflows, runs } = this.wf.stateSlice(projectId);
     return {
       projects, sessions: sessions.map(toSession), agents: agents.map(toAgent),
       tasks: tasks.map(toTask), notes: notes.map(toNote), questions: questions.map(toQuestion),
-      jobs: jobs.map(toJob), digests: digests.map(toDigest), usageToday: usageToday(this.db, this.now()), seq: this.seqNow(),
+      jobs: jobs.map(toJob), digests: digests.map(toDigest), workflows, runs,
+      usageToday: usageToday(this.db, this.now()), seq: this.seqNow(),
     };
   }
   tasks({ sessionId, status, projectId } = {}) {
@@ -759,7 +767,9 @@ export class Hub {
   }
 
   dismissQuestion(id, at = this.now()) {
-    if (!this.p.getQuestion(id)) throw notFound('question not found');
+    const q = this.p.getQuestion(id);
+    if (!q) throw notFound('question not found');
+    if (q.kind === 'approval' && q.state === 'open') throw new HttpError(409, 'this is a workflow gate: approve or reject it instead');
     return this.tx(() => ({ question: this.command('hub.question.dismiss', { id }, at) }));
   }
 

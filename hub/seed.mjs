@@ -575,6 +575,9 @@ export function seed(hub, log) {
     a.fn();
   }
 
+  // v0.9: one workflow from the built-in template, so the Workflows screen has something to open (no run: that needs a live mod)
+  if (ids.P1) hub.wf.createWorkflow({ projectId: ids.P1, template: 'build-test-review' }, clock);
+
   // A real git repo for the JWT task so the demo shows real diffs (skipped quietly when git is unavailable).
   let gitTaskId = null;
   try {

@@ -6,6 +6,7 @@
 //   * decisions that depend on "now" (sweeps, command validation) are made BEFORE the event is
 //     recorded and are carried in the event data
 import path from 'node:path';
+import { applyWf, bookRunUsage } from './workflows.mjs';
 
 export const STALL_REASON = 'no activity for 10 min';
 export const SENDING_TIMEOUT_ERROR = 'delivery unconfirmed — retry';
@@ -57,6 +58,7 @@ export const toTask = (r) => ({
   conflicts: parse(r.conflicts, []), explainer: r.explainer ?? null, explainJob: parse(r.explain_job, null),
   startNoteId: r.start_note_id ?? null, git: parse(r.git, null), diffStat: parse(r.diff_stat, null),
   choices: parse(r.choices, []), parentTaskId: r.parent_task_id ?? null, autoStartedAt: r.auto_started_at ?? null,
+  runId: r.run_id ?? null, nodeId: r.node_id ?? null,
 });
 export const toNote = (r) => ({
   id: r.id, target: { kind: r.target_kind, id: r.target_id }, sessionId: r.session_id, text: r.text,
@@ -72,6 +74,7 @@ export const toActivity = (r) => ({
 export const toQuestion = (r) => ({
   id: r.id, sessionId: r.session_id, agentId: r.agent_id ?? null, taskId: r.task_id ?? null, kind: r.kind,
   text: r.text, toolUseId: r.tool_use_id ?? null, state: r.state, createdAt: r.created_at, answeredAt: r.answered_at ?? null,
+  ...(r.kind === 'approval' ? { runId: r.run_id ?? null, nodeId: r.node_id ?? null } : {}), // v0.9: only approvals carry a run link
 });
 export const toJob = (r) => ({
   id: r.id, kind: r.kind, sessionId: r.session_id, taskId: r.task_id ?? null, projectId: r.project_id ?? null,
@@ -82,7 +85,9 @@ export const toDigest = (r) => ({
   id: r.id, date: r.date, projectId: r.project_id ?? null, text: r.text, createdAt: r.created_at,
 });
 
-export const USAGE_KINDS = ['recap', 'answer', 'explain', 'digest', 'note_turn'];
+export const USAGE_KINDS = ['recap', 'answer', 'explain', 'digest', 'note_turn', 'wf_step', 'wf_review', 'wf_draft'];
+/** Kinds that count as work the user asked for (the rest is Helm's own overhead). */
+export const REQUESTED_KINDS = ['note_turn', 'wf_step'];
 export const NOTE_VIAS = ['prompt', 'send_message', 'followup_spawn', 'answer', 'start'];
 export const MAX_NOTE_ATTACHMENTS = 10;
 const pad2 = (n) => String(n).padStart(2, '0');
@@ -109,7 +114,7 @@ export function usageSummary(db, now, days = 7) {
     const date = localDate(r.at);
     const b = buckets.get(date);
     if (!b) continue;
-    const req = r.kind === 'note_turn';
+    const req = REQUESTED_KINDS.includes(r.kind);
     if (req) b.requestedUsd += r.cost_usd; else b.overheadUsd += r.cost_usd;
     if (date === today) {
       if (req) tReq += r.cost_usd; else tOver += r.cost_usd;
@@ -550,6 +555,7 @@ export class Projector {
       case 'task.choices': return this.onTaskChoices(ev);
       case 'hub.task.choices': return this.hTaskChoices(ev);
       default:
+        if (ev.type.startsWith('wf.')) return applyWf(this, ev);
         this.log?.warn(`unknown event type ignored: ${ev.type}`);
         return null;
     }
@@ -964,19 +970,20 @@ export class Projector {
   }
 
   // ------------------------------------------------------------------ questions
-  createQuestion({ sessionId, agentId, taskId, kind, text, toolUseId, at, hint = '' }) {
+  createQuestion({ sessionId, agentId, taskId, kind, text, toolUseId, at, hint = '', runId = null, nodeId = null }) {
     const id = this.nextId('Q');
     this.db.run(
-      `INSERT INTO questions(id, session_id, agent_id, task_id, kind, text, tool_use_id, state, created_at, answered_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, NULL)`, id, sessionId, agentId, taskId, kind, text, toolUseId, at);
-    this.setDoc('question', id, kind === 'ask' ? cut(text, 120) : 'Waiting for input', kind === 'ask' ? text : hint,
-      { sessionId, taskId, at });
+      `INSERT INTO questions(id, session_id, agent_id, task_id, kind, text, tool_use_id, state, created_at, answered_at, run_id, node_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, NULL, ?, ?)`, id, sessionId, agentId, taskId, kind, text, toolUseId, at, runId, nodeId);
+    const title = kind === 'ask' ? cut(text, 120) : kind === 'approval' ? `Approval: ${cut(text, 100)}` : 'Waiting for input';
+    this.setDoc('question', id, title, kind === 'ask' ? text : hint, { sessionId, taskId, at });
     this.pushQuestion(id);
     return id;
   }
   /** Mark matching open questions answered. Filters: agentId, sessionId, toolUseId, kind. */
   answerQuestions(f, at) {
     const where = [`state = 'open'`], p = [];
+    if (!f.kind) where.push(`kind != 'approval'`); // a workflow gate is only ever answered by a decision, never by session churn
     if (f.agentId) { where.push('agent_id = ?'); p.push(f.agentId); }
     if (f.sessionId) { where.push('session_id = ?'); p.push(f.sessionId); }
     if (f.toolUseId) { where.push('tool_use_id = ?'); p.push(f.toolUseId); }
@@ -1094,7 +1101,10 @@ export class Projector {
       projectId: d.projectId, sessionId: d.sessionId ?? null, title: str(d.title), description: str(d.description),
       status: d.status || 'backlog', dependsOn: d.dependsOn || [], at: ev.at,
     });
-    if (d.parentTaskId) { this.upd('tasks', t.id, { parent_task_id: str(d.parentTaskId) }); this.pushTask(t.id); return toTask(this.getTask(t.id)); }
+    const extra = {};
+    if (d.parentTaskId) extra.parent_task_id = str(d.parentTaskId);
+    if (d.runId) { extra.run_id = str(d.runId); extra.node_id = str(d.nodeId) || null; } // v0.9: a workflow run created this card
+    if (Object.keys(extra).length) { this.upd('tasks', t.id, extra); this.pushTask(t.id); return toTask(this.getTask(t.id)); }
     return toTask(t);
   }
   // ----------------------------------------------------------------- choices (v0.6)
@@ -1194,12 +1204,12 @@ export class Projector {
       this.log?.warn(`helm.usage ignored: bad kind/costUsd (${kind}, ${d.costUsd})`);
       return;
     }
-    const tok = (v) => (Number.isFinite(Number(v)) && Number(v) > 0 ? Math.round(Number(v)) : 0);
-    this.db.run(
-      `INSERT INTO usage(at, session_id, kind, model, input_tokens, output_tokens, cache_read_tokens, cost_usd, task_id, note_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      ev.at, ev.sessionId, kind, cut(str(d.model), 100), tok(d.inputTokens), tok(d.outputTokens), tok(d.cacheReadTokens),
-      cost, d.taskId == null ? null : str(d.taskId), d.noteId == null ? null : str(d.noteId));
+    // v0.9: rows that carry runId + nodeId also roll up into that run node (and so the run total).
+    bookRunUsage(this, {
+      at: ev.at, sessionId: ev.sessionId, kind, model: d.model, inputTokens: d.inputTokens, outputTokens: d.outputTokens,
+      cacheReadTokens: d.cacheReadTokens, costUsd: cost, taskId: d.taskId, noteId: d.noteId,
+      runId: d.runId == null ? null : str(d.runId), nodeId: d.nodeId == null ? null : str(d.nodeId),
+    });
     // The pushed row uses the wall clock ("today"), but only the SSE `changes` feed depends on it, never a projection table.
     this.emit('usage', 'upsert', usageToday(this.db, this.clock()));
   }

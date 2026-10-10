@@ -19,6 +19,7 @@ async function request(method, path, body, opts = {}) {
   if (!res.ok) {
     const err = new Error((data && data.error) || `${method} ${path} failed (${res.status})`);
     err.status = res.status;
+    err.data = data; // e.g. { error, issues } from a rejected workflow save
     throw err;
   }
   return data;
@@ -70,6 +71,18 @@ export const api = {
   usage: (days = 7) => request('GET', `/v1/usage${q({ days })}`),
   // cost analytics: spend per day / project / model / task (404 on hubs that predate it)
   usageBreakdown: (days = 7) => request('GET', `/v1/usage/breakdown${q({ days })}`),
+  // v0.9 workflows
+  workflow: (id) => request('GET', `/v1/workflows/${enc(id)}`),
+  createWorkflow: (body) => request('POST', '/v1/workflows', body),
+  saveWorkflow: (id, graph, summary) => request('PUT', `/v1/workflows/${enc(id)}`, { graph, summary }),
+  patchWorkflow: (id, patch) => request('PATCH', `/v1/workflows/${enc(id)}`, patch),
+  restoreWorkflow: (id, version) => request('POST', `/v1/workflows/${enc(id)}/restore`, { version }),
+  validateGraph: (graph, opts) => request('POST', '/v1/workflows/validate', { graph }, opts),
+  runWorkflow: (id, body) => request('POST', `/v1/workflows/${enc(id)}/run`, body || {}),
+  run: (id) => request('GET', `/v1/runs/${enc(id)}`),
+  runControl: (id, action) => request('POST', `/v1/runs/${enc(id)}/${action}`),
+  nodeControl: (id, nodeId, action) => request('POST', `/v1/runs/${enc(id)}/nodes/${enc(nodeId)}/${action}`),
+  decideGate: (id, nodeId, decision, comment) => request('POST', `/v1/runs/${enc(id)}/gates/${enc(nodeId)}`, { decision, ...(comment ? { comment } : {}) }),
   attachmentUrl: (id) => `/v1/attachments/${enc(id)}`,
   /** Raw-body upload with progress. Resolves { attachment }; rejects with err.status (404/405 = hub too old). */
   uploadAttachment(file, { onProgress, signal } = {}) {

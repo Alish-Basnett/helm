@@ -2,7 +2,7 @@
 import { h, reconcile, setText, setClass, setHidden, setAttr, bus, startTicker } from '../dom.js';
 import { icon } from '../icons.js';
 import { state, sel, lsGet, lsSet, setUI } from '../store.js';
-import { patchTask, createTask, quickActions, runQuickAction, startTask, canStart, startDrafts, setAutoStart, autoTarget } from '../actions.js';
+import { patchTask, createTask, quickActions, runQuickAction, startTask, canStart, startDrafts, setAutoStart, autoTarget, decideGate } from '../actions.js';
 import { createStartStatus } from '../replies.js';
 import { fmtElapsed, fmtTokens, truncate, agentLabel, STATUS_META, MAIN_COLUMNS, LANES, plural } from '../format.js';
 import { avatar, updateAvatar, modelBadge, updateModelBadge, nowDoingLine, statusDot, toast, openMenu } from '../ui.js';
@@ -19,6 +19,8 @@ export function mount(container) {
   let needsRender = false;
   let doneExpanded = false;
   let onlyNeeds = lsGet('helm.board.needsMe') === '1';
+  let groupByRun = lsGet('helm.board.groupRun') === '1'; // v0.9: cards made by a workflow run sit under one header per run
+  const collapsedRuns = new Set((() => { try { return JSON.parse(lsGet('helm.board.runsCollapsed') || '[]'); } catch { return []; } })());
   const cols = {}; // status -> {el, body, count, composer, ...}
   let nextUpIds = new Set(); // v0.7: the top Up next card of every project that is on Auto
 
@@ -32,7 +34,10 @@ export function mount(container) {
   const needsBtn = h('button', { class: 'needs-toggle', type: 'button', 'aria-pressed': String(onlyNeeds), title: 'Show only cards waiting for you (y jumps to the next one)',
     onclick: () => { onlyNeeds = !onlyNeeds; lsSet('helm.board.needsMe', onlyNeeds ? '1' : '0'); render(); } },
   h('span', { class: 'needs-dot', 'aria-hidden': 'true' }), h('span', {}, 'Needs me'), needsBtnCount);
-  const bar = h('div', { class: 'board-bar' }, needsBtn);
+  const groupBtn = h('button', { class: 'needs-toggle board-group', type: 'button', 'aria-pressed': String(groupByRun), title: 'Put the cards of each workflow run under one header',
+    onclick: () => { groupByRun = !groupByRun; lsSet('helm.board.groupRun', groupByRun ? '1' : '0'); render(); } },
+  icon('workflow', 14), h('span', {}, 'Group by run'));
+  const bar = h('div', { class: 'board-bar' }, needsBtn, groupBtn);
   const root = h('div', { class: 'board' }, bar, banner, colsEl, lanesEl);
   container.appendChild(root);
 
@@ -207,6 +212,10 @@ export function mount(container) {
     r.files = h('span', { class: 'meta-item' }, icon('file', 13), h('span', { class: 'mono' }));
     r.dep = h('span', { class: 'dep-badge mono' }, icon('link', 12), h('span', {}));
     r.meta = h('div', { class: 'card-meta' }, r.elapsed, r.tokens, r.files, r.dep);
+    r.run = h('button', { class: 'run-chip', type: 'button', hidden: true });
+    r.run.addEventListener('click', (e) => { e.stopPropagation(); const rid = r.run.__run; const run = state.runs.get(rid); if (run) navigate('workflows', [run.workflowId], { run: rid }); });
+    r.approve = h('button', { class: 'card-approve', type: 'button' }, icon('check', 14), 'Approve');
+    r.approve.addEventListener('click', (e) => { e.stopPropagation(); const g = sel.gateOfTask(el.__task); if (g) decideGate(g.run.id, g.node.nodeId, 'approve'); });
     r.nextUp = h('span', { class: 'next-up-chip', hidden: true, title: 'Auto mode starts this task next, once nothing is in progress' }, h('span', { 'aria-hidden': 'true' }, '⟳'), h('span', {}, 'Next up'));
     r.choices = h('button', { class: 'choices-chip', type: 'button', hidden: true }, h('span', { 'aria-hidden': 'true' }, '◆'), h('span', {}));
     r.choices.addEventListener('click', (e) => { e.stopPropagation(); openTask(r.choices.__task); });
@@ -214,7 +223,7 @@ export function mount(container) {
     r.start = createStartStatus();
     r.actions = h('div', { class: 'card-actions' });
     const el = h('article', { class: 'card', tabindex: '0', draggable: 'true', 'data-id': t.id, role: 'group' },
-      r.actions, r.need, r.title, h('div', { class: 'card-sub' }, r.id, r.proj, r.conflict, r.choices, r.nextUp), r.agent, r.blocked, r.start.el, r.meta);
+      r.actions, r.need, r.title, h('div', { class: 'card-sub' }, r.id, r.proj, r.run, r.conflict, r.choices, r.nextUp), r.agent, r.blocked, r.start.el, r.meta, r.approve);
     el.__r = r;
     el.__animate = !!animate;
     el.__needs = null; // unknown until first update; a card created already waiting pulses once when the board has rendered before
@@ -281,6 +290,12 @@ export function mount(container) {
       setText(r.conflict.lastChild, plural(conflicts.length, 'file'));
       r.conflict.title = conflicts.map((c) => `${c.path} → ${c.otherTaskId || 'another agent'}`).join('\n');
     }
+    // v0.9: workflow run chip + the green Approve of a waiting gate
+    const run = t.runId ? state.runs.get(t.runId) : null;
+    setHidden(r.run, !t.runId);
+    if (t.runId) { r.run.__run = t.runId; setText(r.run, `${t.runId} · ${t.nodeId || 'run'}`); r.run.title = run ? `Open ${t.runId} on the canvas` : t.runId; }
+    const gate = sel.gateOfTask(t);
+    setClass(el, 'is-gate', !!gate);
     setHidden(r.nextUp, !(t.status === 'next' && nextUpIds.has(t.id)));
     const nChoices = sel.openChoiceCount(t);
     setHidden(r.choices, nChoices === 0);
@@ -366,6 +381,46 @@ export function mount(container) {
   }
   function refocus(id) {
     requestAnimationFrame(() => { const el = root.querySelector(`.card[data-id="${CSS.escape(id)}"]`); el && el.focus({ preventScroll: false }); });
+  }
+
+  /* ---------- v0.9: group by run ---------- */
+  function withRunHeads(list) {
+    const out = [];
+    const done = new Set();
+    for (const t of list) {
+      if (!t.runId) { out.push({ key: t.id, t }); continue; }
+      if (done.has(t.runId)) continue;
+      done.add(t.runId);
+      const group = list.filter((x) => x.runId === t.runId);
+      const collapsed = collapsedRuns.has(t.runId);
+      out.push({ key: `run:${t.runId}`, head: true, runId: t.runId, count: group.length, collapsed });
+      if (!collapsed) for (const g of group) out.push({ key: g.id, t: g });
+    }
+    return out;
+  }
+  function createRunHead(it) {
+    const el = h('button', { class: 'run-head', type: 'button', 'aria-expanded': 'true' },
+      icon('chevronDown', 14), h('span', { class: 'run-head-id' }), h('span', { class: 'run-head-t' }), h('span', { class: 'run-head-n' }));
+    el.addEventListener('click', () => {
+      const id = el.__it.runId;
+      if (collapsedRuns.has(id)) collapsedRuns.delete(id); else collapsedRuns.add(id);
+      lsSet('helm.board.runsCollapsed', JSON.stringify([...collapsedRuns]));
+      render();
+    });
+    return el;
+  }
+  function updateRunHead(el, it) {
+    el.__it = it;
+    const run = state.runs.get(it.runId);
+    const wf = run ? state.workflows.get(run.workflowId) : null;
+    const nodes = run ? run.nodes : [];
+    const doneN = nodes.filter((n) => n.state === 'ok' || n.state === 'skipped').length;
+    setClass(el, 'collapsed', it.collapsed);
+    el.setAttribute('aria-expanded', String(!it.collapsed));
+    setText(el.children[1], it.runId);
+    setText(el.children[2], wf ? wf.name : 'Workflow run');
+    setText(el.children[3], run ? `(${doneN}/${nodes.length}) · ${it.count} here` : `${it.count} here`);
+    el.title = it.collapsed ? 'Show these cards' : 'Hide these cards';
   }
 
   /* ---------- ordering + dnd ---------- */
@@ -468,6 +523,8 @@ export function mount(container) {
     for (const t of tasks) (byStatus[t.status] ||= []).push(t);
     let needTotal = 0;
     setAttr(needsBtn, 'aria-pressed', String(onlyNeeds));
+    setAttr(groupBtn, 'aria-pressed', String(groupByRun));
+    setClass(groupBtn, 'on', groupByRun);
     setClass(needsBtn, 'on', onlyNeeds);
     for (const status of [...MAIN_COLUMNS, ...LANES]) {
       let list = status === 'done' ? (byStatus[status] || []).sort(cmpDone) : sortNeedsFirst(byStatus[status] || []);
@@ -479,7 +536,9 @@ export function mount(container) {
       if (onlyNeeds) list = list.filter(needsOf);
       const total = list.length;
       if (status === 'done' && !doneExpanded) list = list.slice(0, DONE_LIMIT);
-      reconcile(c.body, list, (t) => t.id, createCard, updateCard);
+      const items = groupByRun ? withRunHeads(list) : list.map((t) => ({ key: t.id, t }));
+      reconcile(c.body, items, (it) => it.key, (it, animate) => (it.head ? createRunHead(it) : createCard(it.t, animate)),
+        (el, it) => (it.head ? updateRunHead(el, it) : updateCard(el, it.t)));
       c.body.setAttribute('data-empty', onlyNeeds ? 'Nothing here needs you' : (status === 'done' ? 'Nothing done yet' : status === 'later' ? 'Park tasks here to come back to them' : status === 'blocked' ? 'Nothing is blocked' : 'Drop tasks here'));
       setText(c.count, String(total));
       if (status === 'done') {
@@ -537,7 +596,7 @@ export function mount(container) {
   if (state.ui.pendingNewTask) { setUI({ pendingNewTask: false }); openComposer('backlog'); }
 
   return {
-    watch: ['task', 'agent', 'project', 'session', 'ui', 'ready', 'question', 'note'],
+    watch: ['task', 'agent', 'project', 'session', 'ui', 'ready', 'question', 'note', 'run', 'workflow'],
     update: render,
     setRoute() {},
     destroy() { offNew(); document.removeEventListener('keydown', onYKey); root.remove(); },

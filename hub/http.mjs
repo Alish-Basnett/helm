@@ -86,6 +86,7 @@ route('GET', '/v1/tasks/:id', ({ hub, params }) => hub.taskDetail(params.id));
 route('PATCH', '/v1/tasks/:id', async ({ hub, params, json }) => hub.updateTask(params.id, await json()));
 route('GET', '/v1/sessions/:id/inbox', ({ hub, params }) => hub.claimInbox(params.id));
 route('GET', '/v1/sessions/:id/jobs', ({ hub, params }) => hub.claimJobs(params.id));
+route('GET', '/v1/sessions/:id/steps', ({ hub, params }) => hub.wf.claimSteps(params.id));
 route('GET', '/v1/sessions/:id/agents', ({ hub, params }) => ({ agents: hub.sessionAgents(params.id) }));
 route('GET', '/v1/sessions/:id/project', ({ hub, params }) => ({ project: hub.sessionProject(params.id) }));
 route('GET', '/v1/sessions/:id/activity', ({ hub, params, query }) => {
@@ -102,6 +103,25 @@ route('POST', '/v1/digest', async ({ hub, json }) => hub.requestDigest(await jso
 route('GET', '/v1/digests', ({ hub, query }) => ({
   digests: hub.digests({ projectId: query.get('projectId') || undefined, limit: intParam(query.get('limit'), 14, 1, 200) }),
 }));
+// v0.9 workflows
+route('GET', '/v1/workflows', ({ hub, query }) => ({ workflows: hub.wf.listWorkflows({ projectId: query.get('projectId') || undefined }) }));
+route('POST', '/v1/workflows', async ({ hub, json }) => created(hub.wf.createWorkflow(await json())));
+route('POST', '/v1/workflows/validate', async ({ hub, json }) => hub.wf.validate((await json()).graph));
+route('GET', '/v1/workflows/:id', ({ hub, params }) => hub.wf.workflowDetail(params.id));
+route('PUT', '/v1/workflows/:id', async ({ hub, params, json }) => hub.wf.saveWorkflow(params.id, await json()));
+route('PATCH', '/v1/workflows/:id', async ({ hub, params, json }) => hub.wf.updateWorkflow(params.id, await json()));
+route('POST', '/v1/workflows/:id/restore', async ({ hub, params, json }) => hub.wf.restoreVersion(params.id, await json()));
+route('POST', '/v1/workflows/:id/run', async ({ hub, params, json }) => created(hub.wf.runWorkflow(params.id, await json())));
+route('GET', '/v1/runs', ({ hub, query }) => ({
+  runs: hub.wf.listRuns({ workflowId: query.get('workflowId') || undefined, status: query.get('status') || undefined }),
+}));
+route('GET', '/v1/runs/:id', ({ hub, params }) => hub.wf.runDetail(params.id));
+route('POST', '/v1/runs/:id/pause', ({ hub, params }) => hub.wf.pauseRun(params.id));
+route('POST', '/v1/runs/:id/resume', ({ hub, params }) => hub.wf.resumeRun(params.id));
+route('POST', '/v1/runs/:id/abort', ({ hub, params }) => hub.wf.abortRun(params.id));
+route('POST', '/v1/runs/:id/nodes/:nodeId/retry', ({ hub, params }) => hub.wf.retryNode(params.id, params.nodeId));
+route('POST', '/v1/runs/:id/nodes/:nodeId/skip', ({ hub, params }) => hub.wf.skipNode(params.id, params.nodeId));
+route('POST', '/v1/runs/:id/gates/:nodeId', async ({ hub, params, json }) => hub.wf.decideGate(params.id, params.nodeId, await json()));
 route('GET', '/v1/conflicts', ({ hub }) => ({ conflicts: hub.conflicts() }));
 route('GET', '/v1/questions', ({ hub, query }) => ({ questions: hub.questions({ state: query.get('state') || undefined }) }));
 route('POST', '/v1/questions/:id/dismiss', ({ hub, params }) => hub.dismissQuestion(params.id));
@@ -341,7 +361,7 @@ export function createHandler({ hub, cfg, log, boot = {}, viaTcp, sseClients, re
       if (!matched) {
         return sendJson(res, pathMatched ? 405 : 404, { error: pathMatched ? 'method not allowed' : 'not found' }, cors);
       }
-      const isInbox = /\/(inbox|jobs)$/.test(pathname); // GETs that claim (mutate) rows get the CSRF guard too
+      const isInbox = /\/(inbox|jobs|steps)$/.test(pathname); // GETs that claim (mutate) rows get the CSRF guard too
       guard(req, viaTcp, method !== 'GET' && method !== 'HEAD' || isInbox, remoteListener);
 
       const ctx = {
@@ -358,7 +378,7 @@ export function createHandler({ hub, cfg, log, boot = {}, viaTcp, sseClients, re
       if (res.headersSent) { try { res.destroy(); } catch { /* ignore */ } return; }
       if (e instanceof HttpError) {
         const headers = e.status === 413 ? { Connection: 'close' } : {};
-        return sendJson(res, e.status, { error: e.message }, headers);
+        return sendJson(res, e.status, { error: e.message, ...(e.extra || {}) }, headers);
       }
       log?.error(`unhandled error for ${req.method} ${req.url}`, e);
       return sendJson(res, 500, { error: 'internal error' });

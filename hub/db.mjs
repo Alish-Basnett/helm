@@ -141,6 +141,39 @@ CREATE TABLE IF NOT EXISTS task_diffs (
   task_id TEXT PRIMARY KEY, diff TEXT NOT NULL, at INTEGER NOT NULL
 );
 
+-- v0.9: Workflows. workflows/versions are the graph store; runs/run_nodes/steps are the execution state
+-- (all projections of wf.* events; see hub/workflows.mjs).
+CREATE TABLE IF NOT EXISTS workflows (
+  id TEXT PRIMARY KEY, project_id TEXT NOT NULL, name TEXT NOT NULL, current_version INTEGER NOT NULL DEFAULT 1,
+  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, archived INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS workflows_project ON workflows(project_id);
+CREATE TABLE IF NOT EXISTS workflow_versions (
+  workflow_id TEXT NOT NULL, version INTEGER NOT NULL, graph TEXT NOT NULL, author TEXT NOT NULL DEFAULT 'user',
+  summary TEXT NOT NULL DEFAULT '', parent_version INTEGER, created_at INTEGER NOT NULL,
+  PRIMARY KEY (workflow_id, version)
+);
+CREATE TABLE IF NOT EXISTS runs (
+  id TEXT PRIMARY KEY, workflow_id TEXT NOT NULL, version INTEGER NOT NULL, project_id TEXT NOT NULL,
+  status TEXT NOT NULL, params TEXT NOT NULL DEFAULT '{}', driver_session_id TEXT, budget_usd REAL,
+  cost_usd REAL NOT NULL DEFAULT 0, started_at INTEGER NOT NULL, ended_at INTEGER, error TEXT
+);
+CREATE INDEX IF NOT EXISTS runs_workflow ON runs(workflow_id);
+CREATE INDEX IF NOT EXISTS runs_status ON runs(status);
+CREATE TABLE IF NOT EXISTS run_nodes (
+  run_id TEXT NOT NULL, node_id TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending', attempt INTEGER NOT NULL DEFAULT 0,
+  task_id TEXT, agent_id TEXT, started_at INTEGER, ended_at INTEGER, output TEXT, error TEXT,
+  cost_usd REAL NOT NULL DEFAULT 0, question_id TEXT,
+  PRIMARY KEY (run_id, node_id)
+);
+CREATE TABLE IF NOT EXISTS steps (
+  id TEXT PRIMARY KEY, run_id TEXT NOT NULL, node_id TEXT NOT NULL, attempt INTEGER NOT NULL, kind TEXT NOT NULL,
+  session_id TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'queued', input TEXT NOT NULL DEFAULT '{}', result TEXT,
+  error TEXT, task_id TEXT, created_at INTEGER NOT NULL, claimed_at INTEGER, done_at INTEGER, not_before INTEGER
+);
+CREATE INDEX IF NOT EXISTS steps_session ON steps(session_id, state);
+CREATE INDEX IF NOT EXISTS steps_run ON steps(run_id, node_id, attempt);
+
 CREATE TABLE IF NOT EXISTS changes (
   seq INTEGER PRIMARY KEY AUTOINCREMENT, entity TEXT NOT NULL, op TEXT NOT NULL, row TEXT NOT NULL
 );
@@ -212,6 +245,15 @@ export class Db {
     // v0.7 (T-41): Up next auto mode. Additive + defaulted, safe on a live database; `helmd --rebuild` back-fills.
     if (!has('projects', 'auto_start')) this.raw.exec('ALTER TABLE projects ADD COLUMN auto_start INTEGER NOT NULL DEFAULT 0');
     if (!has('tasks', 'auto_started_at')) this.raw.exec('ALTER TABLE tasks ADD COLUMN auto_started_at INTEGER');
+    // v0.9: Workflows. The workflow tables come from SCHEMA; tasks, questions and usage learn which run/node they belong to.
+    // Additive + nullable, safe on a live database; `helmd --rebuild` back-fills nothing (no old events mention runs).
+    if (!has('tasks', 'run_id')) this.raw.exec('ALTER TABLE tasks ADD COLUMN run_id TEXT');
+    if (!has('tasks', 'node_id')) this.raw.exec('ALTER TABLE tasks ADD COLUMN node_id TEXT');
+    if (!has('questions', 'run_id')) this.raw.exec('ALTER TABLE questions ADD COLUMN run_id TEXT');
+    if (!has('questions', 'node_id')) this.raw.exec('ALTER TABLE questions ADD COLUMN node_id TEXT');
+    if (!has('usage', 'run_id')) this.raw.exec('ALTER TABLE usage ADD COLUMN run_id TEXT');
+    if (!has('usage', 'node_id')) this.raw.exec('ALTER TABLE usage ADD COLUMN node_id TEXT');
+    this.raw.exec('CREATE INDEX IF NOT EXISTS usage_run ON usage(run_id)');
   }
   prep(sql) {
     let s = this.cache.get(sql);

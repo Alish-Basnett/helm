@@ -206,6 +206,7 @@ function completeAgent(agentId: string, ok: boolean, summary: string, tokens: nu
   if (choices?.length) choiceQueue.push({ agentId, choices, tries: 0 })
   sendReplies(replyAgents.get(agentId), answer || summary)
   replyAgents.delete(agentId)
+  settleStepAgent(agentId, ok, answer, summary, tokens)
 }
 
 // Builders end with "FILES: a, b"; edits made through Bash never pass Edit/Write, so this is the reliable list.
@@ -376,6 +377,7 @@ async function tick($: any) {
     await flush($)
     await pollInbox($)
     await pollJobs($)
+    await pollSteps($)
     await captureGitBases($)
     if (hubUp && !outbox.length) await flushChoices($)
     if (hubUp && !outbox.length) {
@@ -450,6 +452,97 @@ async function runJob($: any, job: any) {
     emit('job.result', { jobId: job.id, ok: false, error: clip(String(err), 300) })
   }
   void flush($)
+}
+
+// ---------- workflow steps: the hub's Workflows engine asks this session to run agent / shell / review steps ----------
+const stepByAgent = new Map<string, string>()   // agentId → stepId
+const agentUsage = new Map<string, any>()       // agentId → its final turn usage (for workflow step cost)
+const stepByTask = new Map<string, string>()    // taskId → stepId (bound to the agent in our agent.spawn hook)
+let stepsDirty = false
+let stepsPolling = false
+let stepsMissingAt = 0
+
+function stepUsage(model: string, u: any) {
+  if (!u) return undefined
+  return {
+    model,
+    inputTokens: Number(u.input_tokens ?? 0) + Number(u.cache_creation_input_tokens ?? 0),
+    outputTokens: Number(u.output_tokens ?? 0),
+    cacheReadTokens: Number(u.cache_read_input_tokens ?? 0),
+    costUsd: costOf(model, u),
+  }
+}
+
+async function pollSteps($: any) {
+  // An older hub without the endpoint is re-checked every minute.
+  if (stepsPolling || !hubUp || Date.now() - stepsMissingAt < 60000) return
+  stepsPolling = true
+  try {
+    let steps: any[] = []
+    try {
+      steps = (await hub($, 'GET', `/v1/sessions/${sessionId}/steps`)).steps ?? []
+    } catch (err) {
+      if (/→ 404/.test(String(err))) stepsMissingAt = Date.now()
+      return
+    }
+    for (const step of steps) void runStep($, step)
+  } finally {
+    stepsPolling = false
+  }
+}
+
+async function runStep($: any, step: any) {
+  const input = step.input ?? {}
+  try {
+    if (step.kind === 'agent') {
+      // The hub already created the card; the [helm:T-n] tag binds this agent to it.
+      if (input.taskId) { stepByTask.set(input.taskId, step.id); stepsDirty = true }
+      const r = await $.agent.spawn({
+        prompt: String(input.prompt ?? ''), description: String(input.description ?? input.label ?? 'workflow step'),
+        subagentType: input.subagentType ?? 'helm:builder', model: input.model, cwd: input.cwd,
+      })
+      if (r?.deny) throw new Error(r.deny)
+      if (r?.agentId) { stepByAgent.set(r.agentId, step.id); stepsDirty = true }
+      return // the result is reported when the agent completes
+    }
+    if (step.kind === 'shell') {
+      const argv = Array.isArray(input.argv) && input.argv.length ? input.argv.map(String) : ['sh', '-c', String(input.script ?? 'true')]
+      let check: any
+      try {
+        const r = await $.process.run(argv, { cwd: input.cwd, timeoutMs: Math.min(Number(input.timeoutMs) || 30000, 600000) })
+        check = { exitCode: r.exitCode, stdout: String(r.stdout ?? '').slice(-8000), stderr: String(r.stderr ?? '').slice(-4000) }
+      } catch (err) {
+        const timedOut = /time|kill/i.test(String(err))
+        check = { exitCode: timedOut ? 124 : 1, stdout: '', stderr: clip(String(err), 2000), timedOut }
+      }
+      emit('wf.step.result', { stepId: step.id, ok: true, check, text: clip(check.stdout || check.stderr, 2000) })
+    } else if (step.kind === 'review') {
+      const r = await $.model.complete({
+        model: input.model ?? 'opus', system: input.system, prompt: String(input.prompt ?? ''),
+        maxTokens: Number(input.maxTokens) || 4096, timeoutMs: Number(input.timeoutMs) || 180000,
+      })
+      if (!r.isAnswered) throw new Error(`model: ${r.reason ?? 'no answer'}`)
+      const verdict = /VERDICT:\s*PASS/i.test(r.text.split('\n').reverse().find((l: string) => /VERDICT:/i.test(l)) ?? '') ? 'pass' : 'changes'
+      emit('wf.step.result', { stepId: step.id, ok: true, text: r.text.slice(0, 16000), verdict, usage: stepUsage(input.model ?? 'opus', r.usage) })
+    } else {
+      throw new Error(`unknown step kind ${step.kind}`)
+    }
+  } catch (err) {
+    emit('wf.step.result', { stepId: step.id, ok: false, error: clip(String(err), 400) })
+  }
+  void flush($)
+}
+
+/** An agent that was a workflow step finished: report it to the engine. */
+function settleStepAgent(agentId: string, ok: boolean, answer: string, summary: string, tokens: number | undefined) {
+  const stepId = stepByAgent.get(agentId)
+  if (!stepId) return
+  stepByAgent.delete(agentId)
+  for (const [t, s] of stepByTask) if (s === stepId) stepByTask.delete(t)
+  stepsDirty = true
+  const u = agentUsage.get(agentId)
+  agentUsage.delete(agentId)
+  emit('wf.step.result', { stepId, ok, agentId, text: String(answer || summary).slice(0, 16000), filesChanged: reportedFiles(answer), error: ok ? undefined : clip(summary, 400), usage: u ? stepUsage(String(u.model ?? 'sonnet'), u) : undefined })
 }
 
 // ---------- optional Obsidian export of recaps ----------
@@ -722,6 +815,9 @@ export const register: Register = (on, options) => {
       // A hot reload drops in-flight deliveries. Session notes were already queued in the engine
       // by $.prompt.submit, so they will arrive; record them as delivered. Anything else: failed (retryable).
       for (const id of ((await $.store.get(`done:${sessionId}`)) as string[] | undefined) ?? []) completedAgents.add(id)
+      const savedSteps = (await $.store.get(`steps:${sessionId}`)) as { agents?: [string, string][]; tasks?: [string, string][] } | undefined
+      for (const [k, v] of savedSteps?.agents ?? []) stepByAgent.set(k, v)
+      for (const [k, v] of savedSteps?.tasks ?? []) stepByTask.set(k, v)
       const savedReplies = (await $.store.get(`replies:${sessionId}`)) as { turns?: [string, string[]][]; agents?: [string, string[]][] } | undefined
       for (const [k, v] of savedReplies?.turns ?? []) replyTurns.set(k, v)
       for (const [k, v] of savedReplies?.agents ?? []) replyAgents.set(k, v)
@@ -763,6 +859,10 @@ export const register: Register = (on, options) => {
         if (outbox.length !== savedLen) {
           savedLen = outbox.length
           void saveOutbox($)
+        }
+        if (stepsDirty) {
+          stepsDirty = false
+          void $.store.set(`steps:${sessionId}`, { agents: [...stepByAgent], tasks: [...stepByTask] }).catch(() => {})
         }
         if (repliesDirty) {
           repliesDirty = false
@@ -814,6 +914,10 @@ export const register: Register = (on, options) => {
         const tag = String(a.description ?? '').match(/\[helm:(T-\d+)\]/)
         gitQueue.push({ toolUseId: a.tool_use_id, agentId: r?.agentId, cwd: a.cwd, tries: 0 })
         emit('agent.spawned', { toolUseId: a.tool_use_id, parentAgentId: a.parentAgentId, taskId: tag?.[1], subagentType: info.subagentType, model: info.model, description: clip(String(a.description ?? '').replace(/\[helm:T-\d+\]\s*/, ''), 160), prompt: clip(a.prompt, 4000) })
+        if (r?.agentId && tag?.[1] && stepByTask.has(tag[1])) {
+          stepByAgent.set(r.agentId, stepByTask.get(tag[1])!)
+          stepsDirty = true
+        }
         const followTask = String(a.description ?? '').match(/^\[helm:(T-\d+)\] follow-up/)?.[1]
         if (r?.agentId && followTask && pendingFollowups.has(followTask)) {
           for (const id of pendingFollowups.get(followTask)!) awaitAgentReply(r.agentId, id)
@@ -918,6 +1022,7 @@ export const register: Register = (on, options) => {
     try {
       probe(a.agentId ? 'turn.complete.subagent' : 'turn.complete.main', { ...a, answer: clip(a.answer, 300) })
       if (a.agentId) {
+        if (a.usage && stepByAgent.has(a.agentId)) agentUsage.set(a.agentId, a.usage)
         const ok = a.reason === 'answer'
         const tokens = a.usage ? Number(a.usage.input_tokens ?? 0) + Number(a.usage.output_tokens ?? 0) : undefined
         completeAgent(a.agentId, ok, ok ? String(a.answer ?? '') : a.reason === 'refusal' ? a.refusal?.explanation ?? 'refused' : `ended: ${a.reason}`, tokens, String(a.answer ?? ''))

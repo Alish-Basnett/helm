@@ -15,12 +15,13 @@ const SQL = `
 SELECT d.kind AS kind, d.ref AS ref, d.title AS title, d.session_id AS session_id, d.task_id AS task_id,
        d.at AS at,
        snippet(search, -1, char(1), char(2), '…', 14) AS snip,
-       COALESCE(CASE d.kind WHEN 'project' THEN d.ref END, t.project_id, s.project_id, dg.project_id) AS project_id
+       COALESCE(CASE d.kind WHEN 'project' THEN d.ref END, t.project_id, s.project_id, dg.project_id, wf.project_id) AS project_id
 FROM search
 JOIN search_docs d ON d.id = search.rowid
 LEFT JOIN tasks t ON t.id = d.task_id
 LEFT JOIN sessions s ON s.id = d.session_id
 LEFT JOIN digests dg ON d.kind = 'digest' AND dg.id = d.ref
+LEFT JOIN workflows wf ON d.kind = 'workflow' AND wf.id = d.ref
 WHERE search MATCH ?
 ORDER BY bm25(search, 5.0, 1.0), d.at DESC
 LIMIT ?`;

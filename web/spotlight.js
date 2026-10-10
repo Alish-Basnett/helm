@@ -20,8 +20,9 @@ const KIND = {
   recent: { label: 'Recent tasks', icon: 'clock' },
   question: { label: 'Questions', icon: 'question' },
   digest: { label: 'Digests', icon: 'calendar' },
+  workflow: { label: 'Workflows', icon: 'workflow' },
 };
-const KIND_ORDER = ['task', 'question', 'session', 'note', 'recap', 'digest', 'activity', 'project'];
+const KIND_ORDER = ['task', 'question', 'workflow', 'session', 'note', 'recap', 'digest', 'activity', 'project'];
 
 export function createSpotlight(root) {
   let isOpen = false;
@@ -61,6 +62,7 @@ export function createSpotlight(root) {
       { title: 'Go to Projects', icon: 'folder', run: () => navigate('projects') },
       { title: 'Go to Office', icon: 'office', run: () => navigate('office') },
       { title: 'Go to Threads', icon: 'threads', run: () => navigate('threads') },
+      { title: 'Go to Workflows', sub: 'Draw and run a flow of agents, checks and gates', icon: 'workflow', run: () => navigate('workflows') },
       { title: 'Go to Inbox', sub: 'Questions waiting for you', icon: 'inbox', run: () => navigate('inbox') },
       { title: 'Go to Learn', icon: 'learn', run: () => navigate('learn') },
       { title: 'Switch project: All projects', sub: state.ui.projectId === 'all' ? 'current' : '', icon: 'folder', run: () => setUI({ projectId: 'all' }) },
@@ -116,6 +118,7 @@ export function createSpotlight(root) {
       case 'activity': if (r.taskId) return openTask(r.taskId); if (r.sessionId) return navigate('threads', [r.sessionId]); return;
       case 'question': return navigate('inbox', r.id ? [r.id] : []);
       case 'digest': return navigate('learn', [], r.id ? { digest: r.id } : {});
+      case 'workflow': return navigate('workflows', [r.id]);
       case 'project': setUI({ projectId: r.id }); return navigate('board');
       default:
     }

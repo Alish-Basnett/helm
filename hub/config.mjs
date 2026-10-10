@@ -4,7 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const HUB_DIR = path.dirname(fileURLToPath(import.meta.url));
-export const VERSION = '0.11.0';
+export const VERSION = '0.12.0';
 
 const int = (v, d) => {
   if (v === undefined || v === null || v === '') return d;
@@ -34,6 +34,7 @@ export function loadConfig(o = {}, env = process.env) {
     autoBackoffMs: int(o.autoBackoffMs ?? env.HELM_AUTO_BACKOFF_MS, 5 * 60_000),   // wait after a failed auto-start
     sendingMs: int(o.sendingMs ?? env.HELM_SENDING_MS, 10 * 60_000), // note stuck in `sending` -> failed
     jobMs: int(o.jobMs ?? env.HELM_JOB_MS, 5 * 60_000), // job claimed (or queued) but never answered -> failed
+    stepMs: int(o.stepMs ?? env.HELM_STEP_MS, 60 * 60_000), // workflow step claimed but never answered -> failed (node timeouts extend it)
     blockMs: int(o.blockMs ?? env.HELM_BLOCK_MS, 10 * 60_000),
     idleMs: int(o.idleMs ?? env.HELM_IDLE_MS, 2 * 60_000),
     sweepMs: int(o.sweepMs ?? env.HELM_SWEEP_MS, 30_000),

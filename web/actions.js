@@ -406,3 +406,29 @@ export async function generateDigest({ projectId, date } = {}) {
     return null;
   }
 }
+
+/* ---------- v0.9: workflow runs ---------- */
+/** Run row from a response goes straight into the store (the SSE change that follows is identical). */
+function takeRun(res) {
+  if (res && res.run) upsert('run', res.run);
+  return res && res.run ? res.run : null;
+}
+/** Approve or reject a gate. The comment is optional. Resolves the run, or null when the hub refused. */
+export async function decideGate(runId, nodeId, decision, comment = '') {
+  try {
+    const run = takeRun(await api.decideGate(runId, nodeId, decision, comment.trim()));
+    toast(decision === 'approve' ? 'Approved' : 'Rejected', { kind: 'success', duration: 2200 });
+    return run;
+  } catch (e) {
+    toastError(e, decision === 'approve' ? 'Could not approve' : 'Could not reject');
+    return null;
+  }
+}
+/** pause | resume | abort */
+export async function controlRun(runId, action) {
+  try { return takeRun(await api.runControl(runId, action)); } catch (e) { toastError(e, `Could not ${action} the run`); return null; }
+}
+/** retry | skip */
+export async function controlNode(runId, nodeId, action) {
+  try { return takeRun(await api.nodeControl(runId, nodeId, action)); } catch (e) { toastError(e, `Could not ${action} the step`); return null; }
+}
