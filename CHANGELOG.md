@@ -4,6 +4,17 @@ All notable changes to Helm are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/). Shapes and endpoints are defined in `CONTRACT.md`.
 
+## [0.19.3] - 2026-10-11
+
+### Fixed
+
+- Work the main session does itself is now recorded on its card. The `task` tool's new `work` action sets the
+  card in progress, and the main loop's tool calls and files then show in its activity until it moves on.
+- The `task` tool retries for a few seconds while the hub reconnects after a mod reload, instead of failing (a
+  failed status update had left T-47 showing In progress).
+- `/compact` notes surface errors instead of hanging in "sending"; they wait while a turn runs and compact
+  between turns.
+
 ## [0.19.2] - 2026-10-10
 
 ### Added

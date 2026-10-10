@@ -465,7 +465,10 @@ describe('mcp__helm__task tool', () => {
   test('returns { deny } when the hub is down', async ($, on) => {
     const w = await boot($, on, { up: false })
     expect(w.hub.state.up).toBe(false)
-    const r: any = await $.tool.call({ tool: 'mcp__helm__task', action: 'create', title: 'Nope', tool_use_id: 'tu-task-down' } as any)
+    // the tool retries the hub briefly (on the mocked clock) before giving up
+    const pending: Promise<any> = $.tool.call({ tool: 'mcp__helm__task', action: 'create', title: 'Nope', tool_use_id: 'tu-task-down' } as any)
+    for (let i = 0; i < 12; i++) await w.clock.advance(1000)
+    const r: any = await pending
     expect(typeof r.deny).toBe('string')
     expect(r.deny).toContain('Helm hub')
     expect(r.result).toBeUndefined()

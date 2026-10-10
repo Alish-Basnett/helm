@@ -866,8 +866,10 @@ export class Projector {
     const tool = str(d.tool);
     const agentId = str(d.agentId);
     const a = agentId ? this.resolveAgent(sid, agentId, at) : null;
+    // Main-loop calls carry the task the session said it is working on (mod: `mcp__helm__task` action "work").
+    const mainTask = !agentId && d.taskId && this.getTask(str(d.taskId)) ? str(d.taskId) : null;
     this.addActivity({
-      sessionId: sid, agentId: a ? a.id : agentId || null, taskId: a ? a.task_id : null,
+      sessionId: sid, agentId: a ? a.id : agentId || null, taskId: a ? a.task_id : mainTask,
       kind: 'tool', tool, summary, at,
     });
     if (a) {
@@ -903,8 +905,9 @@ export class Projector {
     this.touchSession(sid, at);
     const agentId = str(d.agentId);
     const a = agentId ? this.resolveAgent(sid, agentId, at) : null;
+    const mainTask = !agentId && d.taskId && this.getTask(str(d.taskId)) ? str(d.taskId) : null;
     this.addActivity({
-      sessionId: sid, agentId: a ? a.id : agentId || null, taskId: a ? a.task_id : null, kind: 'tool_done',
+      sessionId: sid, agentId: a ? a.id : agentId || null, taskId: a ? a.task_id : mainTask, kind: 'tool_done',
       tool: str(d.tool), summary: cut(str(d.summary) || str(d.tool), 300),
       ok: d.ok === undefined ? null : d.ok !== false, at,
     });
@@ -914,6 +917,8 @@ export class Projector {
       this.addFiles(a.task_id, d.files, at);
     } else if (agentId) {
       this.bumpPending(sid, at);
+    } else if (mainTask) {
+      this.addFiles(mainTask, d.files, at);
     }
     // The user answered (or the call ended some other way): the matching question is no longer open.
     const toolUseId = str(d.toolUseId);

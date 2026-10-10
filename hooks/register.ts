@@ -24,6 +24,7 @@ You orchestrate on Opus: plan, delegate, stay free to talk.
 - Before delegating, create a card with \`mcp__helm__task\` (action "create"); it returns an id like T-12.
 - Delegate with the Agent tool, \`[helm:T-12]\` at the start of the description: \`helm:builder\` (Sonnet) for code, \`helm:scout\` (Haiku) for reading/search. Run in the background, in parallel when independent.
 - Cards move themselves. Use action "update" only for later/done/blocked when asked.
+- Doing a task yourself instead of delegating it? Call action "work" with its id first (your tool calls then show on its card), and action "update" with status "review" when you finish.
 - "Helm note (N-x)" messages are the user's own words from the dashboard; your answer is shown under the note, so reply in 1–2 plain sentences unless asked for more. "Start Helm task T-n" means delegate that existing card now.`
 
 const BUILDER_PROMPT = `You are a Helm builder (Sonnet). You own exactly one task from the user's Helm board.
@@ -778,6 +779,7 @@ async function setInflight($: any, noteId: string, on: boolean) {
 
 // ---------- "/compact" from a Helm note: run the engine's compaction once the session is idle ----------
 let mainBusy = false
+let mainTaskId: string | null = null // the task the main loop is working on itself (tool action "work")
 const pendingCompacts: { noteId: string; instructions?: string; tries: number }[] = []
 
 async function runCompacts($: any) {
@@ -793,8 +795,10 @@ async function runCompacts($: any) {
       emit('note.reply', { noteId: job.noteId, text: `Compacted. The conversation now holds ${(r?.messages ?? []).length} messages.` })
     }
   } catch (err) {
-    // rejects while a turn runs: try again on a later tick
-    if (++job.tries > 2400) { // about an hour of 1.5 s ticks
+    probe('compact.error', String(err))
+    // Rejects while a turn runs: try again on a later tick. Any other error fails the note right away, visibly.
+    const busy = /turn|running|busy|in progress/i.test(String(err))
+    if (!busy || ++job.tries > 2400) { // about an hour of 1.5 s ticks
       pendingCompacts.shift()
       emit('note.result', { noteId: job.noteId, ok: false, via: 'compact', error: clip(String(err), 200) })
     }
@@ -885,6 +889,7 @@ export const register: Register = (on, options) => {
       // A hot reload drops in-flight deliveries. Session notes were already queued in the engine
       // by $.prompt.submit, so they will arrive; record them as delivered. Anything else: failed (retryable).
       for (const id of ((await $.store.get(`done:${sessionId}`)) as string[] | undefined) ?? []) completedAgents.add(id)
+      mainTaskId = ((await $.store.get(`mainTask:${sessionId}`)) as string | null | undefined) ?? null
       const savedSteps = (await $.store.get(`steps:${sessionId}`)) as { agents?: [string, string][]; tasks?: [string, string][] } | undefined
       for (const [k, v] of savedSteps?.agents ?? []) stepByAgent.set(k, v)
       for (const [k, v] of savedSteps?.tasks ?? []) stepByTask.set(k, v)
@@ -908,7 +913,7 @@ export const register: Register = (on, options) => {
         inputSchema: {
           type: 'object',
           properties: {
-            action: { type: 'string', enum: ['create', 'update', 'list', 'choices'] },
+            action: { type: 'string', enum: ['create', 'update', 'list', 'choices', 'work'] },
             choices: { type: 'array', description: 'for action "choices": options the user can tick', items: { type: 'object', properties: { id: { type: 'string' }, title: { type: 'string' }, detail: { type: 'string' }, effort: { type: 'string', enum: ['S', 'M', 'L'] }, value: { type: 'string', enum: ['low', 'medium', 'high'] } }, required: ['title'] } },
             id: { type: 'string', description: 'task id for update, e.g. T-12' },
             title: { type: 'string' },
@@ -1012,11 +1017,22 @@ export const register: Register = (on, options) => {
   on('tool.call', { tool: 'mcp__helm__task' }, (async ($: any, e: any) => {
     const a: any = e
     try {
+      // Right after a reload the hub connection is not confirmed yet: retry briefly instead of failing the call.
+      for (let i = 0; !hubUp && i < 4; i++) {
+        try { await hub($, 'GET', '/v1/health', undefined, 1500); hubUp = true } catch { await $.clock.sleep(700) }
+      }
       if (!hubUp) {
         void tick($)
-        return { deny: 'Helm hub is starting; try again in a few seconds.' }
+        return { deny: 'Helm hub is not reachable right now; try again in a few seconds.' }
       }
       await flush($)
+      if (a.action === 'work') {
+        // The main loop is doing this task itself: its tool calls are recorded on the card until it moves on.
+        mainTaskId = String(a.id)
+        await $.store.set(`mainTask:${sessionId}`, mainTaskId).catch(() => {})
+        const { task } = await hub($, 'PATCH', `/v1/tasks/${a.id}`, { status: 'in_progress' })
+        return { result: `Working on ${task.id}; your tool calls are recorded on its card. Set status "review" or "done" when finished.` }
+      }
       if (a.action === 'create') {
         const { project } = await hub($, 'GET', `/v1/sessions/${sessionId}/project`)
         const { task } = await hub($, 'POST', '/v1/tasks', { projectId: project.id, sessionId, title: a.title ?? 'Untitled', description: a.description ?? '', status: a.status ?? 'next', dependsOn: a.dependsOn ?? [] })
@@ -1033,6 +1049,10 @@ export const register: Register = (on, options) => {
         const patch: Record<string, unknown> = {}
         for (const k of ['title', 'description', 'status', 'dependsOn']) if (a[k] !== undefined) patch[k] = a[k]
         const { task } = await hub($, 'PATCH', `/v1/tasks/${a.id}`, patch)
+        if (mainTaskId === task.id && task.status !== 'in_progress') {
+          mainTaskId = null
+          await $.store.set(`mainTask:${sessionId}`, null).catch(() => {})
+        }
         return { result: `${task.id} → ${task.status}` }
       }
       const { tasks } = await hub($, 'GET', `/v1/tasks?sessionId=${encodeURIComponent(sessionId)}`)
@@ -1056,14 +1076,14 @@ export const register: Register = (on, options) => {
         list.push(`${tool}: ${summary}`)
         recentTools.set(a.agentId, list.slice(-40))
       }
-      emit('tool.called', { agentId: a.agentId, toolUseId: a.tool_use_id, tool, summary, files: filesOf(a) })
+      emit('tool.called', { agentId: a.agentId, toolUseId: a.tool_use_id, tool, summary, files: filesOf(a), taskId: a.agentId ? undefined : mainTaskId ?? undefined })
     } catch {}
     const r: any = await next(e)
     try {
       const ok = !r?.deny && !r?.isError
       if (tool === 'Agent') probe('tool.call.Agent', { in: e, out: r })
       else if (a.agentId) probe('tool.call.subagent', { agentId: a.agentId, tool, ok })
-      emit('tool.finished', { agentId: a.agentId, toolUseId: a.tool_use_id, tool, ok, summary: r?.deny ? `Denied: ${clip(r.deny, 80)}` : summary, files: ok ? filesOf(a) : [], durationMs: Date.now() - t0 })
+      emit('tool.finished', { agentId: a.agentId, toolUseId: a.tool_use_id, tool, ok, taskId: a.agentId ? undefined : mainTaskId ?? undefined, summary: r?.deny ? `Denied: ${clip(r.deny, 80)}` : summary, files: ok ? filesOf(a) : [], durationMs: Date.now() - t0 })
       const res = r?.result
       if (tool === 'Agent' && res?.agentId) {
         toolUseByAgent.set(res.agentId, a.tool_use_id)

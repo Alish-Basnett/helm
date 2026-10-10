@@ -279,3 +279,15 @@ test('agent.completed files are appended to the task, deduped with tool.finished
   assert.deepEqual(task.filesChanged, ['/w/a.ts', '/w/b.css']);
   assert.equal(task.status, 'review');
 });
+
+test('main-loop tool calls carrying taskId are attributed to that task (activity and files)', async (t) => {
+  const h = await startTest(); t.after(h.stop);
+  start(h);
+  const task = (await h.api('POST', '/v1/tasks', { projectId: h.state().projects[0].id, title: 'Do it myself' })).json.task;
+  h.send(h.ev('s1', 'tool.called', { toolUseId: 'm1', tool: 'Edit', summary: 'Editing x.ts', taskId: task.id, files: ['/w/x.ts'] }));
+  h.send(h.ev('s1', 'tool.finished', { toolUseId: 'm1', tool: 'Edit', ok: true, summary: 'Editing x.ts', taskId: task.id, files: ['/w/x.ts'] }));
+  h.send(h.ev('s1', 'tool.called', { toolUseId: 'm2', tool: 'Read', summary: 'Reading y.ts', taskId: 'T-999' }));
+  const d = (await h.api('GET', `/v1/tasks/${task.id}`)).json;
+  assert.equal(d.activity.filter((r) => r.kind === 'tool' || r.kind === 'tool_done').length, 2);
+  assert.deepEqual(d.task.filesChanged, ['/w/x.ts']);
+});
