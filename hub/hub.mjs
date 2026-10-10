@@ -4,7 +4,7 @@ import path from 'node:path';
 import { Db } from './db.mjs';
 import {
   Projector, HUB_SESSION, TASK_STATUSES, JOB_TIMEOUT_ERROR, JOB_UNCLAIMED_ERROR, cut, computeConflicts,
-  localDate, usageSummary, usageToday, toAttachment, MAX_NOTE_ATTACHMENTS,
+  localDate, usageSummary, usageBreakdown, usageToday, toAttachment, MAX_NOTE_ATTACHMENTS,
   toProject, toSession, toAgent, toTask, toNote, toActivity, toQuestion, toJob, toDigest,
 } from './projections.mjs';
 import { computeDiff, diffStat } from './diff.mjs';
@@ -388,6 +388,7 @@ export class Hub {
     return rows.map(toDigest);
   }
   usage(days = 7) { return usageSummary(this.db, this.now(), days); }
+  usageBreakdown(days = 7) { return usageBreakdown(this.db, this.now(), days); }
   search(q, limit) { return ftsSearch(this.db, q, limit, this.log); }
   learn(projectId) { return ftsLearn(this.db, projectId); }
 

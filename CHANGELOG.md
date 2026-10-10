@@ -4,6 +4,15 @@ All notable changes to Helm are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/). Shapes and endpoints are defined in `CONTRACT.md`.
 
+## [0.9.0] - 2026-10-10
+
+### Added
+
+- Minimise panels: each side panel and the floating Talk has a minimise button that tucks it into a slim
+  shelf on the right edge without losing its state (drafts, scroll position, diff tab). `M` or ⌘/Ctrl+.
+  minimises everything at once, and pressing it again restores the same layout. Chips restore on click,
+  close on ×, and ⌥1–9 restores chip N. The shelf persists across reloads.
+
 ## [0.8.0] - 2026-10-10
 
 ### Added

@@ -46,13 +46,27 @@ function go(hash, replace) {
 export function navigate(view, args = [], query = {}, opts = {}) { go(buildHash({ view, args, query }), !!opts.replace); }
 /** Whether opening a task should also open its chat (remembered, on by default). */
 export const chatPref = () => lsGet('helm.chat', '1') !== '0';
+
+/* Intent hooks: the minimised-panels shelf hears "the user wants this task / chat / diff" before the URL changes, so it can
+   restore a minimised panel (or drop chips that belong to another task). A hook returns true if it restored something. */
+const intentHooks = new Set();
+export function onIntent(fn) { intentHooks.add(fn); return () => intentHooks.delete(fn); }
+function intent(kind, arg) {
+  let restored = false;
+  for (const fn of Array.from(intentHooks)) { try { if (fn(kind, arg)) restored = true; } catch (e) { console.error(e); } }
+  return restored;
+}
+
 /** Open a task's details, plus its chat when the remembered preference says so. */
 export function openTask(id) {
+  const restored = intent('task', id); // may restore minimised panels of this task (and rewrite the URL)
   const r = current;
   const query = {}; r.query.forEach((v, k) => { query[k] = v; });
   query.task = id;
-  delete query.diff; // a diff belongs to one task
-  if (chatPref()) query.chat = '1'; else delete query.chat;
+  if (!restored) {
+    delete query.diff; // a diff belongs to one task
+    if (chatPref()) query.chat = '1'; else delete query.chat;
+  } else if (chatPref()) query.chat = '1';
   go(buildHash({ view: r.view, args: r.args, query }), false);
 }
 export function closeTask() {
@@ -64,6 +78,7 @@ export function closeTask() {
 export function setChat(on) {
   const r = current;
   lsSet('helm.chat', on ? '1' : '0');
+  if (on) intent('chat');
   if (!r.task) return;
   const query = {}; r.query.forEach((v, k) => { if (k !== 'chat') query[k] = v; });
   if (on) query.chat = '1';
@@ -71,11 +86,23 @@ export function setChat(on) {
 }
 /** Open the Diff panel on a file (repo-relative path) of the open task, or close it with null. */
 export function setDiff(rel) {
+  if (rel) intent('diff', rel);
   const r = current;
   if (!r.task) return;
   const query = {}; r.query.forEach((v, k) => { if (k !== 'diff') query[k] = v; });
   if (rel) query.diff = rel;
   go(buildHash({ view: r.view, args: r.args, query }), !!r.diff);
+}
+/** Patch the task-related query keys at once (task, chat, diff): null removes one, undefined keeps it. No task = no chat/diff. */
+export function setTaskQuery(patch) {
+  const r = current;
+  const query = {}; r.query.forEach((v, k) => { query[k] = v; });
+  for (const k of ['task', 'chat', 'diff']) {
+    if (!(k in patch) || patch[k] === undefined) continue;
+    if (patch[k] == null) delete query[k]; else query[k] = patch[k];
+  }
+  if (!query.task) { delete query.chat; delete query.diff; }
+  go(buildHash({ view: r.view, args: r.args, query }), true);
 }
 export function setArgs(args, opts = {}) {
   const r = current;

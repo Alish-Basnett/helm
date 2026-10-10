@@ -1,14 +1,14 @@
 // views/taskchat.js — v0.5 Task chat: the task's notes as a chat, in its own Dock panel (leftmost).
 // It reuses Talk's chat component (bubbles by note state, replies short-first, attachments, drop and paste) pointed
 // at a task target. URL state: `?task=T-n&chat=1`; the open/closed choice is remembered for the next task.
-import { h, setText } from '../dom.js';
+import { h, setText, bus } from '../dom.js';
 import { icon } from '../icons.js';
 import { state, sel, subscribe } from '../store.js';
 import { STATUS_META } from '../format.js';
 import { statusDot } from '../ui.js';
 import { createTalk } from './talk.js';
 import { replyPending } from '../replies.js';
-import { panelClose } from '../dock.js';
+import { panelClose, panelMinimise } from '../dock.js';
 import { route, setChat } from '../router.js';
 
 const bootAt = Date.now();
@@ -42,7 +42,7 @@ export function createTaskChat(dock) {
     onClosed: () => { markSeen(); unmount(); },
   });
   const head = h('header', { class: 'sheet-head chat-head' },
-    h('div', { class: 'sheet-head-top' }, h('h2', { class: 'talk-title' }, icon('chat', 16), 'Chat'), idEl, pill, h('span', { class: 'spacer' }), panelClose(panel, 'Close chat')),
+    h('div', { class: 'sheet-head-top' }, h('h2', { class: 'talk-title' }, icon('chat', 16), 'Chat'), idEl, pill, h('span', { class: 'spacer' }), panelMinimise(panel, 'Minimise chat'), panelClose(panel, 'Close chat')),
     title);
   const bodyEl = h('div', { class: 'talk-body' });
   panel.el.append(head, bodyEl);
@@ -71,7 +71,7 @@ export function createTaskChat(dock) {
 
   /** Route drives it: a task id (with chat=1 in the URL) shows the panel, null hides it. */
   function show(id) {
-    if (!id) { taskId = null; if (panel.isOpen) panel.close(); return; }
+    if (!id) { if (panel.isMinimised) return; taskId = null; if (panel.isOpen) panel.close(); return; }
     const changed = id !== taskId;
     taskId = id;
     if (changed) mount();
@@ -86,6 +86,7 @@ export function createTaskChat(dock) {
 
   function toggle() {
     const r = route();
+    if (panel.isMinimised) { bus.emit('shelf-restore', 'chat'); return; }
     if (!r.task) return;
     if (panel.isOpen && panel.isVisible && r.chat) { setChat(false); return; }
     focusNext = true;

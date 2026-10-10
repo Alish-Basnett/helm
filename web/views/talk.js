@@ -2,7 +2,7 @@
 // Claude's replies are left bubbles. `createTalk` (alias `createChat`) is the reusable thread + composer for ANY note
 // target — a session (Talk panel, Threads) or a task (Task chat panel); `createTalkSheet` is the Talk panel in the
 // Dock, with a session picker.
-import { h, reconcile, setText, setHidden, setAttr, setClass, startTicker } from '../dom.js';
+import { h, reconcile, setText, setHidden, setAttr, setClass, startTicker, bus } from '../dom.js';
 import { bindDraft, clearDraft } from '../drafts.js';
 import { icon } from '../icons.js';
 import { state, sel, subscribe, lsGet, lsSet } from '../store.js';
@@ -10,7 +10,7 @@ import { addNote, deleteNote, executeNotes, retryNote } from '../actions.js';
 import { createAttachTray, createAttachmentList, bindAttachInput, attsOf } from '../attachments.js';
 import { createReply, createWaitLine } from '../replies.js';
 import { setLinked } from '../tasklinks.js';
-import { createFloating, loadFloat, saveFloat } from '../floating.js';
+import { createFloating, createBubble, loadFloat, saveFloat } from '../floating.js';
 import { cwdTail } from '../format.js';
 import { emptyState, modelBadge, updateModelBadge, toast } from '../ui.js';
 import { getPref, codeOn, onPrefs } from '../prefs.js';
@@ -173,6 +173,7 @@ export const createChat = createTalk;
 
 /* ---------- the Talk panel (in the Dock, or detached into a floating window) ---------- */
 const FLOAT_KEY = 'helm.talk.float';
+const BUBBLE_KEY = 'helm.talk.bubble';
 
 export function createTalkSheet(dock) {
   const picker = h('select', { class: 'select talk-picker', 'aria-label': 'Session to talk to', onchange: () => choose(picker.value, true) });
@@ -184,6 +185,7 @@ export function createTalkSheet(dock) {
   let sid = null;
   let talk = null;
   let win = null; // the floating window, created on first detach
+  let minimised = false; // true = hidden on the shelf: still mounted (draft, scroll), just not shown
   let moving = false; // true while we reparent: the Dock's onClosed must not tear Talk down
   let prevFocus = null;
 
@@ -191,10 +193,11 @@ export function createTalkSheet(dock) {
     order: 2, width: 400, label: 'Talk', icon: 'chat', ariaLabel: 'Talk to a session',
     onClosed: () => { if (!moving) teardown(); },
   });
-  const closeBtn = h('button', { class: 'icon-btn dock-close', type: 'button', 'aria-label': 'Close', title: 'Close (Esc)', onclick: () => close() }, icon('close', 18));
+  const closeBtn = h('button', { class: 'icon-btn dock-close', type: 'button', 'aria-label': 'Minimise to a pill', title: 'Minimise to a pill (Esc)', onclick: () => close() }, icon('close', 18));
+  const minBtn = h('button', { class: 'icon-btn talk-min', type: 'button', 'aria-label': 'Minimise Talk to the shelf', title: 'Minimise Talk to the shelf (M minimises all)', onclick: () => requestMinimise() }, icon('minimize', 18));
   const popBtn = h('button', { class: 'icon-btn talk-pop', type: 'button', 'data-act': 'detach', onclick: () => toggleDetached() });
   const head = h('header', { class: 'sheet-head talk-head', 'data-float-drag': '' },
-    h('div', { class: 'sheet-head-top' }, h('h2', { class: 'talk-title' }, icon('chat', 16), 'Talk'), model, h('span', { class: 'spacer' }), popBtn, closeBtn),
+    h('div', { class: 'sheet-head-top' }, h('h2', { class: 'talk-title' }, icon('chat', 16), 'Talk'), model, h('span', { class: 'spacer' }), popBtn, minBtn, closeBtn),
     picker, sub);
   panel.el.append(head, bodyEl);
 
@@ -205,10 +208,19 @@ export function createTalkSheet(dock) {
     popBtn.setAttribute('aria-label', label);
     popBtn.title = `${label} (⇧T)`;
     popBtn.setAttribute('data-act', detached ? 'dock' : 'detach');
-    closeBtn.title = detached ? 'Close Talk' : 'Close (Esc)';
+    closeBtn.title = detached ? 'Minimise to a pill' : 'Minimise to a pill (Esc)';
   }
   paintMode();
 
+  // The minimised form: a circular pill, shown whenever Talk is closed. It is also the only way in besides T / ⇧T,
+  // and it reopens Talk in whichever mode (Dock panel or floating window) was used last.
+  const pill = createBubble({
+    storeKey: BUBBLE_KEY, label: 'Talk to a session', iconEl: icon('chat', 22), className: 'talk-pill',
+    title: 'Talk to a session (drag to move · T opens · ⇧T floats it)',
+    onActivate: () => open(),
+  });
+  const syncPill = () => { if (isOpen || minimised) pill.hide(); else pill.show(); };
+  const requestMinimise = () => bus.emit('shelf-minimise', 'talk');
   function ensureWin() {
     if (!win) {
       win = createFloating({
@@ -235,6 +247,8 @@ export function createTalkSheet(dock) {
   }
   function teardown() {
     isOpen = false;
+    minimised = false;
+    syncPill();
     if (talk) { talk.destroy(); talk = null; bodyEl.textContent = ''; }
   }
 
@@ -290,6 +304,7 @@ export function createTalkSheet(dock) {
 
   function open(sessionId, opts = {}) {
     const focus = opts.focus !== false;
+    if (minimised) { restore({ focus }); if (sessionId && isOpen) choose(pick(sessionId), true); return; }
     if (isOpen) {
       if (sessionId) choose(pick(sessionId), true);
       if (detached) { win.show(); if (focus) focusTalk(); }
@@ -297,6 +312,7 @@ export function createTalkSheet(dock) {
       return;
     }
     isOpen = true;
+    syncPill();
     sid = pick(sessionId);
     syncPicker();
     mountTalk();
@@ -327,6 +343,7 @@ export function createTalkSheet(dock) {
   /** Dock panel -> floating window. The same elements move; nothing is re-created. */
   function detach() {
     if (detached) return;
+    if (minimised) restore();
     if (!isOpen) { detached = true; paintMode(); saveFloat(FLOAT_KEY, { detached: true }); open(); return; }
     const sc = threadScroll();
     prevFocus = null;
@@ -341,6 +358,42 @@ export function createTalkSheet(dock) {
     focusTalk(); // the Detach button just left the page: put focus in the composer of the new window
   }
 
+  /** Hide Talk on the shelf without closing it: the thread, composer draft and scroll stay mounted. */
+  function minimise() {
+    if (!isOpen || minimised) return false;
+    minimised = true;
+    if (detached) {
+      const hadFocus = win.el.contains(document.activeElement);
+      win.hide(); // the geometry lives in JS (and storage), so showing it again puts it back exactly
+      saveFloat(FLOAT_KEY, { detached: true, open: false }); // a reload must not reopen it
+      if (hadFocus && document.activeElement && document.activeElement !== document.body) document.activeElement.blur();
+    } else panel.minimise();
+    syncPill();
+    return true;
+  }
+  /** Bring it back. If Talk is not mounted (a "ghost" chip after a reload) it is opened in its last mode. */
+  function restore(opts = {}) {
+    if (!minimised) return;
+    minimised = false;
+    syncPill();
+    if (!isOpen) { open(undefined, opts); return; }
+    if (detached) {
+      win.show();
+      saveFloat(FLOAT_KEY, { detached: true, open: true });
+      if (opts.focus !== false) focusTalk();
+    } else panel.restore(opts);
+    requestAnimationFrame(() => { if (talk) talk.scrollToEnd(); });
+  }
+  /** Shelf close (x / middle-click): close it for real. */
+  function dismiss() {
+    const wasMin = minimised;
+    minimised = false;
+    if (isOpen) close(); // the Dock clears the minimised flag itself; the floating window is hidden already
+    else if (wasMin) syncPill();
+  }
+  /** Boot: the shelf remembers Talk was minimised before the reload. Nothing is mounted, so it is a ghost until restored. */
+  function setGhost(on) { if (isOpen) return; minimised = !!on; syncPill(); }
+
   /** Floating window -> Dock panel. */
   function dockBack() {
     if (!detached) return;
@@ -354,7 +407,7 @@ export function createTalkSheet(dock) {
     panel.open({ focus: true });
     restoreScroll(sc);
   }
-  function toggleDetached() { if (detached) dockBack(); else detach(); }
+  function toggleDetached() { if (minimised) restore(); if (detached) dockBack(); else detach(); }
 
   const off = subscribe((changed) => {
     if (!isOpen) return;
@@ -374,13 +427,17 @@ export function createTalkSheet(dock) {
     paintMode();
     if (st.open) open(undefined, { focus: false });
   }
+  syncPill();
 
   return {
     open, close, toggle: () => (isOpen && (detached ? win.isVisible : panel.isVisible) ? close() : open()),
     detach, dock: dockBack, toggleDetached,
     get isOpen() { return isOpen; },
+    get isMinimised() { return minimised; },
+    get sessionId() { return sid; },
+    minimise, restore, dismiss, setGhost,
     get isDetached() { return detached; },
     get floating() { return win; },
-    destroy() { off(); if (win) win.destroy(); },
+    destroy() { off(); pill.destroy(); if (win) win.destroy(); },
   };
 }

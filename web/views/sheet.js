@@ -10,7 +10,7 @@ import { toast, toastError, avatar, updateAvatar, modelBadge, updateModelBadge, 
 import { createTimeline } from '../timeline.js';
 import { createFilesChanged } from '../diffs.js';
 import { toggleChat, chatActivity } from './taskchat.js';
-import { panelClose } from '../dock.js';
+import { panelClose, panelMinimise } from '../dock.js';
 import { createReplay } from '../replay.js';
 import { createExplain } from '../explain.js';
 import { openTask, closeTask, navigate, route, setDiff } from '../router.js';
@@ -43,6 +43,7 @@ export function createSheet(dock) {
     c.id = h('span', { class: 'task-id mono' }, id);
     c.pill = h('span', { class: 'status-pill' }, statusDot('backlog'), h('span', {}, ''));
     c.close = panelClose(panel, 'Close');
+    c.min = panelMinimise(panel, 'Minimise task');
     c.chatDot = h('span', { class: 'chat-dot', hidden: true, 'aria-hidden': 'true' });
     c.chatBtn = h('button', { class: 'btn btn-quiet btn-sm sheet-chat', type: 'button', 'aria-pressed': 'false', title: 'Show or hide this task’s chat (C)', onclick: () => toggleChat() },
       icon('chat', 14), h('span', {}, 'Chat'), c.chatDot);
@@ -111,7 +112,7 @@ export function createSheet(dock) {
     c.tlWrap = h('section', { class: 'sheet-section' }, h('h3', { class: 'section-title' }, icon('terminal', 14), 'Activity', c.replayBtn), c.replay.el, c.timeline.el);
 
     const head = h('header', { class: 'sheet-head' },
-      h('div', { class: 'sheet-head-top' }, c.id, c.pill, h('span', { class: 'spacer' }), c.startBtn, c.chatBtn, c.close),
+      h('div', { class: 'sheet-head-top' }, c.id, c.pill, h('span', { class: 'spacer' }), c.startBtn, c.chatBtn, c.min, c.close),
       c.title);
     const body = h('div', { class: 'sheet-body' },
       c.choices.el, c.blocked, c.startStatus.el,
@@ -338,6 +339,7 @@ export function createSheet(dock) {
 
   function show(id) {
     if (id === taskId) { if (id) update(); return; }
+    if (!id && panel.isMinimised) return; // minimised: it lives on the shelf, not in the URL
     destroyCtx();
     taskId = id || null;
     if (!taskId) {

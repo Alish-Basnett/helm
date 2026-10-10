@@ -34,6 +34,9 @@ export function createDock(root) {
   let focusId = null;
   const listeners = new Set();
   let layoutQueued = false;
+  let inset = 0; // px kept clear on the right for the minimised-panels shelf
+  const vw = () => Math.max(0, window.innerWidth - inset);
+  let minHook = null; // the shelf: header "—" buttons go through it so a chip is created
   const saved = loadWidths(); // id -> preferred width (never overwritten by clamping, only by an explicit resize)
 
   const emit = () => { for (const fn of Array.from(listeners)) { try { fn(); } catch (e) { console.error(e); } } };
@@ -42,7 +45,7 @@ export function createDock(root) {
   /** cfg: { order, label, icon, width, ariaLabel, onClose?() (user asked to close), onClosed?() (it was hidden), onOpened?() } */
   function register(id, cfg) {
     const panelEl = h('aside', { class: `dock-panel dock-${id}`, role: 'dialog', 'aria-modal': 'false', 'aria-label': cfg.ariaLabel || cfg.label, 'data-panel': id, tabindex: '-1', hidden: true, inert: true });
-    const rec = { id, cfg, el: panelEl, grip: null, open: false, visible: false, badge: false, label: cfg.label, tab: null, prevFocus: null };
+    const rec = { id, cfg, el: panelEl, grip: null, open: false, visible: false, badge: false, min: false, label: cfg.label, tab: null, prevFocus: null };
     panels.set(id, rec);
     panelEl.addEventListener('focusin', () => { focusId = id; });
     panelEl.addEventListener('pointerdown', () => { focusId = id; }, true);
@@ -59,6 +62,11 @@ export function createDock(root) {
       el: panelEl,
       get isOpen() { return rec.open; },
       get isVisible() { return rec.open && rec.visible; },
+      get isMinimised() { return rec.min; },
+      /** The user asked to minimise it (header button): goes via the shelf so a chip appears and the URL follows. */
+      requestMinimise: () => (minHook ? minHook(id) : minimise([id])),
+      minimise: () => minimise([id]),
+      restore: (opts) => restore([id], opts),
       open: (opts) => open(id, opts),
       close: () => close(id),
       toggle: () => (rec.open ? close(id) : open(id)),
@@ -87,7 +95,7 @@ export function createDock(root) {
       mru = [id, ...mru.filter((x) => x !== id)];
     }
     layout();
-    if (focus && rec.visible) {
+    if (focus && rec.visible && !rec.min) {
       focusId = id;
       requestAnimationFrame(() => { if (rec.open && rec.visible && (!wasOpen || !rec.el.contains(document.activeElement))) focusPanel(rec); });
     }
@@ -99,6 +107,7 @@ export function createDock(root) {
     if (!rec || !rec.open) return;
     const hadFocus = rec.el.contains(document.activeElement);
     rec.open = false;
+    rec.min = false;
     mru = mru.filter((x) => x !== id);
     if (focusId === id) focusId = null;
     layout();
@@ -112,6 +121,52 @@ export function createDock(root) {
     if (rec.cfg.onClosed) rec.cfg.onClosed();
   }
 
+  /* ---------- minimise / restore (the panel stays mounted: drafts, scroll and tabs survive) ---------- */
+  /** Hide the panels without closing them. They keep their place in the MRU order, so restoring brings the same layout back. */
+  function minimise(ids) {
+    let any = false, hadFocus = false;
+    for (const id of ids) {
+      const rec = panels.get(id);
+      if (!rec || !rec.open || rec.min) continue;
+      if (rec.el.contains(document.activeElement)) hadFocus = true;
+      rec.min = true;
+      if (focusId === id) focusId = null;
+      any = true;
+    }
+    if (!any) return false;
+    layout();
+    if (hadFocus) {
+      const next = mru.map((x) => panels.get(x)).find((p) => p && p.visible && !p.min);
+      if (next) { focusId = next.id; focusPanel(next); }
+      else if (document.activeElement && document.activeElement !== document.body) document.activeElement.blur();
+    }
+    return true;
+  }
+  /** Bring minimised panels back. A panel that is not open (a "ghost" chip after a reload) just loses its flag; its owner opens it. */
+  function restore(ids, opts = {}) {
+    const { focus = true, front = true } = opts;
+    let first = null;
+    for (const id of ids) {
+      const rec = panels.get(id);
+      if (!rec || !rec.min) continue;
+      rec.min = false;
+      if (rec.open && front) mru = [id, ...mru.filter((x) => x !== id)];
+      if (rec.open && !first) first = rec;
+    }
+    layout();
+    if (focus && first) {
+      const target = mru.map((x) => panels.get(x)).find((p) => p && p.open && !p.min && p.visible && ids.includes(p.id)) || first;
+      if (target.visible) requestAnimationFrame(() => { if (target.open && !target.min && target.visible) { focusId = target.id; focusPanel(target); } });
+    }
+  }
+  /** Mark a panel minimised before it is open (boot: the shelf is restored from storage; the URL may still open it). */
+  function setMin(id, on) {
+    const rec = panels.get(id);
+    if (!rec || rec.min === !!on) return;
+    rec.min = !!on;
+    layout();
+  }
+
   /** Focus the first meaningful control: the composer if there is one, else the close button. */
   function focusPanel(rec) {
     const t = rec.el.querySelector('[data-autofocus]:not([disabled])') || rec.el.querySelector('textarea:not([disabled]), .dock-close');
@@ -120,11 +175,11 @@ export function createDock(root) {
   }
 
   /* ---------- layout ---------- */
-  const cap = () => Math.max(280, window.innerWidth - 16); // never wider than the screen
+  const cap = () => Math.max(280, vw() - 16); // never wider than the screen
   /** Widest a panel may be: leave RESERVE to the page and MIN_W (+gap) for every other open panel. */
   function maxOf(rec) {
-    const others = Array.from(panels.values()).filter((r) => r.open && r !== rec).length;
-    return Math.max(MIN_W, Math.min(cap(), window.innerWidth - RESERVE - others * (MIN_W + GAP)));
+    const others = Array.from(panels.values()).filter((r) => r.open && !r.min && r !== rec).length;
+    return Math.max(MIN_W, Math.min(cap(), vw() - RESERVE - others * (MIN_W + GAP)));
   }
   const clampW = (rec, w) => Math.round(Math.min(maxOf(rec), Math.max(Math.min(MIN_W, cap()), w)));
   /** Preferred width (saved or default), clamped to what fits right now. A saved width is only clamped for display. */
@@ -189,8 +244,8 @@ export function createDock(root) {
   }
 
   function layout() {
-    const open = mru.map((id) => panels.get(id)).filter(Boolean);
-    const avail = Math.max(0, window.innerWidth - RESERVE);
+    const open = mru.map((id) => panels.get(id)).filter((r) => r && !r.min);
+    const avail = Math.max(0, vw() - RESERVE);
     const fit = (limit) => {
       const set = new Set();
       let used = 0;
@@ -203,7 +258,7 @@ export function createDock(root) {
     let show = fit(avail);
     if (show.size < open.length) show = fit(avail - RAIL_W - GAP); // the tab rail takes room too
     for (const rec of panels.values()) {
-      const vis = rec.open && show.has(rec.id);
+      const vis = rec.open && !rec.min && show.has(rec.id);
       const wasVisible = rec.visible;
       rec.visible = vis;
       rec.el.style.width = widthOf(rec) + 'px';
@@ -214,7 +269,7 @@ export function createDock(root) {
         rec.el.classList.add('enter');
         setTimeout(() => rec.el.classList.remove('enter'), 340);
       }
-      if (!vis && !rec.open) rec.el.classList.remove('enter');
+      if (!vis && (!rec.open || rec.min)) rec.el.classList.remove('enter');
     }
     el.setAttribute('data-open', String(show.size));
     renderRail();
@@ -228,7 +283,7 @@ export function createDock(root) {
   window.addEventListener('resize', queueLayout);
 
   function renderRail() {
-    const hiddenRecs = Array.from(panels.values()).filter((r) => r.open && !r.visible).sort((a, b) => a.cfg.order - b.cfg.order);
+    const hiddenRecs = Array.from(panels.values()).filter((r) => r.open && !r.min && !r.visible).sort((a, b) => a.cfg.order - b.cfg.order);
     setHidden(rail, hiddenRecs.length === 0);
     el.classList.toggle('has-rail', hiddenRecs.length > 0);
     // rebuild only when the set / labels / badges change
@@ -267,12 +322,27 @@ export function createDock(root) {
   return {
     el, register, open, close,
     isOpen: (id) => !!(panels.get(id) && panels.get(id).open),
+    isMinimised: (id) => !!(panels.get(id) && panels.get(id).min),
+    /** Open and not minimised: what "minimise all" acts on (includes panels tucked in the tab rail). */
+    activeIds: () => Array.from(panels.values()).filter((r) => r.open && !r.min).map((r) => r.id),
+    minimise, restore, setMin,
+    setMinimiseHook(fn) { minHook = fn; },
+    /** Room the shelf takes on the right edge (px); the Dock shifts left and re-fits. */
+    setInset(px) { px = Math.max(0, Math.round(px || 0)); if (px === inset) return; inset = px; el.style.right = (8 + px) + 'px'; layout(); },
     isVisible: (id) => !!(panels.get(id) && panels.get(id).open && panels.get(id).visible),
     /** Called after every layout (open/close/resize). */
     subscribe(fn) { listeners.add(fn); return () => listeners.delete(fn); },
     relayout: layout,
     destroy() { document.removeEventListener('keydown', onKey); window.removeEventListener('resize', queueLayout); },
   };
+}
+
+/** The "—" button next to the close button: minimise this panel into the shelf on the right edge. */
+export function panelMinimise(handle, label = 'Minimise') {
+  return h('button', {
+    class: 'icon-btn dock-min', type: 'button', 'aria-label': label, title: `${label} (M minimises all)`,
+    onclick: () => handle.requestMinimise(),
+  }, icon('minimize', 18));
 }
 
 /** The standard panel header: icon + title slot + right-aligned actions + close button. */

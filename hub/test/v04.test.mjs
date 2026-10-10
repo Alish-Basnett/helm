@@ -285,3 +285,24 @@ test('opening a pre-v0.4 database adds notes.attachments; new tables appear; ide
   assert.deepEqual(hub.state().usageToday, { overheadUsd: 0, requestedUsd: 0 });
   hub.close();
 });
+
+test('usage breakdown: per day, project, model and task', async (t) => {
+  const h = await startTest(); t.after(h.stop);
+  world(h);
+  h.hub.setClock(() => at(0, 12));
+  const u = (when, kind, costUsd, extra = {}) => h.ev('s1', 'helm.usage', { kind, model: 'haiku-5-5', inputTokens: 100, outputTokens: 10, costUsd, ...extra }, when);
+  h.send(
+    u(at(0, 9), 'recap', 0.1), u(at(0, 10), 'note_turn', 1.5, { taskId: 'T-1', model: 'opus' }),
+    u(at(0, 11), 'note_turn', 0.5, { taskId: 'T-1', model: 'opus' }), u(at(-1, 15), 'answer', 0.25, { taskId: 'T-2' }),
+    u(at(-30, 8), 'recap', 99),
+  );
+  const r = (await h.get('/v1/usage/breakdown?days=7')).json;
+  assert.equal(r.totalUsd, 2.35);
+  assert.equal(r.perDay.length, 7);
+  assert.equal(r.perDay.at(-1).costUsd, 2.1);
+  assert.equal(r.perProject.length, 1);
+  assert.equal(r.perProject[0].costUsd, 2.35);
+  assert.deepEqual(r.perModel.map((m) => [m.model, m.costUsd, m.calls]), [['opus', 2, 2], ['haiku-5-5', 0.35, 2]]);
+  assert.deepEqual(r.perTask.map((x) => [x.taskId, x.costUsd]), [['T-1', 2], ['T-2', 0.25]]);
+  assert.equal((await h.get('/v1/usage/breakdown?days=500')).json.perDay.length, 90);
+});

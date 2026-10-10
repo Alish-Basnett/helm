@@ -115,6 +115,7 @@ route('GET', '/v1/attachments/:id', ({ hub, params }) => {
   return { [FILE]: a };
 });
 route('GET', '/v1/usage', ({ hub, query }) => hub.usage(intParam(query.get('days'), 7, 1, 90)));
+route('GET', '/v1/usage/breakdown', ({ hub, query }) => hub.usageBreakdown(intParam(query.get('days'), 7, 1, 90)));
 route('GET', '/v1/learn', ({ hub, query }) => ({ concepts: hub.learn(query.get('projectId') || undefined) }));
 
 // ------------------------------------------------------------------- helpers

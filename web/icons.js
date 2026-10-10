@@ -14,6 +14,7 @@ const P = {
   retry: '<path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3"/><path d="M19.5 4.5v4h-4"/>',
   archive: '<rect x="3.5" y="4.5" width="17" height="4.5" rx="1.5"/><path d="M5 9v8.5a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V9M10 13h4"/>',
   blocked: '<circle cx="12" cy="12" r="8.5"/><path d="M6.2 6.2l11.6 11.6"/>',
+  minimize: '<path d="M6 12h12"/>',
   close: '<path d="M6.5 6.5l11 11M17.5 6.5l-11 11"/>',
   chevronRight: '<path d="M9.5 6l6 6-6 6"/>',
   chevronLeft: '<path d="M14.5 6l-6 6 6 6"/>',

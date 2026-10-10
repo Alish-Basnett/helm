@@ -52,6 +52,7 @@ export function createSpotlight(root) {
   function commands(needle = '') {
     const cmds = [
       { title: 'Talk to session', sub: 'Chat with a live session of this project', icon: 'chat', run: () => bus.emit('open-talk') },
+      { title: 'Minimise / restore panels', sub: 'Tuck every open panel into the right-edge shelf, or bring them back (M)', icon: 'minimize', run: () => bus.emit('toggle-panels') },
       { title: 'Start task…', sub: 'Pick a task to start in a live session', icon: 'play', stay: true, run: () => { input.value = '>start '; onInput(); input.focus(); } },
       { title: 'Open diff…', sub: 'Show a changed file of the open task in the Diff panel', icon: 'file', stay: true, run: () => { input.value = '>diff '; onInput(); input.focus(); } },
       { title: 'Review choices…', sub: 'Tick which suggestions to turn into tasks', icon: 'checklist', stay: true, run: () => { input.value = '>choices '; onInput(); input.focus(); } },

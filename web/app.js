@@ -14,6 +14,7 @@ import { createTaskChat, toggleChat } from './views/taskchat.js';
 import { createTalkSheet } from './views/talk.js';
 import { startTaskLinks } from './tasklinks.js';
 import { createSpotlight } from './spotlight.js';
+import { createShelf } from './shelf.js';
 import * as board from './views/board.js';
 import * as projects from './views/projects.js';
 import * as office from './views/office.js';
@@ -72,6 +73,8 @@ const sheet = createSheet(dock);
 const taskChat = createTaskChat(dock);
 const diffPanel = createDiffPanel(dock);
 const talk = createTalkSheet(dock);
+const shelf = createShelf({ dock, talk, sheet, taskChat, diffPanel });
+bus.on('toggle-panels', () => shelf.toggleAll());
 startTaskLinks();
 bus.on('open-talk', (sessionId) => talk.open(typeof sessionId === 'string' ? sessionId : undefined));
 
@@ -139,10 +142,8 @@ const telemetry = h('div', { class: 'telemetry mono', 'aria-label': 'Telemetry' 
   h('span', { class: 'tele tele-cost' }, tCost, h('span', { class: 'tele-k' }, 'today')),
   helmBtn,
   h('span', { class: 'tele' }, tClock));
-const talkBtn = h('button', { class: 'btn btn-quiet talk-btn', type: 'button', title: 'Talk to a session (T; ⇧T floats it)', 'aria-label': 'Talk to a session', onclick: () => talk.toggle() },
-  icon('chat', 16), h('span', { class: 'sb-label-narrow' }, 'Talk'), h('kbd', { class: 'kbd sb-label-narrow' }, 'T'));
 const newTaskBtn = h('button', { class: 'btn btn-primary', type: 'button', onclick: () => newTask() }, icon('plus', 16), h('span', { class: 'sb-label-narrow' }, 'New task'));
-topbar.append(h('div', { class: 'tb-left' }, titleEl, scopeEl), h('span', { class: 'spacer' }), telemetry, talkBtn, newTaskBtn);
+topbar.append(h('div', { class: 'tb-left' }, titleEl, scopeEl), h('span', { class: 'spacer' }), telemetry, newTaskBtn);
 
 function newTask() {
   if (route().view !== 'board') navigate('board');
@@ -186,6 +187,7 @@ let viewName = null;
 const bootEl = h('div', { class: 'boot' }, emptyState({ iconName: 'pulse', title: 'Connecting to Helm…', body: 'Waiting for the local hub on this machine.' }));
 
 function applyRoute(r) {
+  shelf.beforeRoute(r); // chips of another task than the URL's are stale
   if (viewName !== r.view) {
     if (view) { try { view.destroy(); } catch (e) { console.error(e); } }
     viewEl.textContent = '';
@@ -229,6 +231,8 @@ subscribe((changed) => {
 /* ---------- keyboard ---------- */
 document.addEventListener('keydown', (e) => {
   if ((e.metaKey || e.ctrlKey) && !e.altKey && e.key.toLowerCase() === 'k') { e.preventDefault(); spotlight.toggle(); return; }
+  // ⌘/Ctrl+. : minimise every open panel to the right-edge shelf, or bring them all back (works while typing)
+  if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey && (e.key === '.' || e.code === 'Period')) { e.preventDefault(); shelf.toggleAll(); return; }
   const tag = (e.target && e.target.tagName) || '';
   const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(tag) || (e.target && e.target.isContentEditable);
   if (typing || e.metaKey || e.ctrlKey || e.altKey || spotlight.isOpen) return;
@@ -236,6 +240,7 @@ document.addEventListener('keydown', (e) => {
   else if (e.key === 'n') { e.preventDefault(); newTask(); }
   else if (e.key === 't') { e.preventDefault(); talk.toggle(); }
   else if (e.key === 'T') { e.preventDefault(); talk.toggleDetached(); } // ⇧T: float Talk / dock it back
+  else if (e.key === 'm' || e.key === 'M') { e.preventDefault(); shelf.toggleAll(); }
   else if (e.key === 'c' && route().task) { e.preventDefault(); toggleChat(); }
   else if (e.key === '>') { e.preventDefault(); spotlight.open('>'); }
 });

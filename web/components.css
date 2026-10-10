@@ -448,8 +448,6 @@ ul.md-list li::marker { color: var(--accent); }
 .composer-start .kbd { margin-left: 2px; opacity: .8; }
 
 /* ---------- Talk ---------- */
-.talk-btn { gap: 6px; }
-.talk-btn .kbd { margin-left: 2px; }
 .talk-head { display: flex; flex-direction: column; gap: 8px; }
 .talk-head .sheet-head-top { margin-bottom: 0; }
 .talk-title { display: inline-flex; align-items: center; gap: 8px; font-size: 18px; font-weight: 700; letter-spacing: -0.02em; }
@@ -824,3 +822,61 @@ ul.md-list li::marker { color: var(--accent); }
 html.float-gesture, html.float-gesture * { user-select: none !important; -webkit-user-select: none !important; cursor: var(--float-cursor, move) !important; }
 .float-talk .talk-head { padding: 12px 14px 10px; }
 @media (prefers-reduced-motion: reduce) { .float-win, .float-win.enter { animation: none; transition: none; } }
+
+/* ---------- Talk pill (floating.js createBubble): the minimised Talk, a draggable circle ---------- */
+/* sits between the Dock (61) and floating windows (80-89) */
+.float-bubble {
+  position: fixed; z-index: 70; width: 52px; height: 52px; padding: 0; border: 0; border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center; color: var(--accent, #0a84ff);
+  background: var(--vibrancy-strong); backdrop-filter: blur(28px) saturate(180%); -webkit-backdrop-filter: blur(28px) saturate(180%);
+  box-shadow: 0 0 0 .5px var(--separator-strong), 0 2px 6px var(--shadow-c2), 0 12px 28px -8px var(--shadow-c);
+  cursor: grab; touch-action: none; user-select: none; -webkit-user-select: none;
+  transition: box-shadow 160ms var(--ease), transform 160ms var(--ease);
+}
+.float-bubble[hidden] { display: none; }
+.float-bubble:hover { transform: scale(1.06); }
+.float-bubble:focus-visible { outline: 2px solid var(--accent, #0a84ff); outline-offset: 2px; }
+.float-bubble.dragging { cursor: grabbing; transition: none; transform: scale(1.1); }
+.float-bubble.enter { animation: bubble-in 220ms var(--ease); }
+@keyframes bubble-in { from { opacity: 0; transform: scale(.6); } }
+@media (prefers-reduced-motion: reduce) { .float-bubble, .float-bubble.enter { animation: none; transition: none; } }
+
+/* ---------- minimised-panels shelf (shelf.js): a slim vibrancy bar on the right edge ---------- */
+/* z-index 95: above floating windows (80-89), below menus (100), Spotlight (150) and toasts (200).
+   Vertically centred with ~120px kept clear top and bottom, so it never meets the toasts or the "Helm updated" pill. */
+.shelf {
+  position: fixed; z-index: 95; right: 8px; top: 50%; width: 40px; box-sizing: border-box;
+  max-height: calc(100vh - 240px); overflow-y: auto; overflow-x: hidden; scrollbar-width: none;
+  display: flex; flex-direction: column; gap: 4px; padding: 5px 4px; border-radius: 22px;
+  background: var(--vibrancy-strong); backdrop-filter: blur(28px) saturate(180%); -webkit-backdrop-filter: blur(28px) saturate(180%);
+  box-shadow: 0 0 0 .5px var(--separator-strong), 0 2px 6px var(--shadow-c2), 0 18px 48px -12px var(--shadow-c);
+  opacity: 0; transform: translate(24px, -50%);
+  transition: opacity 220ms var(--ease), transform 260ms var(--ease);
+}
+.shelf::-webkit-scrollbar { display: none; }
+.shelf[hidden] { display: none; }
+.shelf.in { opacity: 1; transform: translate(0, -50%); }
+.shelf-item { position: relative; flex: none; }
+.shelf-chip {
+  position: relative; width: 32px; min-height: 56px; max-height: 148px; padding: 8px 0 6px; border: 0; border-radius: 16px;
+  display: flex; flex-direction: column; align-items: center; gap: 6px; background: transparent; color: var(--label-2);
+  font: 500 12px/1.1 var(--font-sans, inherit); cursor: pointer; overflow: hidden;
+  transition: background 140ms var(--ease), color 140ms var(--ease);
+}
+.shelf-chip:hover, .shelf-item:focus-within .shelf-chip { background: var(--fill-3); color: var(--accent); }
+.shelf-chip:focus-visible { outline: 2px solid var(--accent, #0a84ff); outline-offset: -2px; }
+.shelf-label { writing-mode: vertical-rl; letter-spacing: .02em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-height: 0; flex: 0 1 auto; }
+.shelf-n { font-size: 9.5px; color: var(--label-3); flex: none; }
+.shelf-dot { display: none; position: absolute; top: 5px; right: 5px; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 2px var(--bg-2); }
+.shelf-item.has-dot .shelf-dot { display: block; }
+.shelf-item.pending .shelf-dot { background: transparent; box-shadow: inset 0 0 0 1.5px var(--accent); animation: shelf-pulse 1.4s ease-in-out infinite; }
+@keyframes shelf-pulse { 50% { opacity: .35; } }
+.shelf-x {
+  position: absolute; top: -2px; left: -2px; width: 16px; height: 16px; padding: 0; border: 0; border-radius: 50%;
+  display: none; align-items: center; justify-content: center; background: var(--elevated, var(--bg-2)); color: var(--label-2);
+  box-shadow: 0 0 0 .5px var(--separator-strong); cursor: pointer;
+}
+.shelf-item:hover .shelf-x, .shelf-item:focus-within .shelf-x { display: inline-flex; }
+.shelf-x:hover { color: var(--red); }
+.dock { right: calc(8px + var(--shelf-w, 0px)); }
+@media (prefers-reduced-motion: reduce) { .shelf { transition: none; } .shelf-item.pending .shelf-dot { animation: none; } }

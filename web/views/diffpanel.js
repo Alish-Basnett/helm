@@ -6,7 +6,7 @@
 import { h, setHidden, setClass } from '../dom.js';
 import { icon } from '../icons.js';
 import { state, subscribe, lsGet, lsSet } from '../store.js';
-import { panelClose } from '../dock.js';
+import { panelClose, panelMinimise } from '../dock.js';
 import { setDiff } from '../router.js';
 import { toast } from '../ui.js';
 import { tokenize, splitLines } from '../code.js';
@@ -176,7 +176,7 @@ export function createDiffPanel(dock) {
   const srcNote = h('span', { class: 'dp-srcnote mono', hidden: true });
   const refreshBtn = h('button', { class: 'icon-btn sm dp-refresh', type: 'button', 'aria-label': 'Recompute the diff now', title: 'Recompute from the working tree', onclick: () => { const t = state.tasks.get(taskId); if (t) loadDiff(t, true); } }, icon('retry', 14));
   const head = h('header', { class: 'sheet-head dp-head' },
-    h('div', { class: 'sheet-head-top' }, titleEl, h('span', { class: 'spacer' }), panelClose(panel, 'Close diff')),
+    h('div', { class: 'sheet-head-top' }, titleEl, h('span', { class: 'spacer' }), panelMinimise(panel, 'Minimise diff'), panelClose(panel, 'Close diff')),
     h('div', { class: 'dp-meta' }, chip),
     h('div', { class: 'dp-meta dp-meta2' }, totals, srcBadge, srcNote, h('span', { class: 'spacer' }), refreshBtn));
 
@@ -470,6 +470,7 @@ export function createDiffPanel(dock) {
   /* ----- route-driven ----- */
   function show(id, rel) {
     if (!id || !rel) {
+      if (panel.isMinimised) return;
       taskId = null; cur = null; tabsSig = ''; bodySig = ''; body = null;
       if (panel.isOpen) panel.close();
       return;
@@ -512,5 +513,5 @@ export function createDiffPanel(dock) {
   const offDiff = onDiff((id) => { if (id === taskId) render(); });
   const offDock = dock.subscribe(() => { if (taskId) panel.setLabel(`Diff · ${taskId}`); });
 
-  return { show, get taskId() { return taskId; }, destroy() { off(); offDiff(); offDock(); } };
+  return { show, get taskId() { return taskId; }, get rel() { return cur; }, destroy() { off(); offDiff(); offDock(); } };
 }

@@ -268,3 +268,105 @@ export function createFloating(opts) {
     },
   };
 }
+
+/* ---------- bubble: a small circular, draggable launcher (the minimised form of a window) ---------- */
+export const BUBBLE = 52;
+const BUBBLE_EDGE = 6; // px kept clear of the viewport edge
+const DRAG_SLOP = 5; // px of travel before a press counts as a drag, not a click
+
+/** Pure: keep a bubble of `size` fully on screen. */
+export function clampBubble(p, vw, vh, size = BUBBLE) {
+  const x = Math.round(Math.min(Math.max(p.x, BUBBLE_EDGE), Math.max(BUBBLE_EDGE, vw - size - BUBBLE_EDGE)));
+  const y = Math.round(Math.min(Math.max(p.y, BUBBLE_EDGE), Math.max(BUBBLE_EDGE, vh - size - BUBBLE_EDGE)));
+  return { x, y };
+}
+
+/**
+ * opts: { storeKey, label, title?, iconEl, className?, onActivate() }
+ * Drag it anywhere (position persists); a click without movement calls onActivate. Alt+arrows nudge it.
+ * → { el, show, hide, isVisible, pos, destroy }
+ */
+export function createBubble(opts) {
+  const { storeKey } = opts;
+  const el = h('button', {
+    class: ['float-bubble', opts.className], type: 'button', hidden: true,
+    'aria-label': opts.label, title: opts.title || opts.label,
+  }, opts.iconEl);
+  document.body.append(el);
+  const vp = () => ({ vw: window.innerWidth || 1024, vh: window.innerHeight || 768 });
+  const saved = loadFloat(storeKey);
+  let pos;
+  {
+    const { vw, vh } = vp();
+    pos = clampBubble({ x: num(saved.x) ?? vw - BUBBLE - 22, y: num(saved.y) ?? vh - BUBBLE - 22 }, vw, vh);
+  }
+  let visible = false;
+  const paint = () => { el.style.left = pos.x + 'px'; el.style.top = pos.y + 'px'; };
+  const move = (p, persist) => {
+    const { vw, vh } = vp();
+    pos = clampBubble(p, vw, vh);
+    paint();
+    if (persist) saveFloat(storeKey, pos);
+  };
+
+  let dragged = false; // swallows the click that follows a drag
+  el.addEventListener('pointerdown', (e) => {
+    if (e.button != null && e.button !== 0) return;
+    const start = { x: e.clientX, y: e.clientY, pos: { ...pos } };
+    dragged = false;
+    try { el.setPointerCapture(e.pointerId); } catch { /* synthetic pointer */ }
+    let pending = null, frame = 0;
+    const flush = () => {
+      frame = 0;
+      if (pending) { move({ x: start.pos.x + pending.x - start.x, y: start.pos.y + pending.y - start.y }, false); pending = null; }
+    };
+    const onMove = (ev) => {
+      if (!dragged && Math.hypot(ev.clientX - start.x, ev.clientY - start.y) < DRAG_SLOP) return;
+      if (!dragged) { dragged = true; el.classList.add('dragging'); document.documentElement.classList.add('float-gesture'); document.documentElement.style.setProperty('--float-cursor', 'grabbing'); }
+      pending = { x: ev.clientX, y: ev.clientY };
+      if (!frame) frame = raf(flush);
+    };
+    const end = (ev) => {
+      if (frame) { caf(frame); frame = 0; }
+      flush();
+      try { el.releasePointerCapture(ev.pointerId); } catch { /* not captured */ }
+      el.removeEventListener('pointermove', onMove);
+      el.removeEventListener('pointerup', end);
+      el.removeEventListener('pointercancel', end);
+      el.classList.remove('dragging');
+      document.documentElement.classList.remove('float-gesture');
+      if (dragged) { saveFloat(storeKey, pos); setTimeout(() => { dragged = false; }, 0); }
+    };
+    el.addEventListener('pointermove', onMove);
+    el.addEventListener('pointerup', end);
+    el.addEventListener('pointercancel', end);
+  });
+  el.addEventListener('click', (e) => {
+    if (dragged) { e.preventDefault(); e.stopPropagation(); return; }
+    opts.onActivate();
+  });
+  el.addEventListener('keydown', (e) => {
+    if (!e.altKey || e.ctrlKey || e.metaKey) return;
+    const k = e.key;
+    if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(k)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    move({ x: pos.x + (k === 'ArrowLeft' ? -STEP : k === 'ArrowRight' ? STEP : 0), y: pos.y + (k === 'ArrowUp' ? -STEP : k === 'ArrowDown' ? STEP : 0) }, true);
+  });
+  let queued = 0;
+  const onWinResize = () => {
+    if (queued) return;
+    queued = raf(() => { queued = 0; const { vw, vh } = vp(); pos = clampBubble(pos, vw, vh); paint(); });
+  };
+  window.addEventListener('resize', onWinResize);
+  paint();
+
+  return {
+    el,
+    get isVisible() { return visible; },
+    get pos() { return { ...pos }; },
+    show() { if (visible) return; visible = true; el.hidden = false; el.classList.add('enter'); setTimeout(() => el.classList.remove('enter'), 260); },
+    hide() { visible = false; el.hidden = true; el.classList.remove('dragging'); },
+    destroy() { window.removeEventListener('resize', onWinResize); el.remove(); },
+  };
+}

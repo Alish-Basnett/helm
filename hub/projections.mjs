@@ -123,6 +123,51 @@ export function usageSummary(db, now, days = 7) {
     days: [...buckets].map(([date, b]) => ({ date, overheadUsd: money(b.overheadUsd), requestedUsd: money(b.requestedUsd) })),
   };
 }
+/**
+ * Cost analytics over the last `days` local days: spend per day, per project, per model and per task.
+ * Project comes from the usage row's session (sessions.project_id); rows with a missing session group under project null.
+ * `sessionCostUsd` is the cost the session projection holds for sessions started in the window, per project.
+ */
+export function usageBreakdown(db, now, days = 7) {
+  const d0 = new Date(now);
+  const start = new Date(d0.getFullYear(), d0.getMonth(), d0.getDate() - (days - 1)).getTime();
+  const end = new Date(d0.getFullYear(), d0.getMonth(), d0.getDate() + 1).getTime();
+  const byDay = new Map();
+  for (let i = days - 1; i >= 0; i--) byDay.set(localDate(new Date(d0.getFullYear(), d0.getMonth(), d0.getDate() - i).getTime()), 0);
+  const byProject = {}, byModel = {}, byTask = {};
+  const add = (m, key, r) => {
+    const e = (m[key] ||= { calls: 0, costUsd: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0 });
+    e.calls++; e.costUsd += r.cost_usd; e.inputTokens += r.input_tokens; e.outputTokens += r.output_tokens; e.cacheReadTokens += r.cache_read_tokens;
+  };
+  let total = 0;
+  const rows = db.all(
+    `SELECT u.at, u.model, u.input_tokens, u.output_tokens, u.cache_read_tokens, u.cost_usd, u.task_id, s.project_id
+       FROM usage u LEFT JOIN sessions s ON s.id = u.session_id WHERE u.at >= ? AND u.at < ? ORDER BY u.id`, start, end);
+  for (const r of rows) {
+    const date = localDate(r.at);
+    if (!byDay.has(date)) continue;
+    byDay.set(date, byDay.get(date) + r.cost_usd);
+    total += r.cost_usd;
+    add(byProject, r.project_id ?? '', r);
+    add(byModel, r.model || 'unknown', r);
+    if (r.task_id) add(byTask, r.task_id, r);
+  }
+  const names = Object.fromEntries(db.all('SELECT id, name FROM projects').map((p) => [p.id, p.name]));
+  const titles = Object.fromEntries(db.all('SELECT id, title FROM tasks').map((t) => [t.id, t.title]));
+  const sessionCost = Object.fromEntries(db.all(
+    'SELECT project_id, SUM(cost_usd) AS c FROM sessions WHERE started_at >= ? AND started_at < ? GROUP BY project_id', start, end,
+  ).map((r) => [r.project_id, money(r.c ?? 0)]));
+  const list = (m, shape) => Object.entries(m)
+    .map(([k, e]) => ({ ...shape(k), calls: e.calls, costUsd: money(e.costUsd), inputTokens: e.inputTokens, outputTokens: e.outputTokens, cacheReadTokens: e.cacheReadTokens }))
+    .sort((a, b) => b.costUsd - a.costUsd);
+  return {
+    totalUsd: money(total),
+    perDay: [...byDay].map(([date, c]) => ({ date, costUsd: money(c) })),
+    perProject: list(byProject, (k) => ({ projectId: k || null, name: names[k] ?? null, sessionCostUsd: sessionCost[k] ?? 0 })),
+    perModel: list(byModel, (k) => ({ model: k })),
+    perTask: list(byTask, (k) => ({ taskId: k, title: titles[k] ?? null })),
+  };
+}
 export function usageToday(db, now) {
   const { overheadUsd, requestedUsd } = usageSummary(db, now, 1).today;
   return { overheadUsd, requestedUsd };
