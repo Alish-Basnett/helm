@@ -4,6 +4,20 @@ All notable changes to Helm are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/). Shapes and endpoints are defined in `CONTRACT.md`.
 
+## [0.8.0] - 2026-10-10
+
+### Added
+
+- Diff panel: clicking a file in Files changed opens its diff in its own resizable Dock panel, with a tab
+  per file (`+a −d`), unified and split views with aligned changes, syntax highlighting, wrap, Copy path,
+  Copy diff and an "Open in editor" link. The open file is kept in the URL (`&diff=`), and very long
+  diffs load in chunks.
+- Detachable Talk: pop Talk out of the Dock into a floating window you can drag anywhere and resize from
+  any edge or corner (⇧T, or the header button). It keeps drafts, scroll position and code mode, and
+  remembers its position.
+- Threads timeline: the axis fits the visible rows automatically, with − / + / Fit zoom, ⌘-scroll zoom
+  around the cursor, panning, tick marks that adapt to the zoom level, and bars of at least 3px.
+
 ## [0.7.1] - 2026-10-10
 
 ### Fixed

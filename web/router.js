@@ -9,7 +9,7 @@ export function parseHash(hash = location.hash) {
   const view = VIEWS.includes(segs[0]) ? segs[0] : 'board';
   const query = new URLSearchParams(queryPart);
   const task = query.get('task') || null;
-  return { view, args: segs.slice(1), query, task, chat: !!task && query.get('chat') === '1' };
+  return { view, args: segs.slice(1), query, task, chat: !!task && query.get('chat') === '1', diff: (task && query.get('diff')) || null };
 }
 
 export function buildHash({ view, args = [], query = {} }) {
@@ -51,12 +51,13 @@ export function openTask(id) {
   const r = current;
   const query = {}; r.query.forEach((v, k) => { query[k] = v; });
   query.task = id;
+  delete query.diff; // a diff belongs to one task
   if (chatPref()) query.chat = '1'; else delete query.chat;
   go(buildHash({ view: r.view, args: r.args, query }), false);
 }
 export function closeTask() {
   const r = current;
-  const query = {}; r.query.forEach((v, k) => { if (k !== 'task' && k !== 'chat') query[k] = v; });
+  const query = {}; r.query.forEach((v, k) => { if (k !== 'task' && k !== 'chat' && k !== 'diff') query[k] = v; });
   go(buildHash({ view: r.view, args: r.args, query }), true);
 }
 /** Show/hide the open task's chat panel; remembers the choice for the next task. */
@@ -67,6 +68,14 @@ export function setChat(on) {
   const query = {}; r.query.forEach((v, k) => { if (k !== 'chat') query[k] = v; });
   if (on) query.chat = '1';
   go(buildHash({ view: r.view, args: r.args, query }), true);
+}
+/** Open the Diff panel on a file (repo-relative path) of the open task, or close it with null. */
+export function setDiff(rel) {
+  const r = current;
+  if (!r.task) return;
+  const query = {}; r.query.forEach((v, k) => { if (k !== 'diff') query[k] = v; });
+  if (rel) query.diff = rel;
+  go(buildHash({ view: r.view, args: r.args, query }), !!r.diff);
 }
 export function setArgs(args, opts = {}) {
   const r = current;

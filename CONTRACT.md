@@ -347,6 +347,7 @@ Opening a v0.1 database adds the new tables/columns in place. Old events are not
 - **Files changed**: section label shows `N files +A −D`; each file is a collapsed row (status badge,
   path, `+a −d`); expanding shows the unified diff (hunks, line numbers, add/remove colouring); a
   refresh button re-fetches live.
+  (T-26) Clicking a file row opens the **Diff panel** (Dock id `diff`, between Task chat and Task details, 760px default, URL `&diff=<rel path>`): file tabs, unified/split, line numbers, syntax colours, copy path/patch; the row's chevron keeps the inline peek.
 - **Task links**: any `T-<n>` in Talk bubbles, replies, notes and activity renders as a small chip
   `T-12 · <title>`; clicking opens that task's details + chat while Talk stays open.
 

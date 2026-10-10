@@ -71,10 +71,10 @@ export function renderDiff(file) {
   return root;
 }
 
-const dirOf = (f) => { const i = f.lastIndexOf('/'); return i > 0 ? f.slice(0, i + 1) : ''; };
-const baseOf = (f) => f.slice(f.lastIndexOf('/') + 1);
+export const dirOf = (f) => { const i = f.lastIndexOf('/'); return i > 0 ? f.slice(0, i + 1) : ''; };
+export const baseOf = (f) => f.slice(f.lastIndexOf('/') + 1);
 
-function statNodes(a, d) {
+export function statNodes(a, d) {
   return [h('span', { class: 'df-add' }, `+${a}`), ' ', h('span', { class: 'df-del' }, `${MINUS}${d}`)];
 }
 function bar(a, d) {
@@ -85,14 +85,54 @@ function bar(a, d) {
   for (let i = 0; i < 5; i++) el.append(h('i', { class: i < adds ? 'a' : i < adds + dels ? 'd' : '' }));
   return el;
 }
+export { STATUS_TITLE, SOURCE_LABEL };
 
-/* ---------- per-task cache (module level: survives the sheet being rebuilt) ---------- */
+/* ---------- per-task cache (module level: survives the sheet being rebuilt, shared with the Diff panel) ---------- */
 const cache = new Map(); // taskId -> { status: 'loading' | 'ok' | 'none' | 'error', data, sig, at, error, inflight }
+const subs = new Set();
 const statEq = (x, y) => !!x && !!y && x.files === y.files && x.additions === y.additions && x.deletions === y.deletions;
 const sigOf = (t) => JSON.stringify(t.diffStat || null);
+const notify = (id) => { for (const fn of Array.from(subs)) { try { fn(id); } catch (e) { console.error(e); } } };
+/** Called with the task id whenever that task's cached diff changes. */
+export function onDiff(fn) { subs.add(fn); return () => subs.delete(fn); }
+export const diffEntry = (id) => cache.get(id);
+export const taskHasFiles = (t) => !!t && ((t.filesChanged || []).length > 0 || !!(t.diffStat && t.diffStat.files));
+const normalize = (d) => ({
+  source: (d && d.source) || 'none', root: (d && d.root) || '', base: d && d.base,
+  totals: (d && d.totals) || { files: ((d && d.files) || []).length, additions: 0, deletions: 0 },
+  files: Array.isArray(d && d.files) ? d.files : [], note: d && d.note,
+});
+function stale(e, t) {
+  if (e.sig === sigOf(t) || statEq(t.diffStat, e.data && e.data.totals)) return false;
+  return Date.now() - e.at > 1500;
+}
+/** Fetch the diff unless a fresh one is cached (diffStat unchanged). */
+export function ensureDiff(t) {
+  if (!t || !taskHasFiles(t)) return;
+  const e = cache.get(t.id);
+  if (!e || (e.status === 'ok' && stale(e, t))) loadDiff(t, false);
+}
+export async function loadDiff(t, refresh) {
+  if (!t) return;
+  const id = t.id;
+  const prev = cache.get(id);
+  if (prev && prev.inflight) return;
+  const entry = { ...(prev || {}), status: 'loading', inflight: true, sig: sigOf(t), at: Date.now() };
+  cache.set(id, entry);
+  notify(id);
+  try {
+    const data = await api.taskDiff(id, refresh);
+    cache.set(id, { status: 'ok', data: normalize(data), sig: entry.sig, at: Date.now(), inflight: false });
+  } catch (e) {
+    cache.set(id, e && e.status === 404
+      ? { status: 'none', data: null, sig: entry.sig, at: Date.now(), inflight: false }
+      : { status: 'error', data: prev && prev.data, sig: entry.sig, at: Date.now(), inflight: false, error: (e && e.message) || 'Could not load the diff' });
+  }
+  notify(id);
+}
 
 /**
- * opts: { getTask(): Task | null }
+ * opts: { getTask(): Task | null, onOpen?(task, file) }  (onOpen opens the file in the Diff panel)
  * → { el, update(task), destroy }
  */
 export function createFilesChanged(opts) {
@@ -120,62 +160,36 @@ export function createFilesChanged(opts) {
     setHidden(refreshBtn, !open);
   }
 
-  /* ----- fetching ----- */
-  function ensureFetched() {
-    const t = opts.getTask();
-    if (!t || !hasFiles(t)) return;
-    const e = cache.get(t.id);
-    if (!e) fetchDiff(false);
-    else if (e.status === 'ok' && stale(e, t)) fetchDiff(false);
-  }
-  function stale(e, t) {
-    if (e.sig === sigOf(t) || statEq(t.diffStat, e.data && e.data.totals)) return false;
-    return Date.now() - e.at > 1500;
-  }
-  async function fetchDiff(refresh) {
-    const t = opts.getTask();
-    if (!t) return;
-    const id = t.id;
-    const prev = cache.get(id);
-    if (prev && prev.inflight) return;
-    const entry = { ...(prev || {}), status: 'loading', inflight: true, sig: sigOf(t), at: Date.now() };
-    cache.set(id, entry);
-    render();
-    try {
-      const data = await api.taskDiff(id, refresh);
-      const cur = opts.getTask();
-      cache.set(id, { status: 'ok', data: normalize(data), sig: cur && cur.id === id ? sigOf(cur) : entry.sig, at: Date.now(), inflight: false });
-    } catch (e) {
-      cache.set(id, e && e.status === 404
-        ? { status: 'none', data: null, sig: entry.sig, at: Date.now(), inflight: false }
-        : { status: 'error', data: prev && prev.data, sig: entry.sig, at: Date.now(), inflight: false, error: (e && e.message) || 'Could not load the diff' });
-    }
-    if (taskId === id) render();
-  }
-  const normalize = (d) => ({
-    source: (d && d.source) || 'none', root: (d && d.root) || '', base: d && d.base,
-    totals: (d && d.totals) || { files: ((d && d.files) || []).length, additions: 0, deletions: 0 },
-    files: Array.isArray(d && d.files) ? d.files : [], note: d && d.note,
-  });
+  const ensureFetched = () => ensureDiff(opts.getTask());
+  const fetchDiff = (refresh) => loadDiff(opts.getTask(), refresh);
+  const hasFiles = taskHasFiles;
+  const offDiff = onDiff((id) => { if (id === taskId) render(); });
 
-  const hasFiles = (t) => (t.filesChanged || []).length > 0 || !!(t.diffStat && t.diffStat.files);
-
-  /* ----- rows ----- */
+/* ----- rows ----- */
   function makeItem(f) {
     const chevron = h('span', { class: 'fc-chev' }, icon('chevronRight', 13));
+    const peek = h('button', { class: 'fc-peek', type: 'button', 'aria-expanded': 'false', title: 'Peek at the diff inline' }, chevron);
     const badge = h('span', { class: 'fc-badge mono' });
     const path = h('span', { class: 'fc-path mono' }, h('span', { class: 'file-dir' }), h('span', { class: 'file-name' }));
     const stat = h('span', { class: 'fc-stat mono' });
     const bars = h('span', { class: 'fc-bar-wrap' });
-    const row = h('button', { class: 'fc-row', type: 'button', 'aria-expanded': 'false' }, chevron, badge, path, stat, bars);
+    const main = h('button', { class: 'fc-main', type: 'button' }, badge, path, stat, bars);
+    const row = h('div', { class: 'fc-row' }, peek, main);
     const diff = h('div', { class: 'fc-diff', hidden: true });
     const li = h('li', { class: 'fc-item' }, row, diff);
-    li.__r = { row, badge, path, stat, bars, diff };
-    row.addEventListener('click', () => {
+    li.__r = { row, peek, main, badge, path, stat, bars, diff };
+    const toggleInline = () => {
       const f2 = li.__f;
       if (!f2) return;
       if (expanded.has(f2.path)) expanded.delete(f2.path); else expanded.add(f2.path);
       paintItem(li);
+    };
+    peek.addEventListener('click', toggleInline);
+    main.addEventListener('click', () => {
+      const f2 = li.__f;
+      if (!f2) return;
+      const t = opts.getTask();
+      if (opts.onOpen && t) opts.onOpen(t, f2); else toggleInline();
     });
     return li;
   }
@@ -189,7 +203,8 @@ export function createFilesChanged(opts) {
     const rel = f.rel || f.path || '';
     setText(r.path.firstChild, dirOf(rel));
     setText(r.path.lastChild, baseOf(rel));
-    r.row.title = f.path || rel;
+    r.main.title = opts.onOpen ? `Open ${f.path || rel} in the Diff panel` : (f.path || rel);
+    r.peek.setAttribute('aria-label', `Peek at the diff of ${rel}`);
     const sig = `${f.additions}|${f.deletions}|${f.binary ? 1 : 0}`;
     if (r.stat.__sig !== sig) {
       r.stat.__sig = sig;
@@ -205,7 +220,7 @@ export function createFilesChanged(opts) {
     const f = li.__f;
     const r = li.__r;
     const on = expanded.has(f.path);
-    r.row.setAttribute('aria-expanded', String(on));
+    r.peek.setAttribute('aria-expanded', String(on));
     setClass(li, 'open', on);
     setHidden(r.diff, !on);
     if (on) {
@@ -272,5 +287,5 @@ export function createFilesChanged(opts) {
     render();
   }
 
-  return { el, update, refresh: () => fetchDiff(true), destroy() { /* cache is module level */ } };
+  return { el, update, refresh: () => fetchDiff(true), destroy() { offDiff(); } };
 }

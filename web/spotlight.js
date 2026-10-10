@@ -5,7 +5,8 @@ import { state, sel, setUI } from './store.js';
 import { api } from './api.js';
 import { setPref, codeOn } from './prefs.js';
 import { setStatus, startTask, canStart } from './actions.js';
-import { navigate, openTask } from './router.js';
+import { navigate, openTask, route, setDiff } from './router.js';
+import { diffEntry, ensureDiff, onDiff, taskHasFiles } from './diffs.js';
 import { fmtAgo, truncate, STATUS_META } from './format.js';
 
 const KIND = {
@@ -52,6 +53,7 @@ export function createSpotlight(root) {
     const cmds = [
       { title: 'Talk to session', sub: 'Chat with a live session of this project', icon: 'chat', run: () => bus.emit('open-talk') },
       { title: 'Start task…', sub: 'Pick a task to start in a live session', icon: 'play', stay: true, run: () => { input.value = '>start '; onInput(); input.focus(); } },
+      { title: 'Open diff…', sub: 'Show a changed file of the open task in the Diff panel', icon: 'file', stay: true, run: () => { input.value = '>diff '; onInput(); input.focus(); } },
       { title: 'Review choices…', sub: 'Tick which suggestions to turn into tasks', icon: 'checklist', stay: true, run: () => { input.value = '>choices '; onInput(); input.focus(); } },
       { title: 'New task', sub: 'Open the composer on the Board', icon: 'plus', run: () => { navigate('board'); setTimeout(() => bus.emit('new-task'), 60); } },
       { title: 'Go to Board', icon: 'board', run: () => navigate('board') },
@@ -78,6 +80,16 @@ export function createSpotlight(root) {
         .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
       for (const x of startable) cmds.push({ taskCmd: true, hay: `${x.id} ${x.title}`.toLowerCase(), title: `Start ${x.id} · ${truncate(x.title, 56)}`, sub: `${STATUS_META[x.status].label} · ${sel.projectName(x.projectId)}`, icon: 'play', run: () => startTask(x.id) });
       if (!startable.length) cmds.push({ title: 'Nothing to start', sub: 'Backlog, Up next, Saved for later and Blocked tasks can be started', icon: 'play', disabled: true });
+    }
+    if (/^diff\b/.test(needle)) {
+      const ot = route().task ? state.tasks.get(route().task) : null;
+      if (ot && taskHasFiles(ot)) {
+        ensureDiff(ot);
+        const e = diffEntry(ot.id);
+        const files = e && e.data && e.data.files.length ? e.data.files.map((f) => ({ rel: f.rel || f.path, st: f.status, a: f.additions, d: f.deletions }))
+          : (ot.filesChanged || []).map((f) => ({ rel: f }));
+        for (const f of files) cmds.push({ taskCmd: true, hay: f.rel.toLowerCase(), title: `Diff ${f.rel}`, sub: f.a != null ? `${ot.id} · +${f.a} −${f.d}` : ot.id, icon: 'file', run: () => setDiff(f.rel) });
+      } else cmds.push({ title: 'No diff to open', sub: ot ? 'This task has no changed files' : 'Open a task first', icon: 'file', disabled: true });
     }
     if (/^(choices|review)\b/.test(needle)) {
       const ct = sel.choiceTasks();
@@ -164,6 +176,8 @@ export function createSpotlight(root) {
       .map((t) => ({ kind: 'task', group: 'recent', id: t.id, taskId: t.id, title: t.title, sub: `${t.id} · ${sel.projectName(t.projectId)}`, meta: fmtAgo(t.updatedAt) }));
   }
 
+  onDiff(() => { if (isOpen && /^>\s*diff\b/i.test(input.value)) onInput(); }); // the file list arrives after the fetch
+
   function onInput() {
     const raw = input.value;
     const q = raw.trim();
@@ -175,7 +189,7 @@ export function createSpotlight(root) {
     search.cancel();
     if (cmdMode) {
       const needle = raw.slice(1).trim().toLowerCase();
-      const rest = (/^(?:start|choices|review)\s+(.*)$/.exec(needle) || [])[1];
+      const rest = (/^(?:start|choices|review|diff)\s+(.*)$/.exec(needle) || [])[1];
       items = commands(needle).filter((c) => (c.taskCmd ? !rest || c.hay.includes(rest) : !needle || c.title.toLowerCase().includes(needle) || (c.sub || '').toLowerCase().includes(needle))).map((c) => ({ ...c, group: 'command' }));
       loading = false;
       render();

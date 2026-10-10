@@ -119,18 +119,32 @@ export function niceStep(span, want) {
   const raw = span / Math.max(1, want);
   return STEPS.find((s) => s >= raw) || STEPS[STEPS.length - 1];
 }
+// Tick steps the zoomable axis snaps to: 10s / 30s / 1m / 5m / 15m / 1h / 3h / 1d.
+export const TICK_STEPS = [10e3, 30e3, 60e3, 300e3, 900e3, HOUR, 3 * HOUR, 86400e3];
+const MIN_SPAN = 30e3, MAX_SPAN = 7 * 86400e3, FIT_MIN = 120e3, FIT_PAD = 0.05, MIN_BAR_PX = 3;
+export function tickStep(span, want) {
+  const raw = span / Math.max(1, want);
+  return TICK_STEPS.find((s) => s >= raw) || TICK_STEPS[TICK_STEPS.length - 1];
+}
+/** Exact duration for tooltips: millisecond precision under a minute. */
+export function fmtDurExact(ms) {
+  ms = Math.max(0, Math.round(ms));
+  if (ms < 1000) return `${ms} ms`;
+  if (ms < 60e3) return `${(ms / 1000).toFixed(ms % 1000 ? 1 : 0)} s (${ms.toLocaleString('en-US')} ms)`;
+  return fmtDur(ms);
+}
 export function makeTicks(t0, t1, want) {
-  const step = niceStep(t1 - t0, want);
+  const step = tickStep(t1 - t0, want);
   const off = new Date(t0).getTimezoneOffset() * 60000; // align to local clock
   const out = [];
   for (let t = Math.ceil((t0 - off) / step) * step + off; t <= t1 && out.length < 60; t += step) out.push(t);
-  const fmt = step < 60e3 ? (t) => { const d = new Date(t); return `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`; }
+  const fmt = (t1 - t0) < 120e3 ? (t) => { const d = new Date(t); return `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`; }
     : step < 86400e3 ? (t) => fmtTime(t) : (t) => fmtDay(t);
   return out.map((t) => ({ t, label: fmt(t) }));
 }
 
 function loadPrefs() {
-  const p = { view: 'tree', density: 'compact', status: [], model: 'all', scopeAll: false };
+  const p = { view: 'tree', density: 'compact', status: [], model: 'all', scopeAll: false, zoom: 'auto' };
   try {
     const j = JSON.parse(lsGet(PREFS_KEY, '{}') || '{}');
     if (j.view === 'tree' || j.view === 'timeline') p.view = j.view;
@@ -138,11 +152,12 @@ function loadPrefs() {
     if (Array.isArray(j.status)) p.status = j.status.filter((x) => FILTER_STATUSES.some((f) => f[0] === x));
     if (typeof j.model === 'string') p.model = j.model;
     p.scopeAll = !!j.scopeAll;
+    if (j.zoom === 'manual') p.zoom = 'manual';
   } catch { /* corrupt prefs: use defaults */ }
   return p;
 }
 function savePrefs(p) {
-  try { lsSet(PREFS_KEY, JSON.stringify({ view: p.view, density: p.density, status: p.status, model: p.model, scopeAll: p.scopeAll })); } catch { /* storage unavailable */ }
+  try { lsSet(PREFS_KEY, JSON.stringify({ view: p.view, density: p.density, status: p.status, model: p.model, scopeAll: p.scopeAll, zoom: p.zoom })); } catch { /* storage unavailable */ }
 }
 
 export function mount(container) {
@@ -160,6 +175,8 @@ export function mount(container) {
   let modelVer = 0;
   let scale = { t0: Date.now() - HOUR, t1: Date.now(), span: HOUR };
   let hasLive = false;
+  let fitted = false;            // has `scale` been initialised for this mount?
+  let fitTimer = null;
   let rid = 0;
   startTicker();
 
@@ -183,8 +200,13 @@ export function mount(container) {
   const modelSel = h('select', { class: 'select select-sm', 'aria-label': 'Filter by model', onchange: () => setPref('model', modelSel.value) });
   const search = h('input', { type: 'text', class: 'th-search', inputmode: 'search', placeholder: 'Search title, description, task id', 'aria-label': 'Search agents', autocomplete: 'off', spellcheck: 'false' });
   const searchWrap = h('label', { class: 'th-search-wrap' }, icon('search', 14), search, h('kbd', { class: 'th-kbd mono', 'aria-hidden': 'true' }, '/'));
+  const zoomBtn = (label, title, fn, cls) => h('button', { class: `th-seg-btn ${cls || ''}`.trim(), type: 'button', title, 'aria-label': title, onclick: fn }, label);
+  const zoomSpan = h('span', { class: 'th-zoom-span mono', 'aria-live': 'off' });
+  const fitBtn = zoomBtn('Fit', 'Fit the axis to the visible rows (0)', () => fitAxis(), 'th-fit');
+  const zoomSeg = h('div', { class: 'th-seg th-zoom', role: 'group', 'aria-label': 'Timeline zoom' },
+    zoomBtn('\u2212', 'Zoom out (-)', () => zoomBy(1.6, 0.5)), zoomBtn('+', 'Zoom in (+)', () => zoomBy(1 / 1.6, 0.5)), fitBtn);
   const bar = h('div', { class: 'threads-bar' },
-    h('div', { class: 'th-bar-row' }, h('label', { class: 'field-label inline' }, icon('threads', 15), picker), sessMeta, h('span', { class: 'th-grow' }), viewSeg, densSeg),
+    h('div', { class: 'th-bar-row' }, h('label', { class: 'field-label inline' }, icon('threads', 15), picker), sessMeta, h('span', { class: 'th-grow' }), zoomSpan, zoomSeg, viewSeg, densSeg),
     h('div', { class: 'th-bar-row' }, chipRow, modelSel, searchWrap));
 
   const sizer = h('div', { class: 'th-sizer' });
@@ -361,7 +383,7 @@ export function mount(container) {
     const models = new Set();
     const forced = !!query;
     const out = [];
-    let agentsShown = 0, liveShown = 0, laneN = 0, t0 = Infinity, t1 = -Infinity;
+    let agentsShown = 0, liveShown = 0, laneN = 0;
     for (const ses of list) {
       for (const a of sel.agentsOfSession(ses.id)) { models.add(modelInfo(a.model).key); if (passBase(a) && counts[a.status] != null) counts[a.status]++; }
       const lane = buildLane(ses, ctx);
@@ -369,7 +391,6 @@ export function mount(container) {
       laneN++;
       agentsShown += lane.total;
       liveShown += lane.shown.filter(isLive).length;
-      for (const a of lane.shown) { if (a.startedAt < t0) t0 = a.startedAt; const e = endOf(a, now); if (e > t1) t1 = e; }
       flatten(lane, out, forced);
     }
     hasLive = liveShown > 0;
@@ -382,15 +403,115 @@ export function mount(container) {
     lanes = items.filter((it) => it.kind === 'lane');
     sizer.style.height = `${totalH}px`;
     // time scale
-    if (!Number.isFinite(t0)) { t0 = now - HOUR; t1 = now; }
-    if (hasLive) t1 = Math.max(t1, now);
-    let span = Math.max(60e3, t1 - t0);
-    scale = { t0: t0 - span * 0.01, t1: t1 + span * 0.02, span: 0 };
-    scale.span = scale.t1 - scale.t0;
+    if (!fitted || prefs.view !== 'timeline') { scale = toScale(fitRange(now)); fitted = prefs.view === 'timeline'; }
+    else if (prefs.zoom === 'auto') requestFit(false);
     paintControls(counts, models, agentsShown, laneN, liveShown);
     paintGridChrome();
     renderWindow(true);
   }
+
+  /* ---------- axis range: auto-fit + manual zoom ---------- */
+  const toScale = (r) => ({ t0: r.t0, t1: r.t1, span: r.t1 - r.t0 });
+  const plotRect = () => { const el = axis.querySelector('.th-axis-plot'); return el ? el.getBoundingClientRect() : { left: 0, width: 0 }; };
+  /** Earliest start .. latest end (now for live) of the rows in view, padded 5% a side, at least 2 minutes. */
+  function fitRange(now) {
+    const st = scroller.scrollTop, vh = scroller.clientHeight || 640;
+    const lo = st + topInset(), hi = st + vh;
+    let t0 = Infinity, t1 = -Infinity, live = false;
+    const take = (list) => {
+      for (const it of list) {
+        if (it.kind !== 'agent') continue;
+        const a = it.a;
+        if (a.startedAt < t0) t0 = a.startedAt;
+        const e = endOf(a, now);
+        if (e > t1) t1 = e;
+        if (isLive(a)) live = true;
+      }
+    };
+    let a = 0, b = items.length;
+    while (a < b) { const m = (a + b) >> 1; if (items[m].y + items[m].h < lo) a = m + 1; else b = m; }
+    const vis = [];
+    for (let i = a; i < items.length && items[i].y <= hi; i++) vis.push(items[i]);
+    take(vis);
+    if (!Number.isFinite(t0)) take(items); // nothing agent-shaped in view: fall back to everything shown
+    if (!Number.isFinite(t0)) { t0 = now - HOUR; t1 = now; }
+    const pad = (t1 - t0) * FIT_PAD;
+    let r0 = t0 - pad, r1 = t1 + pad;
+    if (live && hasLive) { r1 = now; r0 = t0 - Math.max(pad, 0); } // live: the right edge IS now
+    if (r1 - r0 < FIT_MIN) {
+      if (live && hasLive) r0 = r1 - FIT_MIN;
+      else { const mid = (r0 + r1) / 2; r0 = mid - FIT_MIN / 2; r1 = mid + FIT_MIN / 2; }
+    }
+    return { t0: r0, t1: r1 };
+  }
+  function applyScale(r) {
+    scale = toScale(r);
+    paintGridChrome();
+    renderWindow(true);
+  }
+  /** Auto-fit, debounced: widen at once (never clip a bar mid-scroll), settle to the tight fit ~150ms after things stop moving. */
+  function requestFit(immediate) {
+    if (prefs.view !== 'timeline' || prefs.zoom !== 'auto') return;
+    const now = Date.now();
+    const r = fitRange(now);
+    if (immediate || !fitted) { fitted = true; clearTimeout(fitTimer); fitTimer = null; applyScale(r); return; }
+    const w = { t0: Math.min(scale.t0, r.t0), t1: Math.max(scale.t1, r.t1) };
+    if (w.t0 < scale.t0 - 1 || w.t1 > scale.t1 + 1) applyScale(w);
+    clearTimeout(fitTimer);
+    fitTimer = setTimeout(() => {
+      fitTimer = null;
+      if (prefs.view !== 'timeline' || prefs.zoom !== 'auto') return;
+      const f = fitRange(Date.now());
+      if (Math.abs(f.t0 - scale.t0) > 500 || Math.abs(f.t1 - scale.t1) > 500) applyScale(f);
+    }, 150);
+  }
+  function setZoomMode(mode) {
+    if (prefs.zoom === mode) return;
+    prefs.zoom = mode;
+    savePrefs(prefs);
+  }
+  function fitAxis() {
+    setZoomMode('auto');
+    clearTimeout(fitTimer);
+    fitted = true;
+    applyScale(fitRange(Date.now()));
+  }
+  /** Move to an explicit range; this is what makes auto-fit pause. */
+  function setManual(t0, span) {
+    span = Math.min(MAX_SPAN, Math.max(MIN_SPAN, span));
+    clearTimeout(fitTimer); fitTimer = null;
+    setZoomMode('manual');
+    fitted = true;
+    applyScale({ t0, t1: t0 + span });
+  }
+  /** Zoom by `factor` (>1 zooms out) keeping the time under `frac` (0..1 across the plot) fixed. */
+  function zoomBy(factor, frac) {
+    const f = Number.isFinite(frac) ? Math.min(1, Math.max(0, frac)) : 0.5;
+    const span = Math.min(MAX_SPAN, Math.max(MIN_SPAN, scale.span * factor));
+    const anchor = scale.t0 + f * scale.span;
+    setManual(anchor - f * span, span);
+  }
+  function panBy(dt) { setManual(scale.t0 + dt, scale.span); }
+  const fracAt = (clientX) => { const r = plotRect(); return r.width > 0 ? (clientX - r.left) / r.width : 0.5; };
+  scroller.addEventListener('wheel', (e) => {
+    if (prefs.view !== 'timeline') return;
+    const dx = e.deltaX, dy = e.deltaY;
+    if (e.ctrlKey || e.metaKey) { e.preventDefault(); zoomBy(Math.exp(Math.max(-200, Math.min(200, dy)) * 0.004), fracAt(e.clientX)); return; }
+    const w = plotRect().width || 600;
+    if (e.shiftKey) { e.preventDefault(); panBy(((dx || dy) / w) * scale.span); return; }
+    if (Math.abs(dx) > Math.abs(dy) && dx) { e.preventDefault(); panBy((dx / w) * scale.span); }
+  }, { passive: false });
+  // drag the axis to pan
+  let drag = null;
+  axis.addEventListener('mousedown', (e) => {
+    if (e.button !== 0 || prefs.view !== 'timeline') return;
+    drag = { x: e.clientX, t0: scale.t0, w: plotRect().width || 600 };
+    e.preventDefault();
+  });
+  const onDragMove = (e) => { if (drag) setManual(drag.t0 - ((e.clientX - drag.x) / drag.w) * scale.span, scale.span); };
+  const onDragEnd = () => { drag = null; };
+  document.addEventListener('mousemove', onDragMove);
+  document.addEventListener('mouseup', onDragEnd);
 
   function paintControls(counts, models, agentsShown, laneN, liveShown) {
     root.dataset.view = prefs.view;
@@ -419,6 +540,20 @@ export function mount(container) {
       if (ses) sessMeta.append(h('span', {}, sel.projectName(ses.projectId)), h('span', {}, cwdTail(ses.cwd, 3)), h('span', {}, plural(sel.agentsOfSession(sid).length, 'agent')), h('span', {}, `${liveShown} live`));
     }
     setAttr(scroller, 'aria-label', `Agents, newest first, ${prefs.view} view`);
+    paintZoomUi();
+  }
+
+  function paintZoomUi() {
+    const tl = prefs.view === 'timeline';
+    setHidden(zoomSeg, !tl);
+    setHidden(zoomSpan, !tl);
+    if (!tl) return;
+    const manual = prefs.zoom === 'manual';
+    zoomSpan.textContent = `${manual ? 'Manual' : 'Auto'} \u00b7 ${fmtDur(scale.span)}`;
+    zoomSeg.dataset.mode = prefs.zoom;
+    fitBtn.setAttribute('aria-pressed', String(!manual));
+    setClass(fitBtn, 'paused', manual);
+    fitBtn.title = manual ? 'Auto-fit is paused. Fit to the visible rows (0)' : 'Fit the axis to the visible rows (0)';
   }
 
   /* ---------- timeline chrome (ticks, now line) ---------- */
@@ -430,7 +565,7 @@ export function mount(container) {
     const w = Math.max(300, (scroller.clientWidth || 900) - 260);
     const ticks = makeTicks(scale.t0, scale.t1, Math.max(3, Math.floor(w / 110)));
     const pct = (t) => `${(((t - scale.t0) / scale.span) * 100).toFixed(3)}%`;
-    reconcile(axisTicks, ticks, (t) => `t${t.t}`, (t) => h('span', { class: 'th-axis-tick' }, t.label), (el, t) => { el.style.left = pct(t.t); });
+    reconcile(axisTicks, ticks, (t) => `t${t.t}`, (t) => h('span', { class: 'th-axis-tick' }, t.label), (el, t) => { el.style.left = pct(t.t); if (el.textContent !== t.label) el.textContent = t.label; });
     // grid lines live in `grid`, after the now line
     const lines = ticks.map((t) => ({ k: `g${t.t}`, t: t.t }));
     for (const el of Array.from(grid.children)) if (el !== nowLine && !lines.some((l) => l.k === el.__k)) el.remove();
@@ -439,9 +574,13 @@ export function mount(container) {
       if (!el) { el = h('i', { class: 'th-gridline' }); el.__k = l.k; grid.insertBefore(el, nowLine); }
       el.style.left = pct(l.t);
     }
-    nowLine.style.left = pct(Date.now());
-    axisNow.style.left = pct(Date.now());
-    nowLine.hidden = axisNow.hidden = !hasLive;
+    const nowT = Date.now();
+    const nowIn = hasLive && nowT >= scale.t0 && nowT <= scale.t1;
+    nowLine.style.left = pct(nowT);
+    axisNow.style.left = pct(nowT);
+    nowLine.hidden = axisNow.hidden = !nowIn;
+    setClass(axisNow, 'pinned', prefs.zoom === 'auto' && hasLive);
+    paintZoomUi();
   }
 
   /* ---------- virtual window ---------- */
@@ -697,6 +836,7 @@ export function mount(container) {
     setText(r.dur, fmtDur(end - a.startedAt));
     r.bar.style.left = `${pctOf(a.startedAt).toFixed(3)}%`;
     r.bar.style.width = `${Math.max(0, ((end - a.startedAt) / scale.span) * 100).toFixed(3)}%`;
+    r.bar.style.minWidth = `${MIN_BAR_PX}px`; // a sub-second agent stays a visible tick
     el.setAttribute('aria-label', `${agentLabel(a)} ${AGENT_STATUS[a.status] || a.status}: ${agentTitle(a)}, ${fmtDur(end - a.startedAt)}`);
   }
 
@@ -731,7 +871,8 @@ export function mount(container) {
     tip.append(
       h('div', { class: 'th-tip-title' }, truncate(agentTitle(a), 90)),
       h('div', {}, `${AGENT_STATUS[a.status] || a.status} · ${modelInfo(a.model).label} · ${agentLabel(a)}`),
-      h('div', {}, `${fmtClockSec(a.startedAt)} → ${isLive(a) ? 'now' : fmtClockSec(end)} · ${fmtDur(end - a.startedAt)}`),
+      h('div', {}, `${fmtClockSec(a.startedAt)} → ${isLive(a) ? 'now' : fmtClockSec(end)}`),
+      h('div', {}, `Duration ${fmtDurExact(end - a.startedAt)}${isLive(a) ? ' so far' : ''}`),
       h('div', {}, `${plural(a.toolCount, 'tool')}${a.taskId ? ` · ${a.taskId}` : ''}`));
     tip.hidden = false;
     const pr = listPane.getBoundingClientRect();
@@ -798,6 +939,14 @@ export function mount(container) {
   });
   scroller.addEventListener('focus', () => { if (!cursorKey) { const c = currentItem() || navItems()[0]; if (c) { cursorKey = c.key; paintAllStates(); } } });
   const onDocKey = (e) => {
+    if (prefs.view === 'timeline' && root.isConnected && !e.metaKey && !e.ctrlKey && !e.altKey && ['-', '_', '+', '=', '0'].includes(e.key)) {
+      const t0 = e.target;
+      if (!(t0 && (t0.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t0.tagName)))) {
+        e.preventDefault();
+        if (e.key === '0') fitAxis(); else if (e.key === '-' || e.key === '_') zoomBy(1.6, 0.5); else zoomBy(1 / 1.6, 0.5);
+        return;
+      }
+    }
     if (e.key !== '/' || e.metaKey || e.ctrlKey || e.altKey || !root.isConnected) return;
     const t = e.target;
     if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return;
@@ -837,7 +986,7 @@ export function mount(container) {
   const schedule = () => {
     if (framePending) return;
     framePending = true;
-    raf(() => { framePending = false; renderWindow(false); });
+    raf(() => { framePending = false; renderWindow(false); if (prefs.view === 'timeline' && prefs.zoom === 'auto') requestFit(false); });
   };
   scroller.addEventListener('scroll', schedule, { passive: true });
   let lastW = 0;
@@ -855,9 +1004,7 @@ export function mount(container) {
     if (document.hidden) return;
     if (prefs.view === 'timeline') {
       if (hasLive) {
-        const now = Date.now();
-        scale.t1 = Math.max(scale.t1, now + scale.span * 0.02);
-        scale.span = scale.t1 - scale.t0;
+        if (prefs.zoom === 'auto') { clearTimeout(fitTimer); fitTimer = null; scale = toScale(fitRange(Date.now())); }
         paintGridChrome();
         renderWindow(true);
       }
@@ -1089,7 +1236,7 @@ export function mount(container) {
     update: onStore,
     setRoute(r) { lastRoute = r; applyRoute(r); },
     destroy() {
-      offActivity(); clearInterval(clock); document.removeEventListener('keydown', onDocKey);
+      offActivity(); clearInterval(clock); document.removeEventListener('keydown', onDocKey); document.removeEventListener('mousemove', onDragMove); document.removeEventListener('mouseup', onDragEnd); clearTimeout(fitTimer);
       window.removeEventListener('resize', onResize); if (ro) ro.disconnect();
       if (insp) insp.destroy(); root.remove();
     },

@@ -13,7 +13,7 @@ import { toggleChat, chatActivity } from './taskchat.js';
 import { panelClose } from '../dock.js';
 import { createReplay } from '../replay.js';
 import { createExplain } from '../explain.js';
-import { openTask, closeTask, navigate, route } from '../router.js';
+import { openTask, closeTask, navigate, route, setDiff } from '../router.js';
 import { createChoices } from '../choices.js';
 
 const AGENT_STATUS = { running: 'Running', done: 'Done', failed: 'Failed', stalled: 'Stalled', waiting: 'Waiting for you' };
@@ -88,7 +88,7 @@ export function createSheet(dock) {
     c.explain = createExplain({ getTask: () => state.tasks.get(id) || null });
     c.recapWrap = h('section', { class: 'sheet-section' }, h('h3', { class: 'section-title' }, icon('sparkle', 14), 'Recap'), c.recapBody, c.explain.el);
     // files (collapsed rows -> git diff)
-    c.files = createFilesChanged({ getTask: () => state.tasks.get(id) || null });
+    c.files = createFilesChanged({ getTask: () => state.tasks.get(id) || null, onOpen: (t, f) => setDiff(f.rel || f.path) });
     // deps
     c.depsList = h('div', { class: 'dep-chips' });
     c.depAdd = h('select', { class: 'select select-sm', 'aria-label': 'Add dependency', onchange: () => addDep() });

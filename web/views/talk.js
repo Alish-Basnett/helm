@@ -10,7 +10,7 @@ import { addNote, deleteNote, executeNotes, retryNote } from '../actions.js';
 import { createAttachTray, createAttachmentList, bindAttachInput, attsOf } from '../attachments.js';
 import { createReply, createWaitLine } from '../replies.js';
 import { setLinked } from '../tasklinks.js';
-import { panelClose } from '../dock.js';
+import { createFloating, loadFloat, saveFloat } from '../floating.js';
 import { cwdTail } from '../format.js';
 import { emptyState, modelBadge, updateModelBadge, toast } from '../ui.js';
 import { getPref, codeOn, onPrefs } from '../prefs.js';
@@ -171,24 +171,72 @@ export function createTalk(opts) {
 }
 export const createChat = createTalk;
 
-/* ---------- the Talk panel (in the Dock) ---------- */
+/* ---------- the Talk panel (in the Dock, or detached into a floating window) ---------- */
+const FLOAT_KEY = 'helm.talk.float';
+
 export function createTalkSheet(dock) {
   const picker = h('select', { class: 'select talk-picker', 'aria-label': 'Session to talk to', onchange: () => choose(picker.value, true) });
   const model = modelBadge('');
   const sub = h('div', { class: 'talk-sub mono' });
   const bodyEl = h('div', { class: 'talk-body' });
   let isOpen = false;
+  let detached = false; // true = Talk lives in the floating window (open or not)
   let sid = null;
   let talk = null;
+  let win = null; // the floating window, created on first detach
+  let moving = false; // true while we reparent: the Dock's onClosed must not tear Talk down
+  let prevFocus = null;
 
   const panel = dock.register('talk', {
     order: 2, width: 400, label: 'Talk', icon: 'chat', ariaLabel: 'Talk to a session',
-    onClosed: () => { isOpen = false; if (talk) { talk.destroy(); talk = null; bodyEl.textContent = ''; } },
+    onClosed: () => { if (!moving) teardown(); },
   });
-  const head = h('header', { class: 'sheet-head talk-head' },
-    h('div', { class: 'sheet-head-top' }, h('h2', { class: 'talk-title' }, icon('chat', 16), 'Talk'), model, h('span', { class: 'spacer' }), panelClose(panel)),
+  const closeBtn = h('button', { class: 'icon-btn dock-close', type: 'button', 'aria-label': 'Close', title: 'Close (Esc)', onclick: () => close() }, icon('close', 18));
+  const popBtn = h('button', { class: 'icon-btn talk-pop', type: 'button', 'data-act': 'detach', onclick: () => toggleDetached() });
+  const head = h('header', { class: 'sheet-head talk-head', 'data-float-drag': '' },
+    h('div', { class: 'sheet-head-top' }, h('h2', { class: 'talk-title' }, icon('chat', 16), 'Talk'), model, h('span', { class: 'spacer' }), popBtn, closeBtn),
     picker, sub);
   panel.el.append(head, bodyEl);
+
+  function paintMode() {
+    popBtn.textContent = '';
+    popBtn.append(icon(detached ? 'dockin' : 'popout', 18));
+    const label = detached ? 'Dock Talk back into the side panel' : 'Detach Talk into a floating window';
+    popBtn.setAttribute('aria-label', label);
+    popBtn.title = `${label} (⇧T)`;
+    popBtn.setAttribute('data-act', detached ? 'dock' : 'detach');
+    closeBtn.title = detached ? 'Close Talk' : 'Close (Esc)';
+  }
+  paintMode();
+
+  function ensureWin() {
+    if (!win) {
+      win = createFloating({
+        storeKey: FLOAT_KEY, label: 'Talk', ariaLabel: 'Talk to a session (floating window)', className: 'float-talk',
+        defaultRect: ({ vw }) => ({ w: 420, h: 560, x: vw - 444, y: 72 }),
+      });
+    }
+    return win;
+  }
+  /** Put the header + thread in the container that matches the current mode (the same elements, so nothing is re-created). */
+  function place() {
+    const to = detached ? ensureWin().body : panel.el;
+    if (head.parentNode !== to) to.append(head, bodyEl);
+  }
+  function threadScroll() {
+    const t = bodyEl.querySelector('.talk-thread');
+    return t ? { t, top: t.scrollTop, end: t.scrollHeight - t.scrollTop - t.clientHeight < 80 } : null;
+  }
+  function restoreScroll(sc) {
+    if (!sc) return;
+    const apply = () => { if (sc.end && talk) talk.scrollToEnd(); else sc.t.scrollTop = sc.top; };
+    apply();
+    requestAnimationFrame(apply);
+  }
+  function teardown() {
+    isOpen = false;
+    if (talk) { talk.destroy(); talk = null; bodyEl.textContent = ''; }
+  }
 
   function pick(preferred) {
     const list = sel.talkSessions();
@@ -238,20 +286,75 @@ export function createTalkSheet(dock) {
     setText(sub, s ? `${sel.projectName(s.projectId)} · ${cwdTail(s.cwd, 3)}${s.busy ? ' · working' : ''}` : '');
   }
 
-  function open(sessionId) {
+  const focusTalk = () => { if (talk) talk.focus(); else if (win && detached) win.el.focus({ preventScroll: true }); };
+
+  function open(sessionId, opts = {}) {
+    const focus = opts.focus !== false;
     if (isOpen) {
       if (sessionId) choose(pick(sessionId), true);
-      panel.open({ focus: true });
+      if (detached) { win.show(); if (focus) focusTalk(); }
+      else panel.open({ focus });
       return;
     }
     isOpen = true;
     sid = pick(sessionId);
     syncPicker();
     mountTalk();
-    panel.open({ focus: true });
-    requestAnimationFrame(() => { if (talk) talk.scrollToEnd(); });
+    place();
+    if (detached) {
+      prevFocus = document.activeElement && document.activeElement !== document.body ? document.activeElement : null;
+      win.show();
+      saveFloat(FLOAT_KEY, { detached: true, open: true });
+      requestAnimationFrame(() => { if (talk) talk.scrollToEnd(); });
+      if (focus) focusTalk();
+    } else {
+      panel.open({ focus });
+      requestAnimationFrame(() => { if (talk) talk.scrollToEnd(); });
+    }
   }
-  function close() { panel.close(); }
+
+  function close() {
+    if (!detached) { panel.close(); return; }
+    if (!isOpen) return;
+    const hadFocus = win.el.contains(document.activeElement);
+    win.hide();
+    teardown();
+    saveFloat(FLOAT_KEY, { detached: true, open: false });
+    if (hadFocus && prevFocus && prevFocus.isConnected) prevFocus.focus({ preventScroll: true });
+    prevFocus = null;
+  }
+
+  /** Dock panel -> floating window. The same elements move; nothing is re-created. */
+  function detach() {
+    if (detached) return;
+    if (!isOpen) { detached = true; paintMode(); saveFloat(FLOAT_KEY, { detached: true }); open(); return; }
+    const sc = threadScroll();
+    prevFocus = null;
+    detached = true;
+    paintMode();
+    place(); // reparent first, so the Dock's close below has no focus to hand back
+    moving = true;
+    try { panel.close(); } finally { moving = false; }
+    win.show();
+    saveFloat(FLOAT_KEY, { detached: true, open: true });
+    restoreScroll(sc);
+    focusTalk(); // the Detach button just left the page: put focus in the composer of the new window
+  }
+
+  /** Floating window -> Dock panel. */
+  function dockBack() {
+    if (!detached) return;
+    if (!isOpen) { detached = false; paintMode(); saveFloat(FLOAT_KEY, { detached: false, open: false }); open(); return; }
+    const sc = threadScroll();
+    detached = false;
+    paintMode();
+    place();
+    win.hide();
+    saveFloat(FLOAT_KEY, { detached: false, open: false });
+    panel.open({ focus: true });
+    restoreScroll(sc);
+  }
+  function toggleDetached() { if (detached) dockBack(); else detach(); }
 
   const off = subscribe((changed) => {
     if (!isOpen) return;
@@ -264,9 +367,20 @@ export function createTalkSheet(dock) {
     syncPicker();
   });
 
+  // restore: Talk lived in the floating window when the page was last open
+  const st = loadFloat(FLOAT_KEY);
+  if (st.detached) {
+    detached = true;
+    paintMode();
+    if (st.open) open(undefined, { focus: false });
+  }
+
   return {
-    open, close, toggle: () => (isOpen && panel.isVisible ? close() : open()),
+    open, close, toggle: () => (isOpen && (detached ? win.isVisible : panel.isVisible) ? close() : open()),
+    detach, dock: dockBack, toggleDetached,
     get isOpen() { return isOpen; },
-    destroy() { off(); },
+    get isDetached() { return detached; },
+    get floating() { return win; },
+    destroy() { off(); if (win) win.destroy(); },
   };
 }

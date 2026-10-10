@@ -8,6 +8,7 @@ import { toggleMeter } from './meter.js';
 import { openMenu, emptyState } from './ui.js';
 import { route, onRoute, navigate, VIEWS } from './router.js';
 import { createDock } from './dock.js';
+import { createDiffPanel } from './views/diffpanel.js';
 import { createSheet } from './views/sheet.js';
 import { createTaskChat, toggleChat } from './views/taskchat.js';
 import { createTalkSheet } from './views/talk.js';
@@ -69,6 +70,7 @@ const spotlight = createSpotlight($('#spotlight-root'));
 const dock = createDock($('#sheet-root'));
 const sheet = createSheet(dock);
 const taskChat = createTaskChat(dock);
+const diffPanel = createDiffPanel(dock);
 const talk = createTalkSheet(dock);
 startTaskLinks();
 bus.on('open-talk', (sessionId) => talk.open(typeof sessionId === 'string' ? sessionId : undefined));
@@ -137,7 +139,7 @@ const telemetry = h('div', { class: 'telemetry mono', 'aria-label': 'Telemetry' 
   h('span', { class: 'tele tele-cost' }, tCost, h('span', { class: 'tele-k' }, 'today')),
   helmBtn,
   h('span', { class: 'tele' }, tClock));
-const talkBtn = h('button', { class: 'btn btn-quiet talk-btn', type: 'button', title: 'Talk to a session (T)', 'aria-label': 'Talk to a session', onclick: () => talk.toggle() },
+const talkBtn = h('button', { class: 'btn btn-quiet talk-btn', type: 'button', title: 'Talk to a session (T; ⇧T floats it)', 'aria-label': 'Talk to a session', onclick: () => talk.toggle() },
   icon('chat', 16), h('span', { class: 'sb-label-narrow' }, 'Talk'), h('kbd', { class: 'kbd sb-label-narrow' }, 'T'));
 const newTaskBtn = h('button', { class: 'btn btn-primary', type: 'button', onclick: () => newTask() }, icon('plus', 16), h('span', { class: 'sb-label-narrow' }, 'New task'));
 topbar.append(h('div', { class: 'tb-left' }, titleEl, scopeEl), h('span', { class: 'spacer' }), telemetry, talkBtn, newTaskBtn);
@@ -197,6 +199,7 @@ function applyRoute(r) {
   if (view && view.setRoute) view.setRoute(r);
   sheet.show(r.task);
   taskChat.show(r.chat ? r.task : null);
+  diffPanel.show(r.diff ? r.task : null, r.diff);
   for (const a of [...navItems, settingsLink]) {
     const on = a.getAttribute('data-view') === r.view;
     setClass(a, 'active', on);
@@ -232,6 +235,7 @@ document.addEventListener('keydown', (e) => {
   if (e.key === '/') { e.preventDefault(); spotlight.open(); }
   else if (e.key === 'n') { e.preventDefault(); newTask(); }
   else if (e.key === 't') { e.preventDefault(); talk.toggle(); }
+  else if (e.key === 'T') { e.preventDefault(); talk.toggleDetached(); } // ⇧T: float Talk / dock it back
   else if (e.key === 'c' && route().task) { e.preventDefault(); toggleChat(); }
   else if (e.key === '>') { e.preventDefault(); spotlight.open('>'); }
 });
