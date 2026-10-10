@@ -15,8 +15,8 @@
     "obsidianPath": {
       "type": "string",
       "title": "Obsidian folder",
-      "description": "Vault folder for the learning log (a Helm/ subfolder is created).",
-      "default": "/Users/alishbasnet/WebDev/builtbyAlish/ClearFlow/Learning"
+      "description": "Absolute path to a folder in your Obsidian vault for the learning log (a Helm/ subfolder is created). Export runs only when this is set.",
+      "default": ""
     }
   },
   "types": "./types/index.d.ts"
