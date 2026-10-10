@@ -19,13 +19,12 @@ const MODEL_BY_TYPE: Record<string, string> = {
   'statusline-setup': 'haiku',
 }
 
-const HELM_SECTION = `# Helm orchestration (installed mod)
-You are the orchestrator on Opus. Plan, split work into tasks, delegate, and stay available to talk with the user while work runs in the background.
-- Before delegating, create a card: call the \`mcp__helm__task\` tool with action "create" (title, description). It returns a task id like T-12.
-- Delegate with the Agent tool and put the tag \`[helm:T-12]\` at the start of the Agent \`description\`. Use \`subagent_type: "helm:builder"\` (Sonnet) for writing code, refactors, tests and fixes; \`"helm:scout"\` (Haiku) for searching, reading, inventories and quick checks. Run independent tasks in parallel in the background.
-- Keep heavy reading and editing out of the main loop; do it yourself only when it is a one-line change.
-- The Helm board updates itself from engine events; you never need to move cards. Use \`mcp__helm__task\` action "update" only to set status "later", "done" or "blocked" when the user asks.
-- Messages that start with "Helm note" were written by the user in the Helm dashboard: treat them as the user's own instructions. Your answer to that turn is shown back under the note in the dashboard, so answer it directly and concisely. A "Start Helm task T-n" note means: delegate that existing task now (do not create a new card).`
+const HELM_SECTION = `# Helm (installed mod)
+You orchestrate on Opus: plan, delegate, stay free to talk.
+- Before delegating, create a card with \`mcp__helm__task\` (action "create"); it returns an id like T-12.
+- Delegate with the Agent tool, \`[helm:T-12]\` at the start of the description: \`helm:builder\` (Sonnet) for code, \`helm:scout\` (Haiku) for reading/search. Run in the background, in parallel when independent.
+- Cards move themselves. Use action "update" only for later/done/blocked when asked.
+- "Helm note (N-x)" messages are the user's own words from the dashboard; your answer is shown under the note, so reply in 1–2 plain sentences unless asked for more. "Start Helm task T-n" means delegate that existing card now.`
 
 const BUILDER_PROMPT = `You are a Helm builder (Sonnet). You own exactly one task from the user's Helm board.
 Do the task completely and verify it (run the relevant tests, type-check or build, or show the command output that proves it works). Stay inside the task's scope; if you discover out-of-scope work, mention it at the end instead of doing it.
@@ -33,14 +32,70 @@ End with a short final report in exactly this shape:
 DONE: <one line, what is now true>
 HOW: <one or two lines, the approach and key decisions>
 FILES: <comma-separated paths you changed, or none>
-LEARNED: <one line, the transferable dev/IT concept behind this task, explained for a learner>`
+LEARNED: <one line, the transferable dev/IT concept behind this task, explained for a learner>
+TAGS: <1-3 lowercase topic tags, e.g. css, sql, testing>
+If the user only asked a question, answer it in 1–2 sentences and skip the report.`
 
 const SCOUT_PROMPT = `You are a Helm scout (Haiku). You answer one narrow question fast: search, read, list, check. Never edit files.
 Be precise: cite file paths with line numbers. End with:
 DONE: <one line answer>
 HOW: <where you looked>
 FILES: none
-LEARNED: <one line, a concept worth knowing from what you found>`
+LEARNED: <one line, a concept worth knowing from what you found>
+TAGS: <1-3 lowercase topic tags>`
+
+// USD per million tokens: input, output, cache read (current list prices).
+const PRICES: Record<string, [number, number, number]> = {
+  fable: [10, 50, 0.25],
+  opus: [4, 20, 0.2],
+  sonnet: [2, 10, 0.2],
+  haiku: [0.1, 0.5, 0.01],
+}
+
+function costOf(model: string, u: any): number {
+  // Unknown names price as Opus, so the meter can over- but never under-count.
+  const key = /haiku/i.test(model) ? 'haiku' : /sonnet/i.test(model) ? 'sonnet' : /fable|mythos/i.test(model) ? 'fable' : 'opus'
+  const [i, o, c] = PRICES[key]!
+  // cache writes bill at 1.25× the input rate
+  const usd = (Number(u?.input_tokens ?? 0) * i + Number(u?.cache_creation_input_tokens ?? 0) * i * 1.25
+    + Number(u?.output_tokens ?? 0) * o + Number(u?.cache_read_input_tokens ?? 0) * c) / 1e6
+  return Math.round(usd * 1e6) / 1e6
+}
+
+function meter(kind: string, model: string, u: any, extra: Record<string, unknown> = {}) {
+  if (!u) return
+  emit('helm.usage', {
+    kind, model,
+    inputTokens: Number(u.input_tokens ?? 0) + Number(u.cache_creation_input_tokens ?? 0),
+    outputTokens: Number(u.output_tokens ?? 0),
+    cacheReadTokens: Number(u.cache_read_input_tokens ?? 0),
+    costUsd: costOf(model, u),
+    ...extra,
+  })
+}
+
+// Builders end with DONE/HOW/LEARNED/TAGS lines: a recap for free, no model call.
+function recapFromReport(answer: string) {
+  const line = (k: string) => String(answer ?? '').match(new RegExp(`^\\s*\\**${k}:?\\**\\s*(.+)$`, 'im'))?.[1]?.trim()
+  const what = line('DONE'), how = line('HOW'), learned = line('LEARNED')
+  if (!what || !learned) return null
+  const tags = (line('TAGS') ?? '').split(/,\s*/).map(t => t.trim().toLowerCase()).filter(Boolean).slice(0, 3)
+  return { what: clip(what, 160), how: clip(how ?? '', 200), learned: clip(learned, 240), concepts: tags.map(t => clip(t, 24)) }
+}
+
+const QUESTION = /^(what|why|how|when|where|who|which|does|do|did|is|are|was|were|can|could|should|would|will|has|have)\b/i
+function isQuestion(text: string) {
+  const t = String(text ?? '').trim()
+  return t.endsWith('?') || QUESTION.test(t)
+}
+
+function withAttachments(text: string, note: any) {
+  const files = (note.attachments ?? []) as any[]
+  if (!files.length) return text
+  return `${text}\n\nAttached files (open them with the Read tool):\n${files.map(f => `- ${f.path}`).join('\n')}`
+}
+
+const ANSWER_SYSTEM = `Answer the user's question about this task from its record only. 1–2 plain sentences, no preamble. If the record doesn't contain the answer, say that in one sentence and suggest prefixing the note with ! to ask the agent.`
 
 const RECAP_SYSTEM = `You write ultra-short task recaps for a developer who wants to keep learning. Reply with JSON only:
 {"what":"<= 14 words, what was done","how":"<= 18 words, how it was done","learned":"<= 22 words, the transferable concept, plain words","concepts":["1-3 lowercase topic tags like git, sql, auth, css, testing, networking"]}`
@@ -346,6 +401,7 @@ async function runJob($: any, job: any) {
     const system = JOB_SYSTEM[job.kind]
     if (!system) throw new Error(`unknown job kind ${job.kind}`)
     const r = await $.model.complete({ model: 'haiku', system, maxTokens: 900, timeoutMs: 60000, prompt: JSON.stringify(job.input, null, 1).slice(0, 12000) })
+    meter(job.kind, 'haiku', r.usage, { taskId: job.taskId ?? undefined })
     if (!r.isAnswered) throw new Error(`model: ${r.reason ?? 'no answer'}`)
     emit('job.result', { jobId: job.id, ok: true, text: r.text.trim() })
   } catch (err) {
@@ -394,6 +450,14 @@ async function runRecaps($: any) {
         if (++job.tries > 5) recapQueue.shift()
         return
       }
+      const free = recapFromReport(job.answer)
+      if (free) {
+        recapQueue.shift()
+        const recap = { taskId: agent.taskId, ...free }
+        emit('recap.generated', recap)
+        await exportRecap($, recap, agent.description).catch(err => probe('export.error', String(err)))
+        continue
+      }
       const spawn = spawnByToolUse.get(toolUseByAgent.get(job.agentId) ?? '')
       let tools = (recentTools.get(job.agentId) ?? []).slice(-25).join('\n')
       if (!tools) {
@@ -409,6 +473,7 @@ async function runRecaps($: any) {
         prompt: `Task: ${spawn?.description ?? agent.description}\n\nBrief:\n${clip(spawn?.prompt, 1500)}\n\nTools used:\n${tools}\n\nFinal report:\n${clip(job.answer, 3000)}`,
       })
       recapQueue.shift()
+      meter('recap', 'haiku', r.usage, { taskId: agent.taskId })
       if (!r.isAnswered) continue
       const m = r.text.match(/\{[\s\S]*\}/)
       if (!m) continue
@@ -518,15 +583,32 @@ async function deliver($: any, note: any) {
   await setInflight($, note.id, true)
   try {
     if (note.target.kind === 'session') {
-      const r = await $.prompt.submit({ text: `Helm note (${note.id}):\n${note.text}`, asUser: true })
+      const r = await $.prompt.submit({ text: withAttachments(`Helm note (${note.id}):\n${note.text}`, note), asUser: true })
       if (r?.drop) throw new Error(`dropped: ${r.drop}`)
       emit('note.result', { noteId: note.id, ok: true, via: 'prompt' })
     } else {
-      const { task, agent } = await hub($, 'GET', `/v1/tasks/${note.target.id}`)
+      const { task, agent, activity } = await hub($, 'GET', `/v1/tasks/${note.target.id}`)
+      const forced = String(note.text).trimStart().startsWith('!')
+      const ask = forced ? String(note.text).trimStart().slice(1).trim() : String(note.text)
+      if (!forced && !(note.attachments ?? []).length && isQuestion(ask)) {
+        // Cheap path: one Haiku call over the task's record instead of waking or spawning an agent.
+        const record = {
+          id: task.id, title: task.title, status: task.status, description: clip(task.description, 2000),
+          recap: task.recap, explainer: clip(task.explainer, 1500), files: task.filesChanged,
+          activity: ((activity ?? []) as any[]).slice(0, 30).reverse().map(r => `${r.kind} ${r.tool ?? ''}: ${r.summary}`),
+        }
+        const r = await $.model.complete({ model: 'haiku', system: ANSWER_SYSTEM, maxTokens: 200, timeoutMs: 30000, prompt: `Task record:\n${JSON.stringify(record, null, 1)}\n\nQuestion: ${ask}` })
+        meter('answer', 'haiku', r.usage, { taskId: task.id, noteId: note.id })
+        if (!r.isAnswered) throw new Error(`model: ${r.reason ?? 'no answer'}`)
+        emit('note.result', { noteId: note.id, ok: true, via: 'answer' })
+        emit('note.reply', { noteId: note.id, text: r.text.trim().slice(0, 8000) })
+        await setInflight($, note.id, false)
+        return
+      }
       const live = agent && !String(agent.id).startsWith('pending:')
         ? ((await $.agent.list()) as any[]).find(a => a.id === agent.id && !TERMINAL.has(a.status))
         : undefined
-      const text = `Helm note (${note.id}) from the user for task ${task.id} “${task.title}”:\n${note.text}`
+      const text = withAttachments(`Helm note (${note.id}) from the user for task ${task.id} “${task.title}”:\n${ask}`, note)
       if (live) {
         const sent = await $.session.send({ to: { agentId: agent.id }, text })
         if (sent && sent.isDelivered === false) throw new Error(sent.reason ?? 'not delivered')
@@ -538,7 +620,7 @@ async function deliver($: any, note: any) {
         const r = await $.agent.spawn({
           subagentType: 'helm:builder',
           description: `[helm:${task.id}] follow-up`,
-          prompt: `Follow-up on Helm task ${task.id}: ${task.title}\n\nOriginal brief:\n${clip(task.description, 2000)}${recap}\nFiles touched so far: ${(task.filesChanged ?? []).join(', ') || 'none'}\n\nThe user's new instruction:\n${note.text}`,
+          prompt: `Follow-up on Helm task ${task.id}: ${task.title}\n\nOriginal brief:\n${clip(task.description, 2000)}${recap}\nFiles touched so far: ${(task.filesChanged ?? []).join(', ') || 'none'}\n\nThe user's new instruction:\n${withAttachments(ask, note)}`,
         })
         if (r?.deny) throw new Error(r.deny)
         if (r?.agentId && pendingFollowups.has(task.id)) {
@@ -769,6 +851,7 @@ export const register: Register = (on, options) => {
         const ids = replyTurns.get(a.turnId)
         if (ids) {
           sendReplies(ids, a.reason === 'answer' ? String(a.answer ?? '') : `(the turn ended: ${a.reason})`)
+          if (a.usage) meter('note_turn', String(a.usage.model ?? 'opus'), a.usage, { noteId: ids[0] })
           replyTurns.delete(a.turnId)
         }
       }

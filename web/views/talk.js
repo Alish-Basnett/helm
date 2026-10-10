@@ -1,13 +1,14 @@
 // views/talk.js — Talk: chat with a live session. Your notes are right-aligned bubbles coloured by note state,
 // Claude's replies are left bubbles. `createTalk` is the reusable thread + composer (used by the Talk sheet
 // and by Threads when the main node is selected); `createTalkSheet` is the right-hand sheet with a session picker.
-import { h, reconcile, setText, setHidden, setAttr, startTicker } from '../dom.js';
+import { h, reconcile, setText, setHidden, setAttr, setClass, startTicker } from '../dom.js';
 import { icon } from '../icons.js';
 import { state, sel, subscribe, lsGet, lsSet } from '../store.js';
 import { addNote, deleteNote, executeNotes, retryNote } from '../actions.js';
+import { createAttachTray, createAttachmentList, bindAttachInput, attsOf } from '../attachments.js';
 import { createReply, createWaitLine } from '../replies.js';
 import { cwdTail } from '../format.js';
-import { emptyState, modelBadge, updateModelBadge } from '../ui.js';
+import { emptyState, modelBadge, updateModelBadge, toast } from '../ui.js';
 
 const STATE_LABEL = { draft: 'Draft', queued: 'Queued', sending: 'Sending…', ran: 'Delivered', failed: 'Failed' };
 
@@ -23,8 +24,11 @@ export function createTalk(opts) {
   const send = h('button', { class: 'icon-btn note-send', type: 'button', 'aria-label': 'Send now', title: 'Send now (↵)', onclick: () => submit(true) }, icon('send', 18));
   const draftBtn = h('button', { class: 'link-btn talk-draft', type: 'button', onclick: () => submit(false), title: 'Keep it as a draft; run it later with Execute' }, 'Save as draft');
   const hint = h('div', { class: 'note-hint mono talk-hint' }, h('span', {}, '↵ send now · ⇧↵ new line'), draftBtn);
-  const composer = h('div', { class: 'note-composer talk-composer' }, ta, send, hint);
+  const tray = createAttachTray({ onChange: () => setClass(composer, 'has-att', tray.count > 0) });
+  const attachBtn = h('button', { class: 'icon-btn note-attach', type: 'button', 'aria-label': 'Attach files', title: 'Attach files (or drop / paste)', onclick: () => binding.pick() }, icon('paperclip', 18));
+  const composer = h('div', { class: 'note-composer talk-composer' }, tray.el, ta, attachBtn, send, hint);
   const el = h('section', { class: ['talk', opts.inline && 'inline'], 'aria-label': 'Talk' }, list, empty, composer);
+  const binding = bindAttachInput({ box: el, ta, tray, disabled: () => ta.disabled });
 
   const nearEnd = () => list.scrollHeight - list.scrollTop - list.clientHeight < 80;
   const scrollToEnd = () => { list.scrollTop = list.scrollHeight; };
@@ -32,12 +36,17 @@ export function createTalk(opts) {
 
   async function submit(run) {
     const text = ta.value.trim();
-    if (!text) return;
+    if (!text && !tray.count) return;
+    if (tray.busy) { toast('Still uploading — send again in a moment. Your text is kept.'); return; }
+    const taken = tray.take();
+    const atts = attsOf(taken);
+    if (!text && !atts.length) { tray.restore(taken); return; }
     ta.value = '';
     autosize();
-    const p = run ? addNote(target, text, { execute: true }) : addNote(target, text);
+    const p = addNote(target, text, { execute: !!run, attachments: atts });
     scrollToEnd();
-    await p;
+    const made = await p;
+    if (!made) { if (!ta.value) { ta.value = text; autosize(); } tray.restore(taken); }
     scrollToEnd();
   }
   ta.addEventListener('input', autosize);
@@ -51,13 +60,14 @@ export function createTalk(opts) {
   function makeTurn() {
     const text = h('div', { class: 'tk-text' });
     const meta = h('div', { class: 'tk-meta mono' });
-    const bubble = h('div', { class: 'tk-bubble' }, text, meta);
+    const atts = createAttachmentList();
+    const bubble = h('div', { class: 'tk-bubble' }, text, atts.el, meta);
     const me = h('div', { class: 'tk-me' }, bubble);
     const reply = createReply();
     const wait = createWaitLine({ typing: true });
     const claude = h('div', { class: 'tk-claude' }, reply.el, wait.el);
     const li = h('li', { class: 'tk-turn' }, me, claude);
-    li.__r = { text, meta, reply, wait, claude };
+    li.__r = { text, meta, atts, reply, wait, claude };
     return li;
   }
 
@@ -66,6 +76,7 @@ export function createTalk(opts) {
     const cls = `tk-turn state-${n.state}${n.__pending ? ' pending' : ''}`;
     if (li.className !== cls) li.className = cls;
     setText(r.text, n.text);
+    r.atts.update(n.attachments);
     const sig = `${n.state}|${n.ranAt}|${n.error || ''}|${n.__pending ? 1 : 0}`;
     if (r.meta.__sig !== sig) {
       r.meta.__sig = sig;
@@ -82,7 +93,7 @@ export function createTalk(opts) {
         r.meta.append(h('button', { class: 'link-btn', type: 'button', onclick: () => retryNote(n.id) }, 'Retry'));
       }
     }
-    r.reply.update(n);
+    try { r.reply.update(n); } catch (e) { console.error('[helm] reply render failed', e); }
     r.wait.update(n);
     setHidden(r.claude, !n.reply && r.wait.el.hidden);
   }
@@ -90,7 +101,7 @@ export function createTalk(opts) {
   function render() {
     const s = state.sessions.get(sid);
     const ended = !s || s.status === 'ended';
-    ta.disabled = ended; send.disabled = ended; draftBtn.disabled = ended;
+    ta.disabled = ended; send.disabled = ended; draftBtn.disabled = ended; attachBtn.disabled = ended;
     setAttr(ta, 'placeholder', ended ? 'This session has ended' : 'Message this session…');
     const notes = sel.notesFor('session', sid);
     empty.hidden = notes.length > 0;
@@ -105,7 +116,7 @@ export function createTalk(opts) {
   render();
   const off = subscribe((changed) => { if (changed.has('note') || changed.has('session')) render(); });
   requestAnimationFrame(scrollToEnd); // re-pin once the thread is attached and laid out
-  return { el, destroy: off, focus: () => ta.focus(), scrollToEnd, render };
+  return { el, destroy() { off(); binding.destroy(); tray.destroy(); }, focus: () => ta.focus(), scrollToEnd, render };
 }
 
 /* ---------- the sheet ---------- */

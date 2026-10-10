@@ -43,8 +43,13 @@ export const api = {
   createTask: (body) => request('POST', '/v1/tasks', body),
   startTask: (id) => request('POST', `/v1/tasks/${enc(id)}/start`),
   patchTask: (id, patch) => request('PATCH', `/v1/tasks/${enc(id)}`, patch),
-  createNote: (target, text, execute = false) => request('POST', '/v1/notes', execute ? { target, text, execute: true } : { target, text }),
-  patchNote: (id, text) => request('PATCH', `/v1/notes/${enc(id)}`, { text }),
+  createNote: (target, text, execute = false, attachments) => {
+    const body = { target, text };
+    if (execute) body.execute = true;
+    if (attachments && attachments.length) body.attachments = attachments;
+    return request('POST', '/v1/notes', body);
+  },
+  patchNote: (id, text, attachments) => request('PATCH', `/v1/notes/${enc(id)}`, attachments ? { text, attachments } : { text }),
   deleteNote: (id) => request('DELETE', `/v1/notes/${enc(id)}`),
   executeNotes: (target) => request('POST', '/v1/notes/execute', { target }),
   retryNote: (id) => request('POST', `/v1/notes/${enc(id)}/retry`),
@@ -57,4 +62,29 @@ export const api = {
   explain: (taskId) => request('POST', `/v1/tasks/${enc(taskId)}/explain`),
   generateDigest: (body) => request('POST', '/v1/digest', body || {}),
   digests: (projectId, limit = 14) => request('GET', `/v1/digests${q({ projectId, limit })}`),
+  // v0.4
+  usage: (days = 7) => request('GET', `/v1/usage${q({ days })}`),
+  attachmentUrl: (id) => `/v1/attachments/${enc(id)}`,
+  /** Raw-body upload with progress. Resolves { attachment }; rejects with err.status (404/405 = hub too old). */
+  uploadAttachment(file, { onProgress, signal } = {}) {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', '/v1/attachments');
+      xhr.setRequestHeader('content-type', file.type || 'application/octet-stream');
+      xhr.setRequestHeader('x-filename', encodeURIComponent(file.name || 'file'));
+      if (onProgress && xhr.upload) xhr.upload.onprogress = (e) => { if (e.lengthComputable) onProgress(e.loaded / e.total); };
+      xhr.onload = () => {
+        let data = null;
+        try { data = JSON.parse(xhr.responseText); } catch { data = null; }
+        if (xhr.status >= 200 && xhr.status < 300 && data && data.attachment) { resolve(data); return; }
+        const err = new Error((data && data.error) || `Upload failed (${xhr.status})`);
+        err.status = xhr.status;
+        reject(err);
+      };
+      xhr.onerror = () => reject(new Error('Hub unreachable'));
+      xhr.onabort = () => { const e = new Error('Upload cancelled'); e.name = 'AbortError'; reject(e); };
+      if (signal) signal.addEventListener('abort', () => xhr.abort(), { once: true });
+      xhr.send(file);
+    });
+  },
 };

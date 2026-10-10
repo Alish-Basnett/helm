@@ -1,7 +1,10 @@
 // Hub core: ingest, commands, queries, sweep, rebuild. Transport-agnostic (http.mjs wraps it).
+import fs from 'node:fs';
+import path from 'node:path';
 import { Db } from './db.mjs';
 import {
   Projector, HUB_SESSION, TASK_STATUSES, JOB_TIMEOUT_ERROR, JOB_UNCLAIMED_ERROR, cut, computeConflicts,
+  localDate, usageSummary, usageToday, toAttachment, MAX_NOTE_ATTACHMENTS,
   toProject, toSession, toAgent, toTask, toNote, toActivity, toQuestion, toJob, toDigest,
 } from './projections.mjs';
 import { search as ftsSearch, learn as ftsLearn } from './search.mjs';
@@ -16,13 +19,11 @@ const isStr = (v) => typeof v === 'string';
 const isObj = (v) => v && typeof v === 'object' && !Array.isArray(v);
 const TABLES = [
   'projects', 'sessions', 'agents', 'tasks', 'notes', 'activity', 'late_completions',
-  'agent_files', 'conflicts', 'questions', 'jobs', 'digests',
+  'agent_files', 'conflicts', 'questions', 'jobs', 'digests', 'attachments', 'usage',
 ];
 const START_FROM = ['backlog', 'next', 'later', 'blocked'];
 const DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
-const pad2 = (n) => String(n).padStart(2, '0');
-/** Local calendar date (YYYY-MM-DD) of an epoch-ms time. */
-export const localDate = (ms) => { const d = new Date(ms); return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`; };
+export { localDate };
 
 export class Hub {
   constructor(cfg, log, { clock = Date.now } = {}) {
@@ -30,7 +31,7 @@ export class Hub {
     this.log = log;
     this.clock = clock;
     this.db = new Db(cfg.dbFile);
-    this.p = new Projector(this.db, { log });
+    this.p = new Projector(this.db, { log, attachDir: cfg.attachDir, clock: () => this.clock() });
     this.subs = new Set();
     this.startedAt = clock();
     this.lastPushed = this.seqNow();
@@ -271,7 +272,7 @@ export class Hub {
     return {
       projects, sessions: sessions.map(toSession), agents: agents.map(toAgent),
       tasks: tasks.map(toTask), notes: notes.map(toNote), questions: questions.map(toQuestion),
-      jobs: jobs.map(toJob), digests: digests.map(toDigest), seq: this.seqNow(),
+      jobs: jobs.map(toJob), digests: digests.map(toDigest), usageToday: usageToday(this.db, this.now()), seq: this.seqNow(),
     };
   }
   tasks({ sessionId, status, projectId } = {}) {
@@ -324,6 +325,7 @@ export class Hub {
       : this.db.all('SELECT * FROM digests ORDER BY date DESC, created_at DESC, rowid DESC LIMIT ?', limit);
     return rows.map(toDigest);
   }
+  usage(days = 7) { return usageSummary(this.db, this.now(), days); }
   search(q, limit) { return ftsSearch(this.db, q, limit, this.log); }
   learn(projectId) { return ftsLearn(this.db, projectId); }
 
@@ -434,6 +436,41 @@ export class Hub {
     return uniq;
   }
 
+  /** Validate attachment ids on a note: an array of <= 10 distinct ids that all exist. */
+  checkAttachments(ids) {
+    if (!Array.isArray(ids) || ids.some((a) => !isStr(a))) throw bad('attachments must be an array of attachment ids');
+    const uniq = [...new Set(ids)];
+    if (uniq.length > MAX_NOTE_ATTACHMENTS) throw bad(`at most ${MAX_NOTE_ATTACHMENTS} attachments per note`);
+    for (const a of uniq) if (!this.p.getAttachment(a)) throw bad(`unknown attachment: ${a}`);
+    return uniq;
+  }
+  /**
+   * Store an uploaded file: the metadata is an event (so a rebuild reproduces the row), the bytes go to
+   * `<home>/attachments/<A-n>/<safe name>`. Both happen in one transaction: a failed write leaves no row.
+   */
+  addAttachment({ data, name, mime }, at = this.now()) {
+    if (!Buffer.isBuffer(data) || !data.length) throw bad('empty body: send the file bytes as the request body');
+    const safe = safeFilename(name);
+    const type = cleanMime(mime);
+    return this.tx(() => {
+      const a = this.command('hub.attachment.create', { name: safe, mime: type, size: data.length }, at);
+      const dir = path.join(this.cfg.attachDir, a.id);
+      fs.rmSync(dir, { recursive: true, force: true }); // a stale dir from a database that was reset
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, safe), data);
+      return { attachment: a };
+    });
+  }
+  /** Row + on-disk file for GET /v1/attachments/:id. */
+  attachmentFile(id) {
+    const r = this.p.getAttachment(id);
+    if (!r) throw notFound('attachment not found');
+    const a = toAttachment(r, this.cfg.attachDir);
+    let st;
+    try { st = fs.statSync(a.path); } catch { throw notFound('attachment file is missing on disk'); }
+    return { ...a, size: st.size };
+  }
+
   resolveNoteSession(target) {
     if (target.kind === 'session') {
       if (!this.p.getSession(target.id)) throw notFound('target session not found');
@@ -456,11 +493,12 @@ export class Hub {
     const { kind, id } = body.target;
     if (!['session', 'task'].includes(kind) || !isStr(id)) throw bad('target must be { kind: "session"|"task", id }');
     const text = cleanText(body.text, 'text', 10000, false);
+    const attachments = body.attachments === undefined ? [] : this.checkAttachments(body.attachments);
     const sessionId = this.resolveNoteSession({ kind, id });
     const execute = body.execute === true;
     if (execute && !sessionId) throw new HttpError(409, 'no session available to deliver this note to');
     return this.tx(() => {
-      const note = this.command('hub.note.create', { target: { kind, id }, text, sessionId }, at);
+      const note = this.command('hub.note.create', { target: { kind, id }, text, sessionId, attachments }, at);
       if (!execute) return { note };
       const [queued] = this.command('hub.note.execute', { ids: [note.id], sessions: { [note.id]: sessionId } }, at);
       return { note: queued };
@@ -470,8 +508,12 @@ export class Hub {
     const n = this.p.getNote(id);
     if (!n) throw notFound('note not found');
     if (n.state !== 'draft') throw new HttpError(409, 'only draft notes can be edited');
-    const text = cleanText(body?.text, 'text', 10000, false);
-    return this.tx(() => ({ note: this.command('hub.note.update', { id, text }, at) }));
+    if (!isObj(body)) throw bad('body must be an object');
+    if (body.text === undefined && body.attachments === undefined) throw bad('text or attachments is required');
+    const data = { id };
+    if (body.text !== undefined) data.text = cleanText(body.text, 'text', 10000, false);
+    if (body.attachments !== undefined) data.attachments = this.checkAttachments(body.attachments);
+    return this.tx(() => ({ note: this.command('hub.note.update', data, at) }));
   }
   deleteNote(id, at = this.now()) {
     const n = this.p.getNote(id);
@@ -627,4 +669,24 @@ function cleanText(v, name, max, allowEmpty) {
   if (!isStr(v)) throw bad(`${name} must be a string`);
   if (!allowEmpty && !v.trim()) throw bad(`${name} must not be empty`);
   return v.length > max ? v.slice(0, max) : v;
+}
+
+/** A file name that is safe as a single path component: no separators, no leading dots, no control chars, capped. */
+export function safeFilename(raw) {
+  let n = isStr(raw) ? raw : '';
+  n = n.split(/[\\/]+/).filter(Boolean).pop() || ''; // drop any directory part (both separator styles)
+  n = n.normalize('NFC').replace(/[\u0000-\u001f\u007f<>:"|?*\\/]/g, '_').trim().replace(/^[.\s]+/, '').replace(/[.\s]+$/, '');
+  if (!n) return 'file';
+  if (Buffer.byteLength(n) > 120) {
+    const ext = path.extname(n);
+    const keepExt = ext.length > 0 && ext.length <= 16 ? ext : '';
+    let stem = n.slice(0, n.length - keepExt.length);
+    while (Buffer.byteLength(stem + keepExt) > 120) stem = stem.slice(0, -1);
+    n = (stem || 'file') + keepExt;
+  }
+  return n;
+}
+function cleanMime(v) {
+  const m = isStr(v) ? v.split(';')[0].trim().toLowerCase() : '';
+  return /^[a-z0-9][a-z0-9!#$&^_.+-]{0,60}\/[a-z0-9][a-z0-9!#$&^_.+-]{0,100}$/.test(m) ? m : 'application/octet-stream';
 }

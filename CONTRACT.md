@@ -271,3 +271,37 @@ Opening a v0.1 database adds the new tables/columns in place. Old events are not
   `POST /v1/notes` with `{ target, text, execute: true }` creates and queues in one call → `{ note }`.
 
 (Clarified, v0.3: `POST /v1/tasks/:id/start` answers 200; `POST /v1/tasks` with `start: true` answers 201 and, when the start is refused (no live session, or a status Start does not allow), still creates the task and returns `{ task, error }` with no `note`; `POST /v1/notes` with `execute: true` answers 201 with the queued note and creates nothing on 409 `no session available…`; restarting a `next` task is allowed and replaces `startNoteId`; the start note's `target` is the chosen session. Pre-v0.3 databases are migrated in place; run `--rebuild` to back-fill replies from history.)
+
+## v0.4 additions — attachments, cost meter, cheap answers
+
+### Attachments
+- `POST /v1/attachments` — raw request body is the file (≤ 20 MiB); headers `content-type` (mime) and
+  `x-filename` (URI-encoded original name). Saves to `$HELM_HOME/attachments/<A-n>/<safe name>` →
+  `201 { attachment: { id: 'A-n', name, mime, size, path, createdAt } }` (`path` is absolute).
+- `GET /v1/attachments/:id` → the file with its content-type (`content-disposition: inline` for images,
+  `attachment` otherwise). Local-origin guards as for other routes.
+- `POST /v1/notes` and `PATCH /v1/notes/:id` accept `attachments: string[]` (attachment ids, ≤ 10).
+  `Note` gains `attachments: { id, name, mime, size, path }[]` (empty array when none).
+- Delivery (mod): appends `\n\nAttached files (open them with the Read tool):\n- <path>` lines to the
+  prompt / message text. Notes with attachments are never answered by the cheap path.
+
+### Cost meter
+- Event `helm.usage` `{ kind: 'recap' | 'answer' | 'explain' | 'digest' | 'note_turn', model, inputTokens,
+  outputTokens, cacheReadTokens?, costUsd, taskId?, noteId? }`. `note_turn` = a main turn started by a
+  Helm note (work the user asked for through Helm); every other kind is Helm's own overhead.
+- Hub keeps a `usage` table; `GET /v1/usage?days=7` →
+  `{ today: { overheadUsd, requestedUsd, byKind: { [kind]: { calls, costUsd } } }, days: [{ date, overheadUsd, requestedUsd }] }`
+  (local dates). In `/v1/state` as `usageToday: { overheadUsd, requestedUsd }`; SSE entity `usage`
+  (row = the new usageToday) on each event.
+- Price table lives in the mod (USD per MTok, input/output/cache read): opus-5-5 4/20/0.20,
+  sonnet-5-5 2/10/0.20, haiku-5-5 0.10/0.50/0.01, fable 10/50/0.25; cache writes at 1.25× input; unknown models price as Opus.
+
+### Cheap answers
+- A **task** note that reads as a question (ends with `?` or starts with what/why/how/when/where/who/
+  which/does/do/did/is/are/was/were/has/have/can/could/should/would/will) and has no attachments is answered by the
+  mod with one Haiku call over the task's record (title, description, recap, files, last 30 activity
+  lines) instead of messaging or spawning an agent. `note.result.via = 'answer'`; the reply follows.
+  A note starting with `!` always goes to the agent (the `!` is stripped).
+- `NoteVia` gains `'answer'`.
+
+(Clarified, v0.4: only raster images (png/jpeg/gif/webp/avif/bmp/ico) are served `inline`; svg, html and everything else are `attachment`, with `nosniff` and a sandbox CSP. A note's `attachments[]` entries carry `{ id, name, mime, size, path }` (no `createdAt`); `PATCH /v1/notes/:id` takes `text` and/or `attachments` (at least one; omitted fields are unchanged, `[]` clears), and note text must still be non-empty. Upload errors: empty body 400, over 20 MiB 413; unknown or >10 attachment ids on a note 400. Missing `x-filename` becomes `file`, a missing or invalid `content-type` becomes `application/octet-stream`. `GET /v1/usage?days=` clamps `days` to 1-90 (default 7), returns every local day including empty ones, oldest first, ending today; `byKind` covers today only; `helm.usage` events with an unknown `kind` or a negative/non-numeric `costUsd` are ignored. `Attachment` ids use counter `A`; the hub version is 0.4.0.)

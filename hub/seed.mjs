@@ -2,10 +2,35 @@
 // Everything goes through hub.ingest() (mod events) and the hub command methods, never raw SQL inserts,
 // so seeding also exercises the projections. A virtual clock lets history be spread over the last ~3 hours.
 
+import zlib from 'node:zlib';
 import { localDate } from './hub.mjs';
 
 const MIN = 60_000;
 const EDIT_TOOLS = ['Edit', 'Write', 'MultiEdit', 'NotebookEdit']; // tools whose calls announce `files` (conflict radar)
+
+/** A valid w x h RGB PNG with a diagonal gradient (built by hand so the seed needs no binary asset). */
+export function tinyPng(w = 48, h = 32) {
+  const chunk = (type, data) => {
+    const head = Buffer.alloc(8); head.writeUInt32BE(data.length, 0); head.write(type, 4, 'ascii');
+    const crc = Buffer.alloc(4); crc.writeUInt32BE(zlib.crc32(Buffer.concat([head.subarray(4), data])) >>> 0, 0);
+    return Buffer.concat([head, data, crc]);
+  };
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(w, 0); ihdr.writeUInt32BE(h, 4); ihdr[8] = 8; ihdr[9] = 2; // 8-bit truecolour
+  const raw = Buffer.alloc((w * 3 + 1) * h);
+  for (let y = 0; y < h; y++) {
+    const o = y * (w * 3 + 1); // filter byte 0
+    for (let x = 0; x < w; x++) {
+      raw[o + 1 + x * 3] = 40 + Math.round((x / w) * 120);
+      raw[o + 2 + x * 3] = 90 + Math.round((y / h) * 100);
+      raw[o + 3 + x * 3] = 200;
+    }
+  }
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    chunk('IHDR', ihdr), chunk('IDAT', zlib.deflateSync(raw)), chunk('IEND', Buffer.alloc(0)),
+  ]);
+}
 
 function mulberry32(a) {
   return () => {
@@ -29,9 +54,9 @@ export function seed(hub, log) {
   hub.setClock(() => clock);
 
   const seqs = {};
-  const emit = (sid, type, data) => {
+  const emit = (sid, type, data, at = clock) => {
     seqs[sid] = (seqs[sid] || 0) + 1;
-    const r = hub.ingest([{ sessionId: sid, seq: seqs[sid], type, at: clock, data }]);
+    const r = hub.ingest([{ sessionId: sid, seq: seqs[sid], type, at, data }]);
     if (r.accepted !== 1) throw new Error(`seed event rejected: ${type}`);
   };
 
@@ -465,9 +490,9 @@ export function seed(hub, log) {
   ].join('\n'));
 
   // --------------------------------------------------------------------------- notes
-  const note = (key, minAgo, target, text) => atMin(minAgo, () => {
+  const note = (key, minAgo, target, text, attach) => atMin(minAgo, () => {
     const t = target();
-    ids[key] = hub.createNote({ target: t, text }, clock).note.id;
+    ids[key] = hub.createNote({ target: t, text, attachments: attach ? [ids[attach]] : undefined }, clock).note.id;
   });
   const execute = (minAgo, target) => atMin(minAgo, () => hub.executeNotes({ target: target() }, clock));
   const claim = (minAgo, sid) => atMin(minAgo, () => hub.claimInbox(sid, clock));
@@ -487,7 +512,10 @@ export function seed(hub, log) {
   note('nFail', 12, taskT('sparkline'), "Fall back to the SVG path if canvas isn't available in Safari 15.");
   execute(11.5, taskT('sparkline')); claim(10.8, SESS_B);
   result('nFail', 10, SESS_B, false, 'send_message', 'session was idle; delivery timed out after 60s');
-  note('nSend', 4.6, sessA, 'Heads-up: staging DB is read-only until 14:00, so skip migration dry-runs for now.');
+  atMin(4.8, () => {
+    ids.shot = hub.addAttachment({ data: tinyPng(), name: 'staging-banner.png', mime: 'image/png' }, clock).attachment.id;
+  });
+  note('nSend', 4.6, sessA, 'Heads-up: staging DB is read-only until 14:00, so skip migration dry-runs for now. Banner screenshot attached.', 'shot');
   execute(4.5, sessA); claim(4.2, SESS_A);
   note('nQueued', 3.2, sessB, "When you're back: run the visual regression suite before pushing the sparkline work.");
   execute(3.1, sessB);
@@ -502,6 +530,27 @@ export function seed(hub, log) {
   claim(8.5, SESS_A);
   atMin(8, () => emit(SESS_A, 'note.result', { noteId: ids.startAudit, ok: true, via: 'prompt' }));
   atMin(7.8, () => emit(SESS_A, 'note.reply', { noteId: ids.startAudit, text: 'Started the auth docs task in the background with helm:builder.' }));
+
+  // v0.4: cost meter. Helm's own overhead (recap/answer/explain/digest) vs work the user asked for (note_turn),
+  // today (never before local midnight, so a run just after midnight still lands on today) and yesterday.
+  const startToday = new Date(new Date(NOW).setHours(0, 0, 0, 0)).getTime();
+  const d0 = new Date(startToday);
+  const startYesterday = new Date(d0.getFullYear(), d0.getMonth(), d0.getDate() - 1).getTime();
+  const usage = (when, kind, model, inT, outT, costUsd, extra = {}) => atMs(when, () => emit(SESS_A, 'helm.usage', {
+    kind, model, inputTokens: inT, outputTokens: outT, cacheReadTokens: extra.cache ?? 0, costUsd, ...extra.ids,
+  }, when));
+  const today = (minAgo) => Math.max(startToday + 2 * MIN, NOW - minAgo * MIN);
+  usage(startYesterday + 10 * 60 * MIN, 'recap', 'haiku-5-5', 2400, 310, 0.000395, { ids: { taskId: 'T-1' } });
+  usage(startYesterday + 11 * 60 * MIN, 'explain', 'sonnet-5-5', 5200, 900, 0.0194);
+  usage(startYesterday + 15 * 60 * MIN, 'digest', 'sonnet-5-5', 8800, 1400, 0.0316);
+  usage(startYesterday + 16 * 60 * MIN, 'note_turn', 'opus-5-5', 21000, 2600, 0.136, { cache: 40000 });
+  usage(today(150), 'recap', 'haiku-5-5', 2900, 340, 0.00046);
+  usage(today(100), 'answer', 'haiku-5-5', 3100, 220, 0.00042);
+  usage(today(60), 'recap', 'haiku-5-5', 2500, 300, 0.0004);
+  usage(today(40), 'explain', 'sonnet-5-5', 6100, 1100, 0.0232);
+  usage(today(30), 'note_turn', 'opus-5-5', 18000, 1900, 0.112, { cache: 52000 });
+  usage(today(20), 'answer', 'haiku-5-5', 2800, 260, 0.00041);
+  usage(today(6), 'digest', 'sonnet-5-5', 9400, 1500, 0.0338);
 
   // ------------------------------------------------------------------------- run
   actions.sort((a, b) => a.t - b.t);
@@ -520,6 +569,7 @@ export function seed(hub, log) {
     projects: count('projects'), sessions: count('sessions'), agents: count('agents'), tasks: count('tasks'),
     notes: count('notes'), activity: count('activity'), events: count('events'),
     questions: count('questions'), conflicts: count('conflicts'), jobs: count('jobs'), digests: count('digests'),
+    attachments: count('attachments'), usage: count('usage'),
   };
   log?.info(`seed done ${JSON.stringify(counts)}`);
   return { skipped: false, counts };

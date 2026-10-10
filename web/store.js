@@ -25,6 +25,7 @@ export const state = {
   jobs: new Map(),
   digests: new Map(),
   activity: new Map(), // id -> Activity (bounded)
+  usageToday: { overheadUsd: 0, requestedUsd: 0 }, // v0.4 Helm overhead meter
   seq: 0,
   conn: 'connecting', // connecting | live | reconnecting
   ready: false,
@@ -35,7 +36,7 @@ export const state = {
   },
 };
 
-const ver = { project: 0, session: 0, agent: 0, task: 0, note: 0, question: 0, job: 0, digest: 0, activity: 0 };
+const ver = { project: 0, session: 0, agent: 0, task: 0, note: 0, question: 0, job: 0, digest: 0, activity: 0, usage: 0 };
 
 /* ---------- subscriptions ---------- */
 const listeners = new Set();
@@ -62,13 +63,21 @@ export function normalizeRow(entity, row) {
   if (entity === 'note') {
     if (row.reply === undefined) row.reply = null;
     if (row.repliedAt === undefined) row.repliedAt = null;
+    if (!Array.isArray(row.attachments)) row.attachments = []; // v0.4
   } else if (entity === 'task') {
     if (row.startNoteId === undefined) row.startNoteId = null;
   }
   return row;
 }
 
+/** v0.4: the SSE `usage` row IS the new usageToday (no id). Missing numbers count as 0. */
+export function setUsageToday(u) {
+  state.usageToday = { overheadUsd: Number(u && u.overheadUsd) || 0, requestedUsd: Number(u && u.requestedUsd) || 0 };
+  mark('usage');
+}
+
 export function upsert(entity, row) {
+  if (entity === 'usage') { setUsageToday(row); return; }
   if (!row || row.id == null) return;
   normalizeRow(entity, row);
   if (entity === 'activity') { ingestActivity([row], true); return; }
@@ -119,6 +128,7 @@ function replaceAll(s) {
     for (const row of s[KEYS[k]] || []) map.set(row.id, normalizeRow(k, row));
     mark(k);
   }
+  setUsageToday(s.usageToday);
   state.seq = s.seq || 0;
   state.ready = true;
   mark('ready');
@@ -132,6 +142,7 @@ export function applyChange(msg) {
     if (msg.op !== 'delete') ingestActivity([msg.row], true);
     return;
   }
+  if (msg.entity === 'usage') { if (msg.op !== 'delete') setUsageToday(msg.row); return; }
   if (msg.op === 'delete') remove(msg.entity, msg.row && msg.row.id);
   else upsert(msg.entity, msg.row);
 }

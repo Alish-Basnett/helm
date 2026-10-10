@@ -5,6 +5,8 @@ import { HttpError } from './hub.mjs';
 import { VERSION } from './config.mjs';
 
 const MAX_BODY = 1024 * 1024;
+export const MAX_UPLOAD = 20 * 1024 * 1024;
+const fmtLimit = (n) => `${n / (1024 * 1024)} MiB`;
 const LOCAL_ORIGIN = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i;
 const LOCAL_HOST = /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i;
 
@@ -20,6 +22,7 @@ const MIME = {
 
 const STREAM = Symbol('stream');
 const CREATED = Symbol('created');
+const FILE = Symbol('file');
 const created = (o) => ({ [CREATED]: o });
 
 // ------------------------------------------------------------------ routes
@@ -34,8 +37,23 @@ const intParam = (v, d, min, max) => {
   return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : d;
 };
 
+// Newest mtime across web/: an open dashboard compares it and reloads itself after an update.
+function webBuild(root) {
+  let max = 0;
+  const walk = (dir) => {
+    for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, ent.name);
+      if (ent.isDirectory()) walk(full);
+      else max = Math.max(max, fs.statSync(full).mtimeMs);
+    }
+  };
+  try { walk(root); } catch { /* no web dir */ }
+  return Math.round(max);
+}
+
 route('GET', '/v1/health', ({ hub, cfg, boot }) => ({
   ok: true, version: VERSION, pid: process.pid, startedAt: hub.startedAt, port: boot.port ?? cfg.port,
+  webBuild: webBuild(cfg.webRoot),
 }));
 route('GET', '/v1/state', ({ hub, query }) => hub.state(query.get('projectId') || undefined));
 route('GET', '/v1/stream', () => STREAM);
@@ -83,6 +101,17 @@ route('POST', '/v1/notes/:id/retry', ({ hub, params }) => hub.retryNote(params.i
 route('GET', '/v1/search', ({ hub, query }) => ({
   results: hub.search(query.get('q') || '', intParam(query.get('limit'), 30, 1, 100)),
 }));
+route('POST', '/v1/attachments', async ({ hub, raw, req }) => {
+  let name = req.headers['x-filename'];
+  if (Array.isArray(name)) name = name[0];
+  try { name = name ? decodeURIComponent(name) : ''; } catch { /* keep the undecoded header */ }
+  return created(hub.addAttachment({ data: await raw(MAX_UPLOAD), name, mime: req.headers['content-type'] }));
+});
+route('GET', '/v1/attachments/:id', ({ hub, params }) => {
+  const a = hub.attachmentFile(params.id);
+  return { [FILE]: a };
+});
+route('GET', '/v1/usage', ({ hub, query }) => hub.usage(intParam(query.get('days'), 7, 1, 90)));
 route('GET', '/v1/learn', ({ hub, query }) => ({ concepts: hub.learn(query.get('projectId') || undefined) }));
 
 // ------------------------------------------------------------------- helpers
@@ -95,29 +124,31 @@ function sendJson(res, status, obj, headers = {}) {
   res.end(body);
 }
 
-function readBody(req) {
+/** Read the request body into a Buffer, refusing (413) anything over `limit` bytes. */
+function readBody(req, limit = MAX_BODY) {
   return new Promise((resolve, reject) => {
     const declared = Number(req.headers['content-length']);
-    if (declared > MAX_BODY) { reject(new HttpError(413, 'request body too large (limit 1 MiB)')); return; }
+    const tooBig = () => new HttpError(413, `request body too large (limit ${fmtLimit(limit)})`);
+    if (declared > limit) { reject(tooBig()); return; }
     const chunks = [];
     let size = 0;
     req.on('data', (c) => {
       size += c.length;
-      if (size > MAX_BODY) {
+      if (size > limit) {
         chunks.length = 0;
-        reject(new HttpError(413, 'request body too large (limit 1 MiB)'));
+        reject(tooBig());
         req.pause();
         return;
       }
       chunks.push(c);
     });
-    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+    req.on('end', () => resolve(Buffer.concat(chunks)));
     req.on('error', reject);
   });
 }
 
 async function parseJsonBody(req) {
-  const text = await readBody(req);
+  const text = (await readBody(req)).toString('utf8');
   if (!text.trim()) return {};
   let v;
   try { v = JSON.parse(text); } catch { throw new HttpError(400, 'invalid JSON body'); }
@@ -136,6 +167,26 @@ function guard(req, viaTcp, mutating) {
     if (origin && !LOCAL_ORIGIN.test(origin)) throw new HttpError(403, 'forbidden origin');
     if (req.headers['sec-fetch-site'] === 'cross-site') throw new HttpError(403, 'cross-site request refused');
   }
+}
+
+// ---------------------------------------------------------------- attachments
+/**
+ * Uploaded files are untrusted content served from the hub's own origin, so only raster images render inline;
+ * everything else (html, svg, ...) is a download, and a sandbox CSP + nosniff stop it running as a page.
+ */
+function sendAttachment(req, res, a, cors) {
+  const inline = /^image\/(png|jpeg|gif|webp|avif|bmp|x-icon)$/.test(a.mime);
+  const ascii = a.name.replace(/[^\x20-\x7e]/g, '_').replace(/["\\]/g, '_');
+  res.writeHead(200, {
+    ...cors,
+    'Content-Type': a.mime, 'Content-Length': a.size, 'Cache-Control': 'private, max-age=3600',
+    'Content-Disposition': `${inline ? 'inline' : 'attachment'}; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(a.name)}`,
+    'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "sandbox; default-src 'none'; img-src 'self' data:",
+  });
+  if (req.method === 'HEAD') return res.end();
+  const rs = fs.createReadStream(a.path);
+  rs.on('error', () => res.destroy());
+  rs.pipe(res);
 }
 
 // ----------------------------------------------------------------------- SSE
@@ -253,9 +304,11 @@ export function createHandler({ hub, cfg, log, boot = {}, viaTcp, sseClients }) 
       const ctx = {
         hub, cfg, boot, params: matched.params, query: url.searchParams, req, res,
         json: () => parseJsonBody(req),
+        raw: (limit) => readBody(req, limit),
       };
       const out = await matched.r.fn(ctx);
       if (out === STREAM) return handleStream(hub, cfg, req, res, url.searchParams, sseClients);
+      if (out && out[FILE]) return sendAttachment(req, res, out[FILE], cors);
       if (out && out[CREATED]) return sendJson(res, 201, out[CREATED], cors);
       return sendJson(res, 200, out, cors);
     } catch (e) {

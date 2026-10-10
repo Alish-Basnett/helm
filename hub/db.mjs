@@ -71,7 +71,8 @@ CREATE TABLE IF NOT EXISTS notes (
   created_at INTEGER NOT NULL, queued_at INTEGER, ran_at INTEGER, via TEXT, error TEXT,
   sending_at INTEGER, -- when the mod claimed it (queued -> sending); drives the sending timeout
   reply TEXT,         -- v0.3: the agent's answer (markdown)
-  replied_at INTEGER  -- v0.3
+  replied_at INTEGER, -- v0.3
+  attachments TEXT NOT NULL DEFAULT '[]' -- v0.4: JSON [{ id, name, mime, size, path }]
 );
 CREATE INDEX IF NOT EXISTS notes_session ON notes(session_id, state);
 CREATE INDEX IF NOT EXISTS notes_target ON notes(target_kind, target_id);
@@ -118,6 +119,18 @@ CREATE TABLE IF NOT EXISTS digests (
   id TEXT PRIMARY KEY, date TEXT NOT NULL, project_id TEXT, text TEXT NOT NULL, created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS digests_date ON digests(date);
+
+-- v0.4: attachment metadata (the bytes live on disk under $HELM_HOME/attachments/<id>/) and the cost meter.
+CREATE TABLE IF NOT EXISTS attachments (
+  id TEXT PRIMARY KEY, name TEXT NOT NULL, mime TEXT NOT NULL, size INTEGER NOT NULL, created_at INTEGER NOT NULL
+);
+-- NOT AUTOINCREMENT, like activity: ids restart at 1 after a rebuild.
+CREATE TABLE IF NOT EXISTS usage (
+  id INTEGER PRIMARY KEY, at INTEGER NOT NULL, session_id TEXT NOT NULL, kind TEXT NOT NULL,
+  model TEXT NOT NULL DEFAULT '', input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_read_tokens INTEGER NOT NULL DEFAULT 0, cost_usd REAL NOT NULL DEFAULT 0, task_id TEXT, note_id TEXT
+);
+CREATE INDEX IF NOT EXISTS usage_at ON usage(at);
 
 CREATE TABLE IF NOT EXISTS changes (
   seq INTEGER PRIMARY KEY AUTOINCREMENT, entity TEXT NOT NULL, op TEXT NOT NULL, row TEXT NOT NULL
@@ -175,6 +188,8 @@ export class Db {
     if (!has('notes', 'reply')) this.raw.exec('ALTER TABLE notes ADD COLUMN reply TEXT');
     if (!has('notes', 'replied_at')) this.raw.exec('ALTER TABLE notes ADD COLUMN replied_at INTEGER');
     if (!has('tasks', 'start_note_id')) this.raw.exec('ALTER TABLE tasks ADD COLUMN start_note_id TEXT');
+    // v0.4: note attachments (the attachments / usage tables come from SCHEMA; run `helmd --rebuild` to back-fill usage).
+    if (!has('notes', 'attachments')) this.raw.exec("ALTER TABLE notes ADD COLUMN attachments TEXT NOT NULL DEFAULT '[]'");
   }
   prep(sql) {
     let s = this.cache.get(sql);

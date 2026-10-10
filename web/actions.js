@@ -133,19 +133,20 @@ export async function joinSession(sessionId, projectId) {
 }
 
 /* ---------- notes ---------- */
-export async function addNote(target, text, { execute = false } = {}) {
+export async function addNote(target, text, { execute = false, attachments = [] } = {}) {
   text = (text || '').trim();
+  if (!text && attachments.length) text = attachments.length === 1 ? 'See the attached file.' : 'See the attached files.';
   if (!text) return null;
   const sessionId = target.kind === 'session' ? target.id : (state.tasks.get(target.id) || {}).sessionId || '';
   const tmp = {
     id: tmpId('N'), target: { kind: target.kind, id: target.id }, sessionId, text,
     state: execute ? 'queued' : 'draft', createdAt: Date.now(), queuedAt: execute ? Date.now() : null,
-    ranAt: null, via: null, error: null, __pending: true,
+    ranAt: null, via: null, error: null, reply: null, repliedAt: null, attachments: attachments.slice(), __pending: true,
   };
   upsert('note', tmp);
   let created = null;
   try {
-    const { note } = await api.createNote({ kind: target.kind, id: target.id }, text, execute);
+    const { note } = await api.createNote({ kind: target.kind, id: target.id }, text, execute, attachments.map((a) => a.id));
     created = note;
     remove('note', tmp.id);
     if (note) upsert('note', note);

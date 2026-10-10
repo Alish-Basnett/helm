@@ -2,7 +2,8 @@
 import { h, $, setText, setClass, setHidden, bus, startTicker } from './dom.js';
 import { icon } from './icons.js';
 import { state, sel, subscribe, connect, setUI, lsGet, lsSet } from './store.js';
-import { fmtTokens, fmtUsd, fmtClock, plural } from './format.js';
+import { fmtTokens, fmtUsd, fmtUsdSmall, fmtClock, plural } from './format.js';
+import { toggleMeter } from './meter.js';
 import { openMenu, emptyState } from './ui.js';
 import { route, onRoute, navigate, VIEWS } from './router.js';
 import { createSheet } from './views/sheet.js';
@@ -114,6 +115,11 @@ const tSess = h('span', { class: 'tele-v' }, '0');
 const tAgents = h('span', { class: 'tele-v' }, '0');
 const tTok = h('span', { class: 'tele-v' }, '0');
 const tCost = h('span', { class: 'tele-v' }, '$0.00');
+const tHelm = h('span', { class: 'tele-v' }, '$0.000');
+const helmBtn = h('button', {
+  class: 'tele tele-helm', type: 'button', 'aria-haspopup': 'dialog', 'aria-expanded': 'false',
+  title: 'What Helm itself spends today (click for details)', onclick: () => toggleMeter(helmBtn),
+}, h('span', { class: 'tele-k' }, 'Helm'), tHelm, h('span', { class: 'tele-k tele-helm-k' }, 'today'));
 const tClock = h('span', { class: 'tele-v clock' }, fmtClock());
 const telemetry = h('div', { class: 'telemetry mono', 'aria-label': 'Telemetry' },
   connEl,
@@ -121,6 +127,7 @@ const telemetry = h('div', { class: 'telemetry mono', 'aria-label': 'Telemetry' 
   h('span', { class: 'tele' }, tAgents, h('span', { class: 'tele-k' }, 'agents')),
   h('span', { class: 'tele' }, tTok, h('span', { class: 'tele-k' }, 'tokens today')),
   h('span', { class: 'tele tele-cost' }, tCost, h('span', { class: 'tele-k' }, 'today')),
+  helmBtn,
   h('span', { class: 'tele' }, tClock));
 const talkBtn = h('button', { class: 'btn btn-quiet talk-btn', type: 'button', title: 'Talk to a session (T)', 'aria-label': 'Talk to a session', onclick: () => talk.toggle() },
   icon('chat', 16), h('span', { class: 'sb-label-narrow' }, 'Talk'), h('kbd', { class: 'kbd sb-label-narrow' }, 'T'));
@@ -138,6 +145,7 @@ function renderChrome() {
   setText(tAgents, String(t.agents));
   setText(tTok, fmtTokens(t.tokens));
   setText(tCost, fmtUsd(t.cost));
+  setText(tHelm, fmtUsdSmall((state.usageToday && state.usageToday.overheadUsd) || 0));
   const proj = sel.scopeProject();
   setText(psName, proj ? proj.name : 'All projects');
   setText(scopeEl, proj ? proj.name : 'All projects');
@@ -224,3 +232,17 @@ applySidebar();
 renderChrome();
 applyRoute(route());
 connect().catch((e) => console.error(e));
+
+/* ---------- self-update: reload when the hub serves newer web files ---------- */
+let loadedBuild = null;
+async function checkBuild() {
+  try {
+    const { webBuild } = await fetch('/v1/health', { cache: 'no-store' }).then((r) => r.json());
+    if (!webBuild) return;
+    if (loadedBuild === null) loadedBuild = webBuild;
+    else if (webBuild !== loadedBuild) location.reload();
+  } catch { /* hub briefly down: try again next time */ }
+}
+checkBuild();
+setInterval(checkBuild, 30000);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) checkBuild(); });

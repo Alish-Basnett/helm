@@ -36,6 +36,13 @@ export function fmtUsd(n) {
   return '$' + (n >= 100 ? n.toFixed(0) : n.toFixed(2));
 }
 
+/** Small-money format for the overhead meter: $0.004, $0.12, $3.40. */
+export function fmtUsdSmall(n) {
+  n = Number(n) || 0;
+  if (n >= 100) return '$' + n.toFixed(0);
+  return '$' + n.toFixed(n >= 1 ? 2 : n >= 0.1 ? 2 : 3);
+}
+
 export function fmtClock(t = Date.now()) {
   const d = new Date(t);
   return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;

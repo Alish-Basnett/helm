@@ -773,3 +773,301 @@ describe('note replies', () => {
     ])
   })
 })
+
+describe('v0.4: cheap answers', () => {
+  const taskDetail = (agentId: string | null) => ({
+    'T-5': {
+      task: { id: 'T-5', title: 'Fix login', description: 'the original brief', recap: null, filesChanged: ['a.ts', 'b.ts'] },
+      agent: agentId ? { id: agentId } : null,
+    },
+  })
+  const noteResult = (w: World, id: string) => asEvent('note.result', w).find(e => e.data.noteId === id)!.data
+  const taskNote = (id: string, text: string, extra: Record<string, unknown> = {}) => ({ id, target: { kind: 'task', id: 'T-5' }, text, ...extra })
+
+  test('a question on a task is answered by one haiku call over the task record, with no agent woken', async ($, on) => {
+    const w = await boot($, on, { taskDetail: taskDetail('ag-ans-1') as any })
+    w.agentList.value = [{ id: 'ag-ans-1', status: 'running' }]
+    w.engine.modelResult = { isAnswered: true, text: '  It touched a.ts and b.ts.  ', usage: { input_tokens: 1000, output_tokens: 200, cache_read_input_tokens: 5000 } }
+    w.hub.inbox.push(taskNote('N-60', 'what files did this touch?'))
+    await tick(w)
+    expect(w.modelCalls).toHaveLength(1)
+    expect(w.modelCalls[0].model).toBe('haiku')
+    expect(w.modelCalls[0].system).toContain("Answer the user's question about this task")
+    expect(w.modelCalls[0].prompt).toContain('Task record:')
+    expect(w.modelCalls[0].prompt).toContain('Fix login')
+    expect(w.modelCalls[0].prompt).toContain('a.ts')
+    expect(w.modelCalls[0].prompt).toContain('what files did this touch?')
+    expect(noteResult(w, 'N-60')).toEqual({ noteId: 'N-60', ok: true, via: 'answer' })
+    expect(asEvent('note.reply', w).filter(e => e.data.noteId === 'N-60').map(e => e.data)).toEqual([{ noteId: 'N-60', text: 'It touched a.ts and b.ts.' }])
+    const usage = asEvent('helm.usage', w).filter(e => e.data.kind === 'answer')
+    expect(usage).toHaveLength(1)
+    // haiku: (1000 * 0.10 + 200 * 0.50 + 5000 * 0.01) / 1e6
+    expect(usage[0]!.data).toEqual({ kind: 'answer', model: 'haiku', inputTokens: 1000, outputTokens: 200, cacheReadTokens: 5000, costUsd: 0.00025, taskId: 'T-5', noteId: 'N-60' })
+    expect(w.sent).toHaveLength(0)
+    expect(w.spawned).toHaveLength(0)
+  })
+
+  test('a leading ! sends the note to the live agent with the ! stripped', async ($, on) => {
+    const live = await boot($, on, { taskDetail: taskDetail('ag-ans-2') as any })
+    live.agentList.value = [{ id: 'ag-ans-2', status: 'running' }]
+    live.hub.inbox.push(taskNote('N-61', '!what files did this touch?'))
+    await tick(live)
+    expect(live.modelCalls).toHaveLength(0)
+    expect(live.sent).toHaveLength(1)
+    expect(live.sent[0].text).toContain('what files did this touch?')
+    expect(live.sent[0].text).not.toContain('!what')
+    expect(noteResult(live, 'N-61')).toMatchObject({ ok: true, via: 'send_message' })
+  })
+
+  test('a leading ! on a task whose agent has finished spawns a follow-up with the ! stripped', async ($, on) => {
+    const gone = await boot($, on, { taskDetail: taskDetail('ag-ans-3') as any })
+    gone.agentList.value = [{ id: 'ag-ans-3', status: 'completed' }]
+    gone.hub.inbox.push(taskNote('N-62', '  ! what files did this touch?'))
+    await tick(gone)
+    expect(gone.modelCalls).toHaveLength(0)
+    expect(gone.spawned).toHaveLength(1)
+    expect(gone.spawned[0].prompt).toContain('The user\'s new instruction:\nwhat files did this touch?')
+    expect(gone.spawned[0].prompt).not.toContain('!')
+    expect(noteResult(gone, 'N-62')).toMatchObject({ ok: true, via: 'followup_spawn' })
+  })
+
+  test('a question with attachments skips the cheap path and the delivered text lists the files', async ($, on) => {
+    const w = await boot($, on, { taskDetail: taskDetail('ag-ans-4') as any })
+    w.agentList.value = [{ id: 'ag-ans-4', status: 'running' }]
+    w.hub.inbox.push(taskNote('N-63', 'why does this look wrong?', { attachments: [{ id: 'A-1', name: 'shot.png', path: '/h/attachments/A-1/shot.png' }, { id: 'A-2', name: 'log.txt', path: '/h/attachments/A-2/log.txt' }] }))
+    await tick(w)
+    expect(w.modelCalls).toHaveLength(0)
+    expect(w.sent).toHaveLength(1)
+    expect(w.sent[0].text).toContain('why does this look wrong?')
+    expect(w.sent[0].text).toContain('\n\nAttached files (open them with the Read tool):\n- /h/attachments/A-1/shot.png\n- /h/attachments/A-2/log.txt')
+    expect(w.sent[0].text.endsWith('- /h/attachments/A-2/log.txt')).toBe(true)
+    expect(noteResult(w, 'N-63')).toMatchObject({ ok: true, via: 'send_message' })
+  })
+
+  test('a follow-up spawn for a note with attachments carries the paths in the prompt', async ($, on) => {
+    const w = await boot($, on, { taskDetail: taskDetail('ag-ans-5') as any })
+    w.agentList.value = [{ id: 'ag-ans-5', status: 'completed' }]
+    w.hub.inbox.push(taskNote('N-64', 'is this the bug?', { attachments: [{ id: 'A-3', name: 'a.png', path: '/h/attachments/A-3/a.png' }] }))
+    await tick(w)
+    expect(w.modelCalls).toHaveLength(0)
+    expect(w.spawned[0].prompt).toContain('Attached files (open them with the Read tool):\n- /h/attachments/A-3/a.png')
+  })
+
+  test('a session note with attachments gets the same suffix through prompt.submit', async ($, on) => {
+    const w = await boot($, on)
+    w.hub.inbox.push({ id: 'N-65', target: { kind: 'session', id: w.sessionId }, text: 'look at this', attachments: [{ id: 'A-4', name: 'x.png', path: '/h/attachments/A-4/x.png' }] })
+    await tick(w)
+    expect(w.submitted).toHaveLength(1)
+    expect(w.submitted[0].text).toBe('Helm note (N-65):\nlook at this\n\nAttached files (open them with the Read tool):\n- /h/attachments/A-4/x.png')
+  })
+
+  test('a note with an empty attachments array gets no suffix', async ($, on) => {
+    const w = await boot($, on)
+    w.hub.inbox.push({ id: 'N-66', target: { kind: 'session', id: w.sessionId }, text: 'plain', attachments: [] })
+    await tick(w)
+    expect(w.submitted[0].text).toBe('Helm note (N-66):\nplain')
+  })
+
+  test('a non-question instruction goes to the agent path', async ($, on) => {
+    const w = await boot($, on, { taskDetail: taskDetail('ag-ans-6') as any })
+    w.agentList.value = [{ id: 'ag-ans-6', status: 'running' }]
+    w.hub.inbox.push(taskNote('N-67', 'rename the button'))
+    await tick(w)
+    expect(w.modelCalls).toHaveLength(0)
+    expect(w.sent).toHaveLength(1)
+    expect(w.sent[0].text).toContain('rename the button')
+    expect(noteResult(w, 'N-67')).toMatchObject({ ok: true, via: 'send_message' })
+    expect(asEvent('helm.usage', w)).toHaveLength(0)
+  })
+
+  test('question detection: a leading interrogative or trailing ? counts, other words do not', async ($, on) => {
+    const w = await boot($, on, { taskDetail: taskDetail('ag-ans-7') as any })
+    w.agentList.value = [{ id: 'ag-ans-7', status: 'running' }]
+    w.hub.inbox.push(taskNote('N-68', 'Does it handle null'), taskNote('N-69', 'rename it?'), taskNote('N-70', 'however, rename it'), taskNote('N-71', 'issue: fix it'))
+    await tick(w)
+    const answered = asEvent('note.result', w).filter(e => e.data.via === 'answer').map(e => e.data.noteId).sort()
+    expect(answered).toEqual(['N-68', 'N-69'])
+    const sent = w.sent.map(s => s.text).join('\n')
+    expect(sent).toContain('however, rename it')
+    expect(sent).toContain('issue: fix it')
+  })
+
+  test('an unanswered cheap-path model call fails the note and sends no reply', async ($, on) => {
+    const w = await boot($, on, { taskDetail: taskDetail('ag-ans-8') as any })
+    w.engine.modelResult = { isAnswered: false, reason: 'api-error' }
+    w.hub.inbox.push(taskNote('N-72', 'what is the status?'))
+    await tick(w)
+    expect(noteResult(w, 'N-72')).toMatchObject({ ok: false, via: null })
+    expect(noteResult(w, 'N-72').error).toContain('api-error')
+    expect(asEvent('note.reply', w)).toHaveLength(0)
+    expect(w.sent).toHaveLength(0)
+    expect(w.spawned).toHaveLength(0)
+  })
+})
+
+describe('v0.4: free recaps', () => {
+  const turn = (extra: Record<string, unknown>) => ({ turnId: 't', durationMs: 5, isAborted: false, answer: '', reason: 'answer', ...extra })
+  const agentsOpt = (id: string, taskId: string) => [{ id, taskId, description: 'Write tests' }]
+  // with no tool trail in memory the mod rebuilds one from GET /v1/tasks/:id
+  const detail = (taskId: string) => ({ [taskId]: { task: { id: taskId }, agent: null } }) as any
+
+  test('a report with DONE/HOW/LEARNED/TAGS gives recap.generated without any model call', async ($, on) => {
+    const w = await boot($, on, { agents: agentsOpt('ag-rc-1', 'T-21') })
+    const answer = 'DONE: tests now cover the meter\nHOW: fake hub plus the mock clock\nFILES: hooks/register.test.ts\nLEARNED: a fake at the boundary keeps tests fast\nTAGS: Testing, Mocks, extra, ignored'
+    await $.turn.complete(turn({ agentId: 'ag-rc-1', answer }) as any)
+    await tick(w)
+    await tick(w)
+    expect(w.modelCalls).toHaveLength(0)
+    const rec = asEvent('recap.generated', w).filter(e => e.data.taskId === 'T-21')
+    expect(rec).toHaveLength(1)
+    expect(rec[0]!.data).toEqual({
+      taskId: 'T-21',
+      what: 'tests now cover the meter',
+      how: 'fake hub plus the mock clock',
+      learned: 'a fake at the boundary keeps tests fast',
+      concepts: ['testing', 'mocks', 'extra'],
+    })
+    expect(asEvent('helm.usage', w).filter(e => e.data.taskId === 'T-21')).toHaveLength(0)
+  })
+
+  test('markdown-bold labels are read, and a missing TAGS line gives no concepts', async ($, on) => {
+    const w = await boot($, on, { agents: agentsOpt('ag-rc-2', 'T-22') })
+    await $.turn.complete(turn({ agentId: 'ag-rc-2', answer: '**DONE:** shipped it\n**LEARNED:** caching helps' }) as any)
+    await tick(w)
+    await tick(w)
+    expect(w.modelCalls).toHaveLength(0)
+    expect(asEvent('recap.generated', w).find(e => e.data.taskId === 'T-22')!.data).toEqual({ taskId: 'T-22', what: 'shipped it', how: '', learned: 'caching helps', concepts: [] })
+  })
+
+  test('without the report lines the haiku recap runs and is metered as kind recap', async ($, on) => {
+    const w = await boot($, on, { agents: agentsOpt('ag-rc-3', 'T-23'), taskDetail: detail('T-23') })
+    w.engine.modelResult = {
+      isAnswered: true,
+      text: 'sure {"what":"Added tests","how":"Fake hub","learned":"Fakes beat mocks","concepts":["Testing","mocks"]}',
+      usage: { input_tokens: 2000, output_tokens: 100 },
+    }
+    await $.turn.complete(turn({ agentId: 'ag-rc-3', answer: 'I finished the work, no report format used.' }) as any)
+    await tick(w)
+    await tick(w)
+    expect(w.modelCalls).toHaveLength(1)
+    expect(w.modelCalls[0].model).toBe('haiku')
+    expect(asEvent('recap.generated', w).find(e => e.data.taskId === 'T-23')!.data).toEqual({ taskId: 'T-23', what: 'Added tests', how: 'Fake hub', learned: 'Fakes beat mocks', concepts: ['testing', 'mocks'] })
+    const usage = asEvent('helm.usage', w).filter(e => e.data.kind === 'recap')
+    expect(usage).toHaveLength(1)
+    // haiku: (2000 * 0.10 + 100 * 0.50) / 1e6
+    expect(usage[0]!.data).toMatchObject({ kind: 'recap', model: 'haiku', inputTokens: 2000, outputTokens: 100, costUsd: 0.00025, taskId: 'T-23' })
+  })
+
+  test('DONE without LEARNED is not a free recap', async ($, on) => {
+    const w = await boot($, on, { agents: agentsOpt('ag-rc-4', 'T-24'), taskDetail: detail('T-24') })
+    w.engine.modelResult = { isAnswered: true, text: '{"what":"w","how":"h","learned":"l","concepts":[]}', usage: { input_tokens: 10, output_tokens: 10 } }
+    await $.turn.complete(turn({ agentId: 'ag-rc-4', answer: 'DONE: only this line' }) as any)
+    await tick(w)
+    await tick(w)
+    expect(w.modelCalls).toHaveLength(1)
+  })
+})
+
+describe('v0.4: usage meter', () => {
+  const turn = (extra: Record<string, unknown>) => ({ turnId: 't', durationMs: 5, isAborted: false, answer: '', reason: 'answer', ...extra })
+  const MTOK = 1_000_000
+
+  test('an explain job emits helm.usage with kind explain', async ($, on) => {
+    const w = await boot($, on)
+    w.engine.modelResult = { isAnswered: true, text: 'ok', usage: { input_tokens: 4000, output_tokens: 800 } }
+    w.hub.jobs.push({ id: 'J-10', kind: 'explain', taskId: 'T-5', input: { title: 'Fix login' } })
+    await tick(w)
+    const usage = asEvent('helm.usage', w).filter(e => e.data.kind === 'explain')
+    expect(usage).toHaveLength(1)
+    // haiku: (4000 * 0.10 + 800 * 0.50) / 1e6 = 0.0008
+    expect(usage[0]!.data).toMatchObject({ kind: 'explain', model: 'haiku', inputTokens: 4000, outputTokens: 800, costUsd: 0.0008, taskId: 'T-5' })
+  })
+
+  test('a digest job is metered as digest, and an unanswered call is still metered', async ($, on) => {
+    const w = await boot($, on)
+    w.engine.modelResult = { isAnswered: false, reason: 'api-error', usage: { input_tokens: 100, output_tokens: 0 } }
+    w.hub.jobs.push({ id: 'J-11', kind: 'digest', input: {} })
+    await tick(w)
+    expect(asEvent('helm.usage', w).map(e => e.data.kind)).toContain('digest')
+    expect(asEvent('job.result', w).find(e => e.data.jobId === 'J-11')!.data.ok).toBe(false)
+  })
+
+  test('a model call that reports no usage emits no helm.usage', async ($, on) => {
+    const w = await boot($, on)
+    w.engine.modelResult = { isAnswered: true, text: 'ok' }
+    w.hub.jobs.push({ id: 'J-12', kind: 'explain', input: {} })
+    await tick(w)
+    expect(asEvent('job.result', w).find(e => e.data.jobId === 'J-12')!.data.ok).toBe(true)
+    expect(asEvent('helm.usage', w)).toHaveLength(0)
+  })
+
+  test('a main turn started by a Helm note emits note_turn with the turn model; one without a note emits none', async ($, on) => {
+    const w = await boot($, on)
+    await $.turn.start({ text: 'Helm note (N-80):\nrename it', turnId: 'rt-u1' } as any)
+    await $.turn.complete(turn({ turnId: 'rt-u1', answer: 'done', usage: { model: 'claude-sonnet-5-5', input_tokens: 10_000, output_tokens: 2_000, cache_read_input_tokens: 50_000 } }) as any)
+    await $.turn.start({ text: 'just a normal prompt', turnId: 'rt-u2' } as any)
+    await $.turn.complete(turn({ turnId: 'rt-u2', answer: 'ok', usage: { model: 'claude-opus-5-5', input_tokens: 10_000, output_tokens: 2_000 } }) as any)
+    await tick(w)
+    const usage = asEvent('helm.usage', w).filter(e => e.data.kind === 'note_turn')
+    expect(usage).toHaveLength(1)
+    // sonnet: (10000 * 2 + 2000 * 10 + 50000 * 0.20) / 1e6 = 0.05
+    expect(usage[0]!.data).toEqual({ kind: 'note_turn', model: 'claude-sonnet-5-5', inputTokens: 10_000, outputTokens: 2_000, cacheReadTokens: 50_000, costUsd: 0.05, noteId: 'N-80' })
+  })
+
+  test('a note turn with no usage still replies but emits no helm.usage; no model defaults to opus pricing', async ($, on) => {
+    const w = await boot($, on)
+    await $.turn.start({ text: 'Helm note (N-81):\nx', turnId: 'rt-u3' } as any)
+    await $.turn.complete(turn({ turnId: 'rt-u3', answer: 'fine' }) as any)
+    await $.turn.start({ text: 'Helm note (N-82):\ny', turnId: 'rt-u4' } as any)
+    await $.turn.complete(turn({ turnId: 'rt-u4', answer: 'fine', usage: { input_tokens: MTOK, output_tokens: 0 } }) as any)
+    await tick(w)
+    expect(asEvent('note.reply', w).filter(e => ['N-81', 'N-82'].includes(e.data.noteId))).toHaveLength(2)
+    const usage = asEvent('helm.usage', w).filter(e => e.data.kind === 'note_turn')
+    expect(usage.map(e => e.data.noteId)).toEqual(['N-82'])
+    expect(usage[0]!.data).toMatchObject({ model: 'opus', costUsd: 4 })
+  })
+
+  test('costOf: opus is $4 in / $20 out / $0.20 cache read per MTok', async ($, on) => {
+    const w = await boot($, on)
+    const run = async (id: string, usage: Record<string, number>) => {
+      await $.turn.start({ text: `Helm note (${id}):\nx`, turnId: `rt-${id}` } as any)
+      await $.turn.complete(turn({ turnId: `rt-${id}`, answer: 'a', usage: { model: 'claude-opus-5-5', ...usage } }) as any)
+    }
+    await run('N-90', { input_tokens: MTOK })
+    await run('N-91', { output_tokens: MTOK })
+    await run('N-92', { cache_read_input_tokens: MTOK })
+    await run('N-93', { cache_creation_input_tokens: MTOK })
+    await tick(w)
+    const cost = (id: string) => asEvent('helm.usage', w).find(e => e.data.noteId === id)!.data
+    expect(cost('N-90').costUsd).toBe(4)
+    expect(cost('N-91').costUsd).toBe(20)
+    expect(cost('N-92').costUsd).toBe(0.2)
+    // cache writes are counted as input tokens and billed at 1.25× the input rate
+    expect(cost('N-93')).toMatchObject({ costUsd: 5, inputTokens: MTOK })
+    expect(cost('N-92')).toMatchObject({ inputTokens: 0, cacheReadTokens: MTOK })
+  })
+
+  test('costOf: an unknown model name prices as opus (never under-counts)', async ($, on) => {
+    const w = await boot($, on)
+    await $.turn.start({ text: 'Helm note (N-94):\nx', turnId: 'rt-N-94' } as any)
+    await $.turn.complete(turn({ turnId: 'rt-N-94', answer: 'a', usage: { model: 'claude-future-9', input_tokens: MTOK } }) as any)
+    await tick(w)
+    expect(asEvent('helm.usage', w).find(e => e.data.noteId === 'N-94')!.data.costUsd).toBe(4)
+  })
+
+  test('costOf: sonnet 2/10/0.20 and haiku 0.10/0.50/0.01 per MTok', async ($, on) => {
+    const w = await boot($, on)
+    const run = async (id: string, model: string, usage: Record<string, number>) => {
+      await $.turn.start({ text: `Helm note (${id}):\nx`, turnId: `rt-${id}` } as any)
+      await $.turn.complete(turn({ turnId: `rt-${id}`, answer: 'a', usage: { model, ...usage } }) as any)
+    }
+    await run('N-94', 'claude-sonnet-5-5', { input_tokens: MTOK, output_tokens: MTOK, cache_read_input_tokens: MTOK })
+    await run('N-95', 'claude-haiku-5-5', { input_tokens: MTOK, output_tokens: MTOK, cache_read_input_tokens: MTOK })
+    await run('N-96', 'haiku', { cache_read_input_tokens: MTOK })
+    await tick(w)
+    const cost = (id: string) => asEvent('helm.usage', w).find(e => e.data.noteId === id)!.data.costUsd
+    expect(cost('N-94')).toBe(12.2)
+    expect(cost('N-95')).toBe(0.61)
+    expect(cost('N-96')).toBe(0.01)
+  })
+})

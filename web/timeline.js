@@ -2,6 +2,22 @@
 import { h, reconcile, setText, setClass, typeOn } from './dom.js';
 import { icon } from './icons.js';
 import { fmtClock } from './format.js';
+import { state } from './store.js';
+
+const CLIP = 96; // summaries longer than this (or cut by the hub with …) collapse to one line and expand on click
+const NOTE_REF = /^(?:Reply to|Note) (N-\d+)/;
+
+/** The fullest text we have for a row: the note's reply / text when the hub cut the summary, else the summary. */
+function fullText(a) {
+  const m = a.kind === 'note' ? NOTE_REF.exec(a.summary || '') : null;
+  const n = m && state.notes.get(m[1]);
+  if (n) {
+    if (/^Reply to/.test(a.summary) && n.reply) return `Reply to ${n.id}: ${n.reply}`;
+    if (/^Note/.test(a.summary) && n.text && n.text.length > 150) return a.summary.replace(/:\s.*$/s, '') + `: ${n.text}`;
+  }
+  return a.summary || '';
+}
+const clippable = (a) => { const t = a.summary || ''; return t.length > CLIP || /…$|\.\.\.$/.test(t) || fullText(a).length > t.length; };
 
 const KIND_MARK = { tool: '▸', tool_done: '✓', status: '●', note: '✎', recap: '★' };
 
@@ -36,7 +52,26 @@ export function createTimeline(opts) {
     );
     row.__sum = sum;
     row.__text = null;
+    row.__open = false;
+    row.addEventListener('click', () => {
+      const a = row.__row;
+      if (!a || !row.classList.contains('clip') || getSelection().toString()) return;
+      row.__open = !row.__open;
+      paintOpen(row);
+    });
+    row.addEventListener('keydown', (e) => {
+      if ((e.key === 'Enter' || e.key === ' ') && row.classList.contains('clip') && e.target === row) { e.preventDefault(); row.click(); }
+    });
     return row;
+  }
+
+  function paintOpen(row) {
+    const a = row.__row;
+    setClass(row, 'open', row.__open);
+    row.setAttribute('aria-expanded', String(row.__open));
+    const t = row.__open ? fullText(a) : (a.summary || '');
+    row.__text = t;
+    row.__sum.textContent = t;
   }
 
   function update(row, a, animateFresh) {
@@ -46,6 +81,11 @@ export function createTimeline(opts) {
     const mark = a.kind === 'tool_done' ? (a.ok === false ? '✗' : '✓') : KIND_MARK[a.kind] || '·';
     const markEl = row.children[1];
     if (markEl.textContent !== mark) markEl.textContent = mark;
+    const clip = clippable(a);
+    setClass(row, 'clip', clip);
+    if (clip) { row.tabIndex = 0; row.setAttribute('role', 'button'); if (!row.hasAttribute('aria-expanded')) row.setAttribute('aria-expanded', 'false'); }
+    else { row.removeAttribute('tabindex'); row.removeAttribute('role'); row.removeAttribute('aria-expanded'); row.__open = false; setClass(row, 'open', false); }
+    if (row.__open && clip) { const t = fullText(a); if (row.__sum.textContent !== t) row.__sum.textContent = t; row.__text = t; return; }
     const text = (a.summary || '');
     if (row.__text !== text) {
       row.__text = text;

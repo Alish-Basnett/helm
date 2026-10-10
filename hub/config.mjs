@@ -4,7 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const HUB_DIR = path.dirname(fileURLToPath(import.meta.url));
-export const VERSION = '0.3.0';
+export const VERSION = '0.4.0';
 
 const int = (v, d) => {
   if (v === undefined || v === null || v === '') return d;
@@ -22,6 +22,7 @@ export function loadConfig(o = {}, env = process.env) {
     sockFile: path.join(home, 'helmd.sock'),
     pidFile: path.join(home, 'helmd.pid'),
     portFile: path.join(home, 'helmd.port'),
+    attachDir: path.join(home, 'attachments'),
     logFile: path.join(home, 'helmd.log'),
     webRoot: path.resolve(o.webRoot ?? env.HELM_WEB ?? path.join(HUB_DIR, '..', 'web')),
     stallMs: int(o.stallMs ?? env.HELM_STALL_MS, 5 * 60_000),

@@ -200,3 +200,10 @@ via a follow-up spawn that continues from the task's context.
   T-12 → note N-3 delivered as a prompt → delegated to a builder → card to Review with files → my reply
   captured under N-3 and shown in Talk. Fix from T-11: follow-up spawns bind their reply through our
   own `agent.spawn` hook (a plugin's `$.agent.spawn` may not return the agentId).
+- 2026-10-10 — **v0.4: near-zero Helm cost + files.** Measured Helm's own footprint: ~530 cached tokens per
+  Opus request (~$0.0001), Haiku recap ~$0.0003; the expensive path was task questions spawning a Sonnet
+  builder (~$0.05–0.30). Now: questions answered by one Haiku call over the task record (live: $0.000189,
+  correct one-liner), recaps parsed free from DONE/HOW/LEARNED/TAGS, 1–2 sentence replies, overhead meter
+  (`helm.usage`, `/v1/usage`, header + popover), attachments (drag/drop/paste → `~/.helm/attachments`, paths
+  handed to the agent), dashboard self-reload on new web build. Hub T-13 (95 tests), web T-14, mod tests
+  T-15 (81). Fixes from tests: cache writes priced at 1.25×, unknown models price as Opus.

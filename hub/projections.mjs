@@ -5,6 +5,8 @@
 //   * every state change (mod events, user commands, sweeps) is an event applied through apply()
 //   * decisions that depend on "now" (sweeps, command validation) are made BEFORE the event is
 //     recorded and are carried in the event data
+import path from 'node:path';
+
 export const STALL_REASON = 'no activity for 10 min';
 export const SENDING_TIMEOUT_ERROR = 'delivery unconfirmed — retry';
 export const JOB_TIMEOUT_ERROR = 'timed out';
@@ -52,6 +54,7 @@ export const toNote = (r) => ({
   id: r.id, target: { kind: r.target_kind, id: r.target_id }, sessionId: r.session_id, text: r.text,
   state: r.state, createdAt: r.created_at, queuedAt: r.queued_at ?? null, ranAt: r.ran_at ?? null,
   via: r.via ?? null, error: r.error ?? null, reply: r.reply ?? null, repliedAt: r.replied_at ?? null,
+  attachments: parse(r.attachments, []),
 });
 export const toActivity = (r) => ({
   id: r.id, sessionId: r.session_id, agentId: r.agent_id ?? null, taskId: r.task_id ?? null,
@@ -69,6 +72,55 @@ export const toJob = (r) => ({
 });
 export const toDigest = (r) => ({
   id: r.id, date: r.date, projectId: r.project_id ?? null, text: r.text, createdAt: r.created_at,
+});
+
+export const USAGE_KINDS = ['recap', 'answer', 'explain', 'digest', 'note_turn'];
+export const NOTE_VIAS = ['prompt', 'send_message', 'followup_spawn', 'answer'];
+export const MAX_NOTE_ATTACHMENTS = 10;
+const pad2 = (n) => String(n).padStart(2, '0');
+/** Local calendar date (YYYY-MM-DD) of an epoch-ms time. */
+export const localDate = (ms) => { const d = new Date(ms); return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`; };
+const money = (n) => Math.round(n * 1e6) / 1e6; // keep float noise out of the sums
+
+/**
+ * Cost meter. Local-date buckets for the last `days` days ending on `now`'s date (oldest first, empty days included).
+ * `overheadUsd` = every kind except note_turn (Helm's own work); `requestedUsd` = note_turn (work the user asked for).
+ */
+export function usageSummary(db, now, days = 7) {
+  const d0 = new Date(now);
+  const start = new Date(d0.getFullYear(), d0.getMonth(), d0.getDate() - (days - 1)).getTime();
+  const end = new Date(d0.getFullYear(), d0.getMonth(), d0.getDate() + 1).getTime();
+  const buckets = new Map();
+  for (let i = days - 1; i >= 0; i--) {
+    buckets.set(localDate(new Date(d0.getFullYear(), d0.getMonth(), d0.getDate() - i).getTime()), { overheadUsd: 0, requestedUsd: 0 });
+  }
+  const today = localDate(now);
+  const byKind = {};
+  let tOver = 0, tReq = 0;
+  for (const r of db.all('SELECT at, kind, cost_usd FROM usage WHERE at >= ? AND at < ? ORDER BY id', start, end)) {
+    const date = localDate(r.at);
+    const b = buckets.get(date);
+    if (!b) continue;
+    const req = r.kind === 'note_turn';
+    if (req) b.requestedUsd += r.cost_usd; else b.overheadUsd += r.cost_usd;
+    if (date === today) {
+      if (req) tReq += r.cost_usd; else tOver += r.cost_usd;
+      const k = (byKind[r.kind] ||= { calls: 0, costUsd: 0 });
+      k.calls++; k.costUsd += r.cost_usd;
+    }
+  }
+  for (const k of Object.values(byKind)) k.costUsd = money(k.costUsd);
+  return {
+    today: { overheadUsd: money(tOver), requestedUsd: money(tReq), byKind },
+    days: [...buckets].map(([date, b]) => ({ date, overheadUsd: money(b.overheadUsd), requestedUsd: money(b.requestedUsd) })),
+  };
+}
+export function usageToday(db, now) {
+  const { overheadUsd, requestedUsd } = usageSummary(db, now, 1).today;
+  return { overheadUsd, requestedUsd };
+}
+export const toAttachment = (r, dir) => ({
+  id: r.id, name: r.name, mime: r.mime, size: r.size, path: path.join(dir, r.id, r.name), createdAt: r.created_at,
 });
 
 /** Current conflicts at time `at`: paths touched by >= 2 distinct agents that are each live or touched it recently. */
@@ -93,9 +145,11 @@ export function computeConflicts(db, at) {
 }
 
 export class Projector {
-  constructor(db, { log } = {}) {
+  constructor(db, { log, attachDir = '', clock = Date.now } = {}) {
     this.db = db;
     this.log = log;
+    this.attachDir = attachDir;
+    this.clock = clock;
     this.dirty = false; // set when this transaction appended to `changes`
   }
 
@@ -121,6 +175,7 @@ export class Projector {
   getTask(id) { return id ? this.db.get('SELECT * FROM tasks WHERE id = ?', id) : undefined; }
   getNote(id) { return this.db.get('SELECT * FROM notes WHERE id = ?', id); }
   getQuestion(id) { return this.db.get('SELECT * FROM questions WHERE id = ?', id); }
+  getAttachment(id) { return this.db.get('SELECT * FROM attachments WHERE id = ?', id); }
   getJob(id) { return this.db.get('SELECT * FROM jobs WHERE id = ?', id); }
   pushProject(id) { const r = this.getProject(id); if (r) this.emit('project', 'upsert', toProject(r)); }
   pushSession(id) { const r = this.getSession(id); if (r) this.emit('session', 'upsert', toSession(r)); }
@@ -412,11 +467,13 @@ export class Projector {
       case 'note.reply': return this.onNoteReply(ev);
       case 'reconcile': return this.onReconcile(ev);
       case 'job.result': return this.onJobResult(ev);
+      case 'helm.usage': return this.onUsage(ev);
       case 'hub.project.create': return this.hProjectCreate(ev);
       case 'hub.project.update': return this.hProjectUpdate(ev);
       case 'hub.session.join': return this.hSessionJoin(ev);
       case 'hub.task.create': return this.hTaskCreate(ev);
       case 'hub.task.update': return this.hTaskUpdate(ev);
+      case 'hub.attachment.create': return this.hAttachmentCreate(ev);
       case 'hub.note.create': return this.hNoteCreate(ev);
       case 'hub.note.update': return this.hNoteUpdate(ev);
       case 'hub.note.delete': return this.hNoteDelete(ev);
@@ -671,7 +728,7 @@ export class Projector {
     const timedOut = n.state === 'failed' && n.error === SENDING_TIMEOUT_ERROR;
     if (n.state !== 'sending' && n.state !== 'queued' && !timedOut) return;
     const ok = d.ok !== false;
-    const via = ['prompt', 'send_message', 'followup_spawn'].includes(d.via) ? d.via : null;
+    const via = NOTE_VIAS.includes(d.via) ? d.via : null;
     this.upd('notes', n.id, {
       state: ok ? 'ran' : 'failed', ran_at: at, via, error: ok ? null : cut(str(d.error) || 'delivery failed', 500),
     });
@@ -956,13 +1013,46 @@ export class Projector {
     this.pushTask(id);
     return toTask(nt);
   }
+  /** Attachment ids -> the JSON stored on a note (full metadata, so a note reads back without a join). */
+  attachmentsJson(ids) {
+    const list = [];
+    for (const id of Array.isArray(ids) ? ids : []) {
+      const a = this.getAttachment(id);
+      if (a) list.push(toAttachment(a, this.attachDir));
+    }
+    return JSON.stringify(list.map(({ createdAt, ...rest }) => rest));
+  }
+  hAttachmentCreate(ev) {
+    const d = ev.data;
+    const id = this.nextId('A');
+    this.db.run('INSERT INTO attachments(id, name, mime, size, created_at) VALUES (?, ?, ?, ?, ?)',
+      id, str(d.name), str(d.mime, 'application/octet-stream'), Number(d.size) || 0, ev.at);
+    return toAttachment(this.getAttachment(id), this.attachDir);
+  }
+  onUsage(ev) {
+    const d = ev.data;
+    const kind = str(d.kind);
+    const cost = Number(d.costUsd);
+    if (!USAGE_KINDS.includes(kind) || !Number.isFinite(cost) || cost < 0) {
+      this.log?.warn(`helm.usage ignored: bad kind/costUsd (${kind}, ${d.costUsd})`);
+      return;
+    }
+    const tok = (v) => (Number.isFinite(Number(v)) && Number(v) > 0 ? Math.round(Number(v)) : 0);
+    this.db.run(
+      `INSERT INTO usage(at, session_id, kind, model, input_tokens, output_tokens, cache_read_tokens, cost_usd, task_id, note_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ev.at, ev.sessionId, kind, cut(str(d.model), 100), tok(d.inputTokens), tok(d.outputTokens), tok(d.cacheReadTokens),
+      cost, d.taskId == null ? null : str(d.taskId), d.noteId == null ? null : str(d.noteId));
+    // The pushed row uses the wall clock ("today"), but only the SSE `changes` feed depends on it, never a projection table.
+    this.emit('usage', 'upsert', usageToday(this.db, this.clock()));
+  }
   hNoteCreate(ev) {
     const d = ev.data;
     const id = this.nextId('N');
     this.db.run(
-      `INSERT INTO notes(id, target_kind, target_id, session_id, text, state, created_at, queued_at, ran_at, via, error, sending_at)
-       VALUES (?, ?, ?, ?, ?, 'draft', ?, NULL, NULL, NULL, NULL, NULL)`,
-      id, d.target.kind, d.target.id, d.sessionId || '', d.text, ev.at);
+      `INSERT INTO notes(id, target_kind, target_id, session_id, text, state, created_at, queued_at, ran_at, via, error, sending_at, attachments)
+       VALUES (?, ?, ?, ?, ?, 'draft', ?, NULL, NULL, NULL, NULL, NULL, ?)`,
+      id, d.target.kind, d.target.id, d.sessionId || '', d.text, ev.at, this.attachmentsJson(d.attachments));
     this.indexNote(this.getNote(id));
     this.pushNote(id);
     return toNote(this.getNote(id));
@@ -970,7 +1060,10 @@ export class Projector {
   hNoteUpdate(ev) {
     const n = this.getNote(ev.data.id);
     if (!n || n.state !== 'draft') throw new Error('note not editable');
-    this.upd('notes', n.id, { text: ev.data.text });
+    const f = {};
+    if (ev.data.text !== undefined) f.text = ev.data.text;
+    if (ev.data.attachments !== undefined) f.attachments = this.attachmentsJson(ev.data.attachments);
+    this.upd('notes', n.id, f);
     this.indexNote(this.getNote(n.id));
     this.pushNote(n.id);
     return toNote(this.getNote(n.id));

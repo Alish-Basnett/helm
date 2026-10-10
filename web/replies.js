@@ -21,6 +21,7 @@ export function replyDeadline(n) { return (n.ranAt || n.queuedAt || n.createdAt 
 /** The model that most likely produced a note's reply, or '' when unknown. */
 export function replyModel(n) {
   if (!n) return '';
+  if (n.via === 'answer') return 'claude-haiku-5-5'; // cheap answers come from one Haiku call
   if (n.target && n.target.kind === 'task') {
     const t = state.tasks.get(n.target.id);
     const a = t && sel.agentOfTask(t);
@@ -35,35 +36,92 @@ export function visualLines(text) {
   return String(text || '').split('\n').reduce((n, l) => n + Math.max(1, Math.ceil(l.length / 78)), 0);
 }
 
-/** Indented reply bubble: "Claude" label, model, relative time, markdown body, collapsible when long. */
+export const SHORT_MAX = 160;
+const DONE_RE = /^\s*(?:[-*>]\s+)?(?:\*\*|__)?DONE(?:\s*:\s*(?:\*\*|__)?|(?:\*\*|__)\s*:)\s*(.+?)\s*$/i;
+const BLOCK_START = /^\s*(?:#{1,6}\s|[-*+•]\s|\d{1,3}[.)]\s|```|~~~|>\s)/;
+
+/**
+ * The compact first line of a reply: the `DONE:` line's content if there is one, otherwise the first
+ * sentence; at most `max` characters. `more` says whether the full reply holds anything beyond it.
+ * Inline markdown (`code`, **bold**) is kept so the line renders like the full text.
+ */
+export function shortAnswer(reply, max = SHORT_MAX) {
+  const lines = String(reply || '').replace(/\r\n?/g, '\n').split('\n');
+  let short = '';
+  let used = new Set();
+  let cut = false;
+  const di = lines.findIndex((l) => DONE_RE.test(l));
+  if (di >= 0) {
+    short = DONE_RE.exec(lines[di])[1].replace(/(\*\*|__)$/, '').trim();
+    used.add(di);
+  } else {
+    let i = 0;
+    let fence = false;
+    for (; i < lines.length; i++) {
+      const l = lines[i];
+      if (/^\s*(```|~~~)/.test(l)) { fence = !fence; continue; }
+      if (!fence && l.trim()) break;
+    }
+    if (i < lines.length) {
+      const first = lines[i].replace(/^\s*(?:#{1,6}\s+|[-*+•]\s+|\d{1,3}[.)]\s+|>\s+)/, '').trim();
+      const bits = [first];
+      used.add(i);
+      // a wrapped paragraph continues until a blank line or the next block
+      if (!BLOCK_START.test(lines[i])) {
+        for (let j = i + 1; j < lines.length && lines[j].trim() && !BLOCK_START.test(lines[j]); j++) { bits.push(lines[j].trim()); used.add(j); }
+      }
+      const para = bits.join(' ');
+      const m = /^[\s\S]*?[.!?](?=\s|$)/.exec(para);
+      short = m ? m[0].trim() : para;
+      if (short.length < para.length) cut = true;
+    }
+  }
+  if (short.length > max) {
+    const at = short.lastIndexOf(' ', max - 1);
+    short = short.slice(0, at > max * 0.6 ? at : max - 1).replace(/[\s,;:.\-–—]+$/, '') + '…';
+    cut = true;
+  }
+  const more = cut || lines.some((l, i) => !used.has(i) && l.trim());
+  return { short, more };
+}
+
+/**
+ * Indented reply bubble: "Claude" label, model, relative time, then a compact first line (DONE: content or
+ * first sentence) with a "Show full" toggle that expands to the full markdown. Short replies show in full.
+ */
 export function createReply() {
   let open = false;
-  let long = false;
+  let more = false;
   const model = h('span', { class: 'reply-model mono' });
   const when = h('span', { class: 'reply-when mono' });
-  const body = h('div', { class: 'reply-body' });
-  const toggle = h('button', { class: 'link-btn reply-toggle', type: 'button', hidden: true, 'aria-expanded': 'false' }, 'Show more');
+  const short = h('div', { class: 'reply-short' });
+  const body = h('div', { class: 'reply-body', hidden: true });
+  const toggle = h('button', { class: 'link-btn reply-toggle', type: 'button', hidden: true, 'aria-expanded': 'false' }, 'Show full');
   const el = h('div', { class: 'reply-bubble', hidden: true },
     h('div', { class: 'reply-head' }, icon('sparkle', 11), h('span', { class: 'reply-who' }, 'Claude'), model, when),
-    body, toggle);
+    short, body, toggle);
   const apply = () => {
-    setClass(el, 'clamped', long && !open);
+    const showFull = open || !more;
+    setHidden(short, showFull);
+    setHidden(body, !showFull);
+    setHidden(toggle, !more);
     toggle.setAttribute('aria-expanded', String(open));
-    setText(toggle, open ? 'Show less' : 'Show more');
+    setText(toggle, open ? 'Show less' : 'Show full');
   };
   toggle.addEventListener('click', () => { open = !open; apply(); });
   function update(n) {
     const has = !!(n && n.reply);
     setHidden(el, !has);
     if (!has) return;
+    const sa = shortAnswer(n.reply);
+    more = sa.more && !!sa.short;
+    setMarkdown(short, sa.short);
     setMarkdown(body, n.reply);
     const m = replyModel(n);
     setText(model, m ? modelInfo(m).label : '');
     setHidden(model, !m);
     const at = n.repliedAt || n.ranAt || n.createdAt;
     if (at) { when.setAttribute('data-ago', at); setText(when, ''); }
-    long = visualLines(n.reply) > COLLAPSE_LINES;
-    setHidden(toggle, !long);
     apply();
   }
   return { el, update };
@@ -126,7 +184,7 @@ export function createStartStatus({ full = false } = {}) {
     else {
       const has = info.phase === 'sent' && !!(n && n.reply);
       setHidden(compact, !has);
-      if (has) setMarkdown(compact, n.reply);
+      if (has) setMarkdown(compact, shortAnswer(n.reply).short || n.reply);
     }
     wait.update(info.phase === 'sent' ? n : null);
   }

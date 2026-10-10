@@ -4,6 +4,32 @@ All notable changes to Helm are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/). Shapes and endpoints are defined in `CONTRACT.md`.
 
+## [0.4.0] - 2026-10-10
+
+### Added
+
+- Attachments: drag and drop or paste files and images into any note composer or Talk. They are stored in
+  `~/.helm/attachments/` and handed to the agent as file paths it can read.
+- Cheap answers: a question on a task (ends with `?` or starts with what/why/how/...) is answered by one Haiku
+  call over the task's record instead of waking or spawning an agent (about $0.0002 instead of $0.05-0.30).
+  Start a note with `!` to send it to the agent anyway.
+- Helm overhead meter: Helm's own model calls are recorded as `helm.usage`. The header shows today's
+  overhead, and the popover splits overhead from work requested through Helm.
+- Short-first replies with a "Show full" toggle, and activity rows that expand to their full text.
+- The dashboard reloads itself when the hub serves newer web files (`/v1/health` gains `webBuild`).
+
+### Changed
+
+- Recaps are parsed from the builder's own DONE/HOW/LEARNED/TAGS report lines at no cost, and Haiku runs
+  only as a fallback.
+- Replies to Helm notes are asked to be 1-2 sentences, and the orchestration prompt is shorter.
+- The cost meter prices cache writes at 1.25x input, and an unknown model is priced as Opus so the meter
+  never under-counts.
+
+### Fixed
+
+- Replies not appearing in a stale dashboard tab (the tab now reloads after an update).
+
 ## [0.3.0] - 2026-10-10
 
 ### Added

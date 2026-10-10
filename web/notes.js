@@ -4,6 +4,8 @@ import { icon } from './icons.js';
 import { state, sel, subscribe } from './store.js';
 import { createReply, createWaitLine } from './replies.js';
 import { addNote, editNote, deleteNote, executeNotes, retryNote } from './actions.js';
+import { createAttachTray, createAttachmentList, bindAttachInput, attsOf } from './attachments.js';
+import { toast } from './ui.js';
 
 const STATE_LABEL = { draft: 'Draft', queued: 'Queued', sending: 'Sending…', failed: 'Failed' };
 
@@ -34,12 +36,18 @@ export function createNotesPanel(opts) {
   });
   const hint = h('div', { class: 'note-hint mono' }, prompt ? '↵ send · ⇧↵ new line' : '↵ add draft · ⌘↵ add & run');
   const sendBtn = h('button', { class: 'icon-btn note-send', type: 'button', 'aria-label': prompt ? 'Send prompt' : 'Add note', title: prompt ? 'Send' : 'Add draft', onclick: () => submit(prompt), disabled: opts.disabled }, icon('send', 18));
-  const composer = h('div', { class: 'note-composer' }, ta, sendBtn, hint);
+  const taskHint = target.kind === 'task'
+    ? h('div', { class: 'note-hint note-hint-cheap mono' }, 'Questions are answered cheaply from the task record · start with ! to send to the agent')
+    : null;
+  const tray = createAttachTray({ onChange: () => setClass(composer, 'has-att', tray.count > 0) });
+  const attachBtn = h('button', { class: 'icon-btn note-attach', type: 'button', 'aria-label': 'Attach files', title: 'Attach files (or drop / paste)', onclick: () => binding.pick(), disabled: opts.disabled }, icon('paperclip', 18));
+  const composer = h('div', { class: 'note-composer' }, tray.el, ta, attachBtn, sendBtn, hint, taskHint);
   const el = h('section', { class: ['panel notes-panel', prompt && 'prompt-mode'], 'aria-label': title },
     h('header', { class: 'panel-head' },
       h('h3', { class: 'panel-title' }, icon(prompt ? 'send' : 'note', 15), title, countEl),
       prompt ? null : execBtn),
     list, empty, composer);
+  const binding = bindAttachInput({ box: el, ta, tray, disabled: () => !!opts.disabled });
 
   function autosize() {
     ta.style.height = 'auto';
@@ -47,12 +55,17 @@ export function createNotesPanel(opts) {
   }
   async function submit(run) {
     const text = ta.value.trim();
-    if (!text) return;
+    if (!text && !tray.count) return;
+    if (tray.busy) { toast('Still uploading — send again in a moment. Your text is kept.'); return; }
+    const taken = tray.take();
+    const atts = attsOf(taken);
+    if (!text && !atts.length) { tray.restore(taken); return; }
     ta.value = '';
     autosize();
-    const p = addNote(target, text, { execute: run });
+    const p = addNote(target, text, { execute: run, attachments: atts });
     list.scrollTop = list.scrollHeight;
-    await p;
+    const made = await p;
+    if (!made) { if (!ta.value) { ta.value = text; autosize(); } tray.restore(taken); }
   }
   ta.addEventListener('input', autosize);
   ta.addEventListener('keydown', (e) => {
@@ -65,14 +78,15 @@ export function createNotesPanel(opts) {
   function makeRow(n) {
     const text = h('div', { class: 'note-text' });
     const meta = h('div', { class: 'note-meta mono' });
+    const atts = createAttachmentList();
     const reply = createReply();
     const wait = createWaitLine();
-    const body = h('div', { class: 'note-body' }, text, meta, reply.el, wait.el);
+    const body = h('div', { class: 'note-body' }, text, atts.el, meta, reply.el, wait.el);
     const edit = h('button', { class: 'icon-btn sm', type: 'button', 'aria-label': 'Edit note', title: 'Edit', onclick: () => beginEdit(row) }, icon('pencil', 14));
     const del = h('button', { class: 'icon-btn sm', type: 'button', 'aria-label': 'Delete note', title: 'Delete', onclick: () => deleteNote(row.__id) }, icon('trash', 14));
     const actions = h('div', { class: 'note-actions' }, edit, del);
     const row = h('li', { class: 'note' }, body, actions);
-    row.__text = text; row.__meta = meta; row.__reply = reply; row.__wait = wait; row.__actions = actions; row.__id = n.id; row.__editing = false;
+    row.__text = text; row.__meta = meta; row.__atts = atts; row.__reply = reply; row.__wait = wait; row.__actions = actions; row.__id = n.id; row.__editing = false;
     text.addEventListener('click', () => { if (row.__note.state === 'draft' && !getSelection().toString()) beginEdit(row); });
     return row;
   }
@@ -127,7 +141,9 @@ export function createNotesPanel(opts) {
       }
     }
     setHidden(row.__actions, n.state !== 'draft' || !!n.__pending);
-    row.__reply.update(n);
+    row.__atts.update(n.attachments);
+    // the reply is the point of a ran note: keep it independent of everything above
+    try { row.__reply.update(n); } catch (e) { console.error('[helm] reply render failed', e); }
     row.__wait.update(n);
   }
 
@@ -148,5 +164,5 @@ export function createNotesPanel(opts) {
   startTicker();
   render();
   const off = subscribe((changed) => { if (changed.has('note') || changed.has('task')) render(); });
-  return { el, render, destroy: off, focus: () => ta.focus() };
+  return { el, render, destroy() { off(); binding.destroy(); tray.destroy(); }, focus: () => ta.focus() };
 }
