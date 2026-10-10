@@ -6,6 +6,7 @@ import { fmtElapsed, fmtTokens, fmtUsd, cwdTail, agentLabel, truncate, plural } 
 import { avatar, updateAvatar, modelBadge, updateModelBadge, nowDoingLine, emptyState } from '../ui.js';
 import { navigate, openTask } from '../router.js';
 import { api } from '../api.js';
+import { ctxRing, ctxText, levelOf, LEVEL_LABEL } from '../health.js';
 
 const CREW_PREVIEW = 8;
 const WAIT_LABEL = 'Waiting for you';
@@ -100,9 +101,11 @@ export function mount(container) {
     r.cost = h('span', { class: 'desk-cost mono', title: 'Session spend' });
     r.tokens = h('span', { class: 'desk-tokens mono' });
     r.nd = nowDoingLine();
+    r.ring = ctxRing(20, { label: false, strokeW: 3 });
+    r.ringWrap = h('span', { class: 'desk-ring' }, r.ring.el);
     r.open = h('button', { class: 'desk-open', type: 'button', 'aria-label': 'Open session thread', onclick: () => navigate('threads', [r.s.id]) });
     r.desk = h('div', { class: 'desk' },
-      h('div', { class: 'desk-top' }, r.pulse, r.title, r.state),
+      h('div', { class: 'desk-top' }, r.pulse, r.title, r.ringWrap, r.state),
       r.cwd,
       h('div', { class: 'desk-badges' }, r.model, h('span', { class: 'spacer' }), r.tokens, r.cost),
       r.nd, r.open);
@@ -118,7 +121,12 @@ export function mount(container) {
     const r = g.__r;
     r.s = s;
     const waiting = sel.sessionWaiting(s.id);
-    g.className = `desk-group st-${s.status}${s.busy ? ' busy' : ''}${waiting ? ' needs-you' : ''}`;
+    const lvl = levelOf(s);
+    g.className = `desk-group st-${s.status}${s.busy ? ' busy' : ''}${waiting ? ' needs-you' : ''}${lvl !== 'ok' ? ` hl-${lvl}` : ''}`;
+    // v0.14: a tiny context ring in the health colour (its text equivalent is the tooltip and the meter's aria-valuetext)
+    setHidden(r.ringWrap, s.contextPercent == null || s.status === 'ended');
+    r.ring.set(s);
+    r.ringWrap.title = `${ctxText(s)}. Health: ${LEVEL_LABEL[lvl].toLowerCase()}${(s.health && s.health.reasons.length) ? ' (' + s.health.reasons.join('; ') + ')' : ''}`;
     r.pulse.className = `pdot ${s.status}${s.busy ? ' busy' : ''}`;
     setText(r.title, s.title || cwdTail(s.cwd) || s.id);
     setText(r.state, waiting ? WAIT_LABEL.toLowerCase() : s.busy ? 'working' : s.status);

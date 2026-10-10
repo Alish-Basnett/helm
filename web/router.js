@@ -1,6 +1,6 @@
 // router.js — hash router: #/<view>/<arg…>?task=T-1&chat=1  (task details + chat are query params so they are linkable).
 import { lsGet, lsSet } from './store.js';
-export const VIEWS = ['board', 'projects', 'office', 'threads', 'today', 'workflows', 'inbox', 'review', 'learn', 'templates', 'settings'];
+export const VIEWS = ['board', 'projects', 'office', 'health', 'threads', 'today', 'workflows', 'inbox', 'review', 'learn', 'templates', 'settings'];
 
 export function parseHash(hash = location.hash) {
   const raw = (hash || '').replace(/^#/, '') || '/board';

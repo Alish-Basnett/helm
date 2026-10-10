@@ -4,6 +4,12 @@ All notable changes to Helm are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/). Shapes and endpoints are defined in `CONTRACT.md`.
 
+## [0.19.0] - 2026-10-10
+
+### Added
+
+- Session health (`CONTRACT.md` v0.14): `Session` gains `contextWindow`, `contextPercent`, `rateLimits`, `busySince`, `lastTurnAt`, `stalledAgents`, `costToday` and a derived `health` (`ok | warn | critical` plus reasons: context above 70/85%, a rate limit above 80/95%, stalled agents, 30 minutes idle with agents running, cost today over `HELM_COST_WARN_USD`). A `session_samples` history (one a minute, kept 7 days), `GET /v1/sessions/:id/health` and `GET /v1/health/sessions`. Web: a Health screen at `#/health`, a context ring on Office desks, a header health dot, a Sessions group in the Inbox and a "Session health" Spotlight command.
+
 ## [0.18.0] - 2026-10-10
 
 ### Added

@@ -346,6 +346,12 @@ export const sel = {
     const node = run.nodes.find((n) => n.nodeId === task.nodeId && n.state === 'waiting_gate');
     return node ? { run, node } : null;
   },
+  /* ----- v0.14: session health. A session at critical health asks for you in the Inbox (never as a yellow Board card). ----- */
+  sessionsNeedingYou(scoped = true) {
+    return sel.sessions()
+      .filter((x) => (x.status === 'active' || x.status === 'idle') && x.health && x.health.level === 'critical' && (!scoped || sel.inScope(x)))
+      .sort((a, b) => (b.contextPercent ?? -1) - (a.contextPercent ?? -1) || String(a.id).localeCompare(String(b.id)));
+  },
   sessionWaiting(sid) { return sel.agentsOfSession(sid).some((a) => a.status === 'waiting'); },
 
   /* ----- v0.11: task templates ----- */

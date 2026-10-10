@@ -200,6 +200,14 @@ CREATE INDEX IF NOT EXISTS concept_tasks_task ON concept_tasks(task_id);
 CREATE TABLE IF NOT EXISTS concept_keys (key TEXT PRIMARY KEY, slug TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS concept_keys_slug ON concept_keys(slug);
 
+-- v0.14: session health history. At most one row a minute per session (appended from heartbeats), pruned to 7 days.
+-- NOT AUTOINCREMENT, like activity: ids restart at 1 after a rebuild so replays are byte-identical.
+CREATE TABLE IF NOT EXISTS session_samples (
+  id INTEGER PRIMARY KEY, session_id TEXT NOT NULL, at INTEGER NOT NULL,
+  tokens INTEGER NOT NULL DEFAULT 0, percent REAL, cost_usd REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS session_samples_session ON session_samples(session_id, at);
+
 CREATE TABLE IF NOT EXISTS changes (
   seq INTEGER PRIMARY KEY AUTOINCREMENT, entity TEXT NOT NULL, op TEXT NOT NULL, row TEXT NOT NULL
 );
@@ -285,6 +293,17 @@ export class Db {
     this.raw.exec('CREATE INDEX IF NOT EXISTS templates_project ON templates(project_id)');
     // v0.12: Task.branch. Additive + nullable, safe on a live database (no old events mention branches, so nothing to back-fill).
     if (!has('tasks', 'branch')) this.raw.exec('ALTER TABLE tasks ADD COLUMN branch TEXT');
+    // v0.14: session health. Additive + defaulted/nullable, safe on a live database. session_samples comes from SCHEMA.
+    // Existing sessions start at health 'ok' with no context data until their next heartbeat (or `helmd --rebuild`).
+    if (!has('sessions', 'context_window')) this.raw.exec('ALTER TABLE sessions ADD COLUMN context_window INTEGER');
+    if (!has('sessions', 'context_percent')) this.raw.exec('ALTER TABLE sessions ADD COLUMN context_percent REAL');
+    if (!has('sessions', 'rate_limits')) this.raw.exec("ALTER TABLE sessions ADD COLUMN rate_limits TEXT NOT NULL DEFAULT '[]'");
+    if (!has('sessions', 'busy_since')) this.raw.exec('ALTER TABLE sessions ADD COLUMN busy_since INTEGER');
+    if (!has('sessions', 'last_turn_at')) this.raw.exec('ALTER TABLE sessions ADD COLUMN last_turn_at INTEGER');
+    if (!has('sessions', 'health_level')) this.raw.exec("ALTER TABLE sessions ADD COLUMN health_level TEXT NOT NULL DEFAULT 'ok'");
+    if (!has('sessions', 'health_reasons')) this.raw.exec("ALTER TABLE sessions ADD COLUMN health_reasons TEXT NOT NULL DEFAULT '[]'");
+    if (!has('sessions', 'cost_day')) this.raw.exec('ALTER TABLE sessions ADD COLUMN cost_day TEXT');
+    if (!has('sessions', 'cost_base')) this.raw.exec('ALTER TABLE sessions ADD COLUMN cost_base REAL NOT NULL DEFAULT 0');
   }
   prep(sql) {
     let s = this.cache.get(sql);

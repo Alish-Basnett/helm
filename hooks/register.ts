@@ -719,6 +719,9 @@ async function heartbeat($: any) {
     const u: any = await $.session.usage()
     if (Number.isFinite(u?.context?.tokens)) data.tokens = u.context.tokens
     if (Number.isFinite(u?.cost?.usd)) data.costUsd = Math.round(u.cost.usd * 10000) / 10000
+    if (Number.isFinite(u?.context?.window)) data.contextWindow = u.context.window
+    if (Number.isFinite(u?.context?.percent)) data.contextPercent = u.context.percent
+    if (Array.isArray(u?.rateLimits)) data.rateLimits = u.rateLimits.slice(0, 4).map((r: any) => ({ kind: String(r.kind), percentUsed: Number(r.percentUsed), resetsAt: r.resetsAt ?? null }))
   } catch {}
   emit('session.heartbeat', data)
   await reconcile($)

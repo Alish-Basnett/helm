@@ -60,6 +60,8 @@ export const api = {
   learn: (projectId) => request('GET', `/v1/learn${q({ projectId })}`),
   // v0.2 extras
   conflicts: () => request('GET', '/v1/conflicts'),
+  sessionHealth: (id, hours = 24) => request('GET', `/v1/sessions/${enc(id)}/health${q({ hours })}`), // v0.14
+  healthSessions: () => request('GET', '/v1/health/sessions'),
   questions: (state) => request('GET', `/v1/questions${q({ state })}`),
   dismissQuestion: (id) => request('POST', `/v1/questions/${enc(id)}/dismiss`),
   explain: (taskId) => request('POST', `/v1/tasks/${enc(taskId)}/explain`),

@@ -79,6 +79,7 @@ const P = {
   more: '<circle cx="6" cy="12" r="1.2"/><circle cx="12" cy="12" r="1.2"/><circle cx="18" cy="12" r="1.2"/>',
   grip: '<circle cx="9" cy="6.5" r="1.1"/><circle cx="15" cy="6.5" r="1.1"/><circle cx="9" cy="12" r="1.1"/><circle cx="15" cy="12" r="1.1"/><circle cx="9" cy="17.5" r="1.1"/><circle cx="15" cy="17.5" r="1.1"/>',
   branch: '<circle cx="7" cy="5.5" r="2.2"/><circle cx="7" cy="18.5" r="2.2"/><circle cx="17" cy="8.5" r="2.2"/><path d="M7 7.7v8.6M17 10.7c0 3.4-3.2 4.3-8.6 5.2"/>',
+  heartPulse: '<path d="M12 20.5l-7-6.9A5.1 5.1 0 0 1 12 6.3a5.1 5.1 0 0 1 7 7.3z"/><path d="M3.5 12.5h4l1.6-3 2.6 6 1.8-3.5h5"/>',
   replay: '<path d="M3.5 12a8.5 8.5 0 1 0 2.6-6.1"/><path d="M3.5 4.5v4h4"/><path d="M10.3 9.4l4.4 2.6-4.4 2.6z"/>',
 };
 

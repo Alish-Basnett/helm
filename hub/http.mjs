@@ -93,6 +93,8 @@ route('GET', '/v1/sessions/:id/activity', ({ hub, params, query }) => {
   if (!hub.p.getSession(params.id)) throw new HttpError(404, 'session not found');
   return { activity: hub.sessionActivity(params.id, intParam(query.get('limit'), 200, 1, 2000)) };
 });
+route('GET', '/v1/sessions/:id/health', ({ hub, params, query }) => hub.sessionHealth(params.id, intParam(query.get('hours'), 24, 1, 168)));
+route('GET', '/v1/health/sessions', ({ hub }) => hub.healthSummary());
 route('POST', '/v1/sessions/:id/join', async ({ hub, params, json }) => hub.joinSession(params.id, await json()));
 route('GET', '/v1/tasks/:id/diff', ({ hub, params, query }) => hub.taskDiff(params.id, { refresh: /^(1|true|yes)$/i.test(query.get('refresh') || '') }));
 // v0.12 branch per task

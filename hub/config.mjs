@@ -4,7 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const HUB_DIR = path.dirname(fileURLToPath(import.meta.url));
-export const VERSION = '0.18.0';
+export const VERSION = '0.19.0';
 
 const int = (v, d) => {
   if (v === undefined || v === null || v === '') return d;
@@ -35,6 +35,7 @@ export function loadConfig(o = {}, env = process.env) {
     sendingMs: int(o.sendingMs ?? env.HELM_SENDING_MS, 10 * 60_000), // note stuck in `sending` -> failed
     jobMs: int(o.jobMs ?? env.HELM_JOB_MS, 5 * 60_000), // job claimed (or queued) but never answered -> failed
     stepMs: int(o.stepMs ?? env.HELM_STEP_MS, 60 * 60_000), // workflow step claimed but never answered -> failed (node timeouts extend it)
+    costWarnUsd: int(o.costWarnUsd ?? env.HELM_COST_WARN_USD, 25), // session health: warn when a session's cost today passes this
     blockMs: int(o.blockMs ?? env.HELM_BLOCK_MS, 10 * 60_000),
     idleMs: int(o.idleMs ?? env.HELM_IDLE_MS, 2 * 60_000),
     sweepMs: int(o.sweepMs ?? env.HELM_SWEEP_MS, 30_000),

@@ -5,7 +5,7 @@ import { Db } from './db.mjs';
 import {
   Projector, HUB_SESSION, TASK_STATUSES, JOB_TIMEOUT_ERROR, JOB_UNCLAIMED_ERROR, cut, computeConflicts,
   localDate, usageSummary, usageBreakdown, usageToday, toAttachment, MAX_NOTE_ATTACHMENTS,
-  toProject, toSession, toAgent, toTask, toNote, toActivity, toQuestion, toJob, toDigest,
+  toProject, toSession, SESSION_SQL, computeHealth, HEALTH, costToday, toAgent, toTask, toNote, toActivity, toQuestion, toJob, toDigest,
 } from './projections.mjs';
 import { computeDiff, diffStat } from './diff.mjs';
 import { search as ftsSearch, learn as ftsLearn } from './search.mjs';
@@ -28,6 +28,7 @@ const TABLES = [
   'projects', 'sessions', 'agents', 'tasks', 'notes', 'activity', 'late_completions',
   'agent_files', 'conflicts', 'questions', 'jobs', 'digests', 'attachments', 'usage', 'task_diffs',
   'workflows', 'workflow_versions', 'runs', 'run_nodes', 'steps', 'templates', 'concepts', 'concept_tasks', 'concept_keys',
+  'session_samples',
 ];
 const START_FROM = ['backlog', 'next', 'later', 'blocked'];
 const DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
@@ -39,7 +40,7 @@ export class Hub {
     this.log = log;
     this.clock = clock;
     this.db = new Db(cfg.dbFile);
-    this.p = new Projector(this.db, { log, attachDir: cfg.attachDir, clock: () => this.clock() });
+    this.p = new Projector(this.db, { log, attachDir: cfg.attachDir, clock: () => this.clock(), costWarnUsd: cfg.costWarnUsd });
     this.subs = new Set();
     this.startedAt = clock();
     this.backfillConcepts();        // v0.13: a database from before concepts gets them from its existing recaps, once
@@ -533,12 +534,31 @@ export class Hub {
     ];
     // Conflict radar: touches age out of the 10-minute window with no event to say so.
     const conflicts = this.conflictsStale(now);
-    if (!stall.length && !block.length && !idle.length && !sending.length && !jobs.length && !conflicts) return null;
-    this.tx(() => this.command('hub.sweep', { stall, block, idle, sending, jobs, conflicts }, now));
+    const health = this.healthStale(now, stall);
+    if (!stall.length && !block.length && !idle.length && !sending.length && !jobs.length && !conflicts && !health.length) return null;
+    this.tx(() => this.command('hub.sweep', { stall, block, idle, sending, jobs, conflicts, health }, now));
     return {
-      stalled: stall.length, blocked: block.length, idle: idle.length, timedOut: sending.length,
+      healthChanged: health.length, stalled: stall.length, blocked: block.length, idle: idle.length, timedOut: sending.length,
       jobsFailed: jobs.length, conflictsChanged: conflicts,
     };
+  }
+  /**
+   * Sessions whose stored health differs from what it would be at `now` (a long idle, a stall the sweep is about to record,
+   * a new day). Heartbeats and turns refresh health themselves; this covers what only time changes.
+   */
+  healthStale(now, stall) {
+    const extra = new Map();
+    for (const id of stall) {
+      const a = this.p.getAgent(id);
+      if (a) extra.set(a.session_id, (extra.get(a.session_id) || 0) + 1);
+    }
+    const out = [];
+    for (const r of this.db.all(`${SESSION_SQL} ORDER BY s.rowid`)) {
+      const n = extra.get(r.id) || 0;
+      const h = computeHealth({ ...r, stalled_n: r.stalled_n + n, running_n: r.running_n - n }, now, this.cfg.costWarnUsd);
+      if (h.level !== r.health_level || JSON.stringify(h.reasons) !== r.health_reasons) out.push(r.id);
+    }
+    return out;
   }
   /** Would recomputing the conflicts at `now` change what is stored? */
   conflictsStale(now) {
@@ -546,6 +566,48 @@ export class Hub {
     const stored = this.db.all('SELECT path, agents FROM conflicts ORDER BY path');
     return !(stored.length === list.length
       && stored.every((r, i) => r.path === list[i].path && r.agents === JSON.stringify(list[i].agents)));
+  }
+
+  // ------------------------------------------------------- session health (v0.14)
+  /** GET /v1/sessions/:id/health: the session, its samples (oldest first), agent counts and the cost of the last `hours`. */
+  sessionHealth(id, hours = 24, now = this.now()) {
+    const row = this.p.getSession(id);
+    if (!row) throw notFound('session not found');
+    const h = Math.max(1, Math.min(168, Math.floor(hours) || 24));
+    const since = now - h * 3600_000;
+    const samples = this.db.all(
+      'SELECT at, tokens, percent, cost_usd FROM session_samples WHERE session_id = ? AND at >= ? ORDER BY at, id', id, since,
+    ).map((r) => ({ at: r.at, tokens: r.tokens, percent: r.percent, costUsd: r.cost_usd }));
+    const count = (st, sinceMs) => this.db.get(
+      `SELECT COUNT(*) AS n FROM agents WHERE session_id = ? AND status = ?${sinceMs ? ' AND ended_at >= ?' : ''}`,
+      ...(sinceMs ? [id, st, sinceMs] : [id, st])).n;
+    // spend in the window: current cost minus the cost at its start (0 when the session began inside it)
+    let base = 0;
+    if (row.started_at < since) {
+      const before = this.db.get('SELECT cost_usd FROM session_samples WHERE session_id = ? AND at < ? ORDER BY at DESC LIMIT 1', id, since);
+      base = before ? before.cost_usd : (samples[0]?.costUsd ?? row.cost_usd ?? 0);
+    }
+    return {
+      session: toSession(row), samples,
+      agents: { running: row.running_n, stalled: row.stalled_n, done24h: count('done', now - 24 * 3600_000) },
+      cost24h: Math.max(0, Math.round(((row.cost_usd ?? 0) - base) * 1e6) / 1e6),
+    };
+  }
+  /** GET /v1/health/sessions: one line per active or idle session, worst first, plus the overall level. */
+  healthSummary() {
+    const sessions = this.db.all(`${SESSION_SQL} WHERE s.status IN ('active','idle') ORDER BY s.rowid`).map((r) => {
+      const s = toSession(r);
+      return {
+        id: s.id, projectId: s.projectId, title: s.title, model: s.model, status: s.status, busy: s.busy,
+        contextPercent: s.contextPercent, contextWindow: s.contextWindow, rateLimits: s.rateLimits,
+        costUsd: s.costUsd, costToday: s.costToday, runningAgents: s.runningAgents, stalledAgents: s.stalledAgents, health: s.health,
+      };
+    });
+    const rank = { critical: 0, warn: 1, ok: 2 };
+    sessions.sort((a, b) => rank[a.health.level] - rank[b.health.level]);
+    const counts = { ok: 0, warn: 0, critical: 0 };
+    for (const s of sessions) counts[s.health.level]++;
+    return { sessions, counts, level: counts.critical ? 'critical' : counts.warn ? 'warn' : 'ok' };
   }
 
   // -------------------------------------------------------------- queries
@@ -560,7 +622,7 @@ export class Hub {
       SELECT rowid FROM jobs WHERE ${scope} AND state IN ('done','failed') ORDER BY done_at DESC, rowid DESC LIMIT 20)) ORDER BY rowid`;
     if (projectId) {
       if (!this.p.getProject(projectId)) throw notFound('project not found');
-      sessions = q('SELECT * FROM sessions WHERE project_id = ? ORDER BY rowid', projectId);
+      sessions = q(`${SESSION_SQL} WHERE s.project_id = ? ORDER BY s.rowid`, projectId);
       agents = q('SELECT * FROM agents WHERE session_id IN (SELECT id FROM sessions WHERE project_id = ?) ORDER BY rowid', projectId);
       tasks = q('SELECT * FROM tasks WHERE project_id = ? ORDER BY ord, rowid', projectId);
       notes = q(
@@ -573,7 +635,7 @@ export class Hub {
       jobs = q(jSql(`(project_id = ? OR kind = 'concept_summary')`), projectId, projectId); // concept pages are global
       digests = q('SELECT * FROM digests WHERE project_id = ? ORDER BY date DESC, created_at DESC, rowid DESC LIMIT 14', projectId);
     } else {
-      sessions = q('SELECT * FROM sessions ORDER BY rowid');
+      sessions = q(`${SESSION_SQL} ORDER BY s.rowid`);
       agents = q('SELECT * FROM agents ORDER BY rowid');
       tasks = q('SELECT * FROM tasks ORDER BY project_id, ord, rowid');
       notes = q('SELECT * FROM notes ORDER BY rowid');

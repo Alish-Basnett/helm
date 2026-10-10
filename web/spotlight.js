@@ -65,6 +65,7 @@ export function createSpotlight(root) {
       { title: 'Go to Board', icon: 'board', run: () => navigate('board') },
       { title: 'Go to Projects', icon: 'folder', run: () => navigate('projects') },
       { title: 'Go to Office', icon: 'office', run: () => navigate('office') },
+      { title: 'Session health', sub: 'Context use, rate limits, cost, idle time and stalls for every live session', icon: 'heartPulse', run: () => navigate('health') },
       { title: 'Go to Threads', icon: 'threads', run: () => navigate('threads') },
       { title: 'Today\'s timeline', sub: 'Gantt of everything that ran today, across sessions', icon: 'calendar', run: () => navigate('today') },
       { title: 'Go to Workflows', sub: 'Draw and run a flow of agents, checks and gates', icon: 'workflow', run: () => navigate('workflows') },

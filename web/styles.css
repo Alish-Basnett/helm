@@ -169,6 +169,7 @@ a { color: inherit; text-decoration: none; }
 .nav-label { flex: 1; }
 .nav-badge { font-size: 11px; padding: 1px 6px; border-radius: 99px; background: var(--fill); color: var(--label-2); }
 .nav-badge.red { background: color-mix(in srgb, var(--red) 18%, transparent); color: var(--red); }
+.nav-badge.orange { background: color-mix(in srgb, var(--orange) 20%, transparent); color: var(--orange); }
 .nav-badge.accent { background: var(--accent-soft); color: var(--accent); }
 .nav-badge.indigo { background: color-mix(in srgb, var(--indigo) 20%, transparent); color: var(--indigo); }
 .sb-foot { margin-top: auto; display: flex; align-items: center; gap: var(--sp-2); }

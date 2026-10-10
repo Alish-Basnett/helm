@@ -18,6 +18,8 @@ import { createShelf } from './shelf.js';
 import * as board from './views/board.js';
 import * as projects from './views/projects.js';
 import * as office from './views/office.js';
+import * as health from './views/health.js';
+import { summarize, summaryText } from './health.js';
 import * as threads from './views/threads.js';
 import * as today from './views/today.js';
 import * as workflows from './views/workflows.js';
@@ -29,11 +31,12 @@ import * as review from './views/review.js';
 import * as settings from './views/settings.js';
 import { getPref, applyPrefs, cycleTheme, onPrefs } from './prefs.js';
 
-const VIEW_MODS = { board, projects, office, threads, today, workflows, inbox, review, learn, templates, settings };
+const VIEW_MODS = { board, projects, office, health, threads, today, workflows, inbox, review, learn, templates, settings };
 const VIEW_META = {
   board: { label: 'Board', icon: 'board' },
   projects: { label: 'Projects', icon: 'folder' },
   office: { label: 'Office', icon: 'office' },
+  health: { label: 'Health', icon: 'heartPulse' },
   threads: { label: 'Threads', icon: 'threads' },
   today: { label: 'Today', icon: 'calendar' },
   workflows: { label: 'Workflows', icon: 'workflow' },
@@ -145,6 +148,10 @@ const helmBtn = h('button', {
   title: 'What Helm itself spends today (click for details)', onclick: () => toggleMeter(helmBtn),
 }, h('span', { class: 'tele-k' }, 'Helm'), tHelm, h('span', { class: 'tele-k tele-helm-k' }, 'today'));
 const tClock = h('span', { class: 'tele-v clock' }, fmtClock());
+// v0.14: a small health dot: green when every live session is fine, amber or red when one needs attention. Click = Session health.
+const healthDot = h('span', { class: 'health-dot lv-ok', 'aria-hidden': 'true' });
+const healthTxt = h('span', { class: 'tele-k health-k' }, 'health');
+const healthBtn = h('button', { class: 'tele tele-health lv-ok', type: 'button', onclick: () => navigate('health') }, healthDot, healthTxt);
 const telemetry = h('div', { class: 'telemetry mono', 'aria-label': 'Telemetry' },
   connEl,
   h('span', { class: 'tele' }, tSess, h('span', { class: 'tele-k' }, 'sessions')),
@@ -152,6 +159,7 @@ const telemetry = h('div', { class: 'telemetry mono', 'aria-label': 'Telemetry' 
   h('span', { class: 'tele' }, tTok, h('span', { class: 'tele-k' }, 'tokens today')),
   h('span', { class: 'tele tele-cost' }, tCost, h('span', { class: 'tele-k' }, 'today')),
   helmBtn,
+  healthBtn,
   h('span', { class: 'tele' }, tClock));
 const newTaskBtn = h('button', { class: 'btn btn-primary', type: 'button', onclick: () => newTask() }, icon('plus', 16), h('span', { class: 'sb-label-narrow' }, 'New task'));
 topbar.append(h('div', { class: 'tb-left' }, titleEl, scopeEl), h('span', { class: 'spacer' }), telemetry, newTaskBtn);
@@ -178,10 +186,21 @@ function renderChrome() {
   const running = Array.from(state.agents.values()).filter((a) => a.status === 'running' && (state.ui.projectId === 'all' || (state.sessions.get(a.sessionId) || {}).projectId === state.ui.projectId)).length;
   badge('board', blocked, 'red', `${blocked} blocked`);
   badge('office', running, 'accent', `${running} running`);
-  const waiting = sel.openQuestions().length + sel.choiceTasks().length;
+  const waiting = sel.openQuestions().length + sel.choiceTasks().length + sel.sessionsNeedingYou().length;
   badge('inbox', waiting, 'indigo', `${waiting} waiting for you`);
   const inReview = sel.reviewTasks().length;
   badge('review', inReview, 'accent', `${inReview} task${inReview === 1 ? '' : 's'} in review`);
+  // v0.14: session health. The header dot looks at every live session (not just the selected project).
+  const hs = summarize(sel.sessions());
+  const hText = summaryText(hs);
+  healthDot.className = `health-dot lv-${hs.level}`;
+  healthBtn.className = `tele tele-health lv-${hs.level}`;
+  setText(healthTxt, hs.level === 'ok' ? 'health' : hs.level === 'warn' ? 'warning' : 'critical');
+  healthBtn.title = `Session health: ${hText} (click for details)`;
+  healthBtn.setAttribute('aria-label', `Session health: ${hText}. Open Session health`);
+  const scopedHealth = summarize(sel.scopedSessions());
+  const needHealth = scopedHealth.counts.critical + scopedHealth.counts.warn;
+  badge('health', needHealth, scopedHealth.counts.critical ? 'red' : 'orange', `${hText}`);
   const liveRuns = sel.activeRuns().length;
   badge('workflows', liveRuns, 'accent', `${liveRuns} run${liveRuns === 1 ? '' : 's'} in progress`);
 }

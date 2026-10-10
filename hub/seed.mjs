@@ -163,7 +163,24 @@ export function seed(hub, log) {
     [SESS_B, 20, 196000, 3.15], [SESS_B, 6, 203000, 3.15],
     [SESS_C, 115, 9000, 0.18], [SESS_C, 85, 31000, 0.31], [SESS_C, 52, 47000, 0.42],
   ];
-  for (const [sid, m, tokens, costUsd] of beats) atMin(m, () => emit(sid, 'session.heartbeat', { tokens, costUsd }));
+  // v0.14 health: the context fills up over the session (A ends critical, B ends at 62%, C at 38%); the account's 5-hour
+  // limit climbs (A 88% warn, B 83% warn) and the 7-day limit sits lower. Reset times are fixed offsets from "now".
+  const ctxPct = { [SESS_A]: [12, 28, 40, 52, 63, 72, 82, 91], [SESS_B]: [14, 27, 41, 53, 59, 62], [SESS_C]: [9, 21, 38] };
+  const fiveHour = { [SESS_A]: [41, 48, 55, 63, 72, 80, 85, 88], [SESS_B]: [38, 52, 63, 74, 80, 83] };
+  const beatNo = {};
+  for (const [sid, m, tokens, costUsd] of beats) {
+    const i = (beatNo[sid] = (beatNo[sid] ?? -1) + 1);
+    atMin(m, () => {
+      const d = { tokens, costUsd, contextWindow: sid === SESS_A ? 1000000 : 200000, contextPercent: ctxPct[sid][i] };
+      if (fiveHour[sid]) {
+        d.rateLimits = [
+          { kind: 'five_hour', percentUsed: fiveHour[sid][i], resetsAt: new Date(NOW + 95 * MIN).toISOString() },
+          { kind: 'seven_day', percentUsed: sid === SESS_A ? 46 : 52, resetsAt: new Date(NOW + 3 * 24 * 60 * MIN).toISOString() },
+        ];
+      }
+      emit(sid, 'session.heartbeat', d);
+    });
+  }
 
   // ------------------------------------------------------------------------- agents
   /**
@@ -736,7 +753,13 @@ export function startDemoLive(hub, log, { tickMs } = {}) {
     if (now - lastBeat > 14_000) {
       tokens += 2000 + Math.floor(Math.random() * 6000);
       cost = Math.round((cost + 0.02 + Math.random() * 0.06) * 100) / 100;
-      emit('session.heartbeat', { tokens, costUsd: cost });
+      emit('session.heartbeat', {
+        tokens, costUsd: cost, contextWindow: 1000000, contextPercent: 91,
+        rateLimits: [
+          { kind: 'five_hour', percentUsed: 88, resetsAt: new Date(now + 95 * 60_000).toISOString() },
+          { kind: 'seven_day', percentUsed: 46, resetsAt: new Date(now + 3 * 24 * 3600_000).toISOString() },
+        ],
+      });
       lastBeat = now;
     }
     const s = hub.p.getSession(sid);

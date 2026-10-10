@@ -44,7 +44,73 @@ export const toSession = (r) => ({
   id: r.id, projectId: r.project_id, cwd: r.cwd, title: r.title, model: r.model,
   startedAt: r.started_at, lastSeenAt: r.last_seen_at, status: r.status, busy: !!r.busy,
   nowDoing: r.now_doing, tokens: r.tokens, costUsd: r.cost_usd ?? 0,
+  // v0.14 session health
+  contextWindow: r.context_window ?? null, contextPercent: r.context_percent ?? null, rateLimits: parse(r.rate_limits, []),
+  busySince: r.busy_since ?? null, lastTurnAt: r.last_turn_at ?? null,
+  runningAgents: r.running_n ?? 0, stalledAgents: r.stalled_n ?? 0, costToday: costToday(r),
+  health: { level: r.health_level || 'ok', reasons: parse(r.health_reasons, []) },
 });
+/** SELECT for a session row plus its live agent counts (what toSession needs). Append a WHERE / ORDER BY. */
+export const SESSION_SQL = `SELECT s.*,
+  (SELECT COUNT(*) FROM agents a WHERE a.session_id = s.id AND a.status = 'running') AS running_n,
+  (SELECT COUNT(*) FROM agents a WHERE a.session_id = s.id AND a.status = 'stalled') AS stalled_n FROM sessions s`;
+
+// ---------------------------------------------------------------- session health (v0.14)
+export const HEALTH = {
+  contextWarn: 70, contextCritical: 85, rateWarn: 80, rateCritical: 95, idleMs: 30 * 60_000,
+  sampleEveryMs: 60_000, keepSamplesMs: 7 * 24 * 3600_000, defaultCostWarnUsd: 25,
+};
+const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+export const rateLabel = (kind) => (kind === 'five_hour' ? '5-hour' : kind === 'seven_day' ? '7-day' : String(kind).replace(/_/g, '-'));
+/** "15:00", or "Tue 15:00" when the reset is not on the same local day as `at`. */
+function clockText(iso, at) {
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return '';
+  const d = new Date(t);
+  const hm = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+  return localDate(t) === localDate(at) ? hm : `${DAYS[d.getDay()]} ${hm}`;
+}
+/** Cost since local midnight: the session cost minus what it had already cost when today's first heartbeat arrived. */
+export function costToday(r, at) {
+  if (at !== undefined && r.cost_day !== localDate(at)) return 0;
+  return Math.max(0, money((r.cost_usd ?? 0) - (r.cost_base ?? 0)));
+}
+/**
+ * Derive { level, reasons } from a session row (with running_n / stalled_n) as of event time `at`.
+ * Pure: reads no clock, so heartbeats, sweeps and a rebuild all reach the same answer.
+ */
+export function computeHealth(r, at, costWarnUsd = HEALTH.defaultCostWarnUsd) {
+  if (r.status === 'ended') return { level: 'ok', reasons: [] };
+  const reasons = [];
+  let rank = 0;
+  const bump = (n) => { if (n > rank) rank = n; };
+  const pct = r.context_percent;
+  if (isNum(pct) && pct > HEALTH.contextWarn) {
+    reasons.push(`Context ${Math.round(pct)}%`);
+    bump(pct > HEALTH.contextCritical ? 2 : 1);
+  }
+  for (const l of parse(r.rate_limits, [])) {
+    if (!l || !isNum(l.percentUsed) || l.percentUsed <= HEALTH.rateWarn) continue;
+    const when = l.resetsAt ? clockText(l.resetsAt, at) : '';
+    reasons.push(`${rateLabel(l.kind)} limit ${Math.round(l.percentUsed)}%${when ? `, resets ${when}` : ''}`);
+    bump(l.percentUsed > HEALTH.rateCritical ? 2 : 1);
+  }
+  const stalled = r.stalled_n || 0, running = (r.running_n || 0) + stalled; // a stalled agent is still alive
+  if (stalled > 0) { reasons.push(`${stalled} stalled agent${stalled === 1 ? '' : 's'}`); bump(1); }
+  const idleRef = r.last_turn_at ?? r.started_at;
+  if (!r.busy && running > 0 && isNum(idleRef) && at - idleRef > HEALTH.idleMs) {
+    reasons.push(`Idle over 30 min with ${running} agent${running === 1 ? '' : 's'} running`);
+    bump(1);
+  }
+  const cost = costToday(r, at);
+  if (cost > costWarnUsd) { reasons.push(`Cost today $${cost.toFixed(2)} (over $${costWarnUsd})`); bump(1); }
+  return { level: ['ok', 'warn', 'critical'][rank], reasons };
+}
+const cleanLimits = (v) => v.filter((l) => l && typeof l === 'object' && typeof l.kind === 'string' && isNum(l.percentUsed))
+  .slice(0, 8).map((l) => ({
+    kind: cut(l.kind, 40), percentUsed: Math.max(0, Math.min(1000, l.percentUsed)),
+    resetsAt: typeof l.resetsAt === 'string' && Number.isFinite(Date.parse(l.resetsAt)) ? cut(l.resetsAt, 40) : null,
+  }));
 export const toAgent = (r) => ({
   id: r.id, sessionId: r.session_id, taskId: r.task_id ?? null, toolUseId: r.tool_use_id,
   subagentType: r.subagent_type, model: r.model, description: r.description, status: r.status,
@@ -205,7 +271,8 @@ export function computeConflicts(db, at) {
 }
 
 export class Projector {
-  constructor(db, { log, attachDir = '', clock = Date.now } = {}) {
+  constructor(db, { log, attachDir = '', clock = Date.now, costWarnUsd = HEALTH.defaultCostWarnUsd } = {}) {
+    this.costWarnUsd = costWarnUsd;
     this.db = db;
     this.log = log;
     this.attachDir = attachDir;
@@ -230,7 +297,7 @@ export class Projector {
     this.dirty = true;
   }
   getProject(id) { return this.db.get('SELECT * FROM projects WHERE id = ?', id); }
-  getSession(id) { return this.db.get('SELECT * FROM sessions WHERE id = ?', id); }
+  getSession(id) { return this.db.get(`${SESSION_SQL} WHERE s.id = ?`, id); }
   getAgent(id) { return this.db.get('SELECT * FROM agents WHERE id = ?', id); }
   getTask(id) { return id ? this.db.get('SELECT * FROM tasks WHERE id = ?', id) : undefined; }
   getNote(id) { return this.db.get('SELECT * FROM notes WHERE id = ?', id); }
@@ -391,6 +458,7 @@ export class Projector {
     this.upd('agents', a.id, f);
     if (wasStalled) this.unstallTask(a, at);
     if (!quietIfRunning || wasStalled) this.pushAgent(a.id);
+    if (wasStalled && this.refreshHealth(a.session_id, at)) this.pushSession(a.session_id); // the stall warning clears
   }
   /** A stall-blocked task returns to in_progress when its agent shows life (or starts waiting for input). */
   unstallTask(a, at) {
@@ -597,20 +665,52 @@ export class Projector {
     this.pushSession(sid);
   }
   onHeartbeat(ev) {
-    const sid = ev.sessionId;
+    const sid = ev.sessionId, d = ev.data;
     this.ensureSession(sid, ev.at);
     const s = this.getSession(sid);
     const f = { status: 'active', last_seen_at: Math.max(s.last_seen_at, ev.at) };
-    if (isNum(ev.data.tokens)) f.tokens = ev.data.tokens;
-    if (isNum(ev.data.costUsd)) f.cost_usd = ev.data.costUsd;
+    if (isNum(d.tokens)) f.tokens = d.tokens;
+    if (isNum(d.costUsd)) f.cost_usd = d.costUsd;
+    if (isNum(d.contextWindow) && d.contextWindow > 0) f.context_window = Math.round(d.contextWindow);
+    if (isNum(d.contextPercent)) f.context_percent = Math.max(0, Math.min(100, d.contextPercent));
+    if (Array.isArray(d.rateLimits)) f.rate_limits = JSON.stringify(cleanLimits(d.rateLimits));
+    // a new local day starts "cost today" from what the session had already cost
+    if (s.cost_day !== localDate(ev.at)) {
+      f.cost_day = localDate(ev.at);
+      // A session that started today has spent everything today: its baseline is 0, not its cost at this heartbeat.
+      f.cost_base = localDate(s.started_at) === localDate(ev.at) ? 0 : (s.cost_usd ?? 0);
+    }
     this.upd('sessions', sid, f);
+    this.sampleSession(sid, ev.at);
+    this.refreshHealth(sid, ev.at);
     this.pushSession(sid);
+  }
+  /** Append a session_samples row at most once a minute per session; drop anything older than 7 days. */
+  sampleSession(sid, at) {
+    const last = this.db.get('SELECT MAX(at) AS m FROM session_samples WHERE session_id = ?', sid).m;
+    if (last != null && at - last < HEALTH.sampleEveryMs) return false;
+    const s = this.getSession(sid);
+    this.db.run('INSERT INTO session_samples(session_id, at, tokens, percent, cost_usd) VALUES (?, ?, ?, ?, ?)',
+      sid, at, s.tokens, s.context_percent ?? null, s.cost_usd ?? 0);
+    this.db.run('DELETE FROM session_samples WHERE session_id = ? AND at < ?', sid, at - HEALTH.keepSamplesMs);
+    return true;
+  }
+  /** Recompute the stored health. Returns true when the level or the reasons changed (the caller pushes). */
+  refreshHealth(sid, at) {
+    const s = this.getSession(sid);
+    if (!s) return false;
+    const h = computeHealth(s, at, this.costWarnUsd);
+    const reasons = JSON.stringify(h.reasons);
+    if (h.level === s.health_level && reasons === s.health_reasons) return false;
+    this.upd('sessions', sid, { health_level: h.level, health_reasons: reasons });
+    return true;
   }
   onSessionEnded(ev) {
     const sid = ev.sessionId;
     this.ensureSession(sid, ev.at);
     const s = this.getSession(sid);
-    this.upd('sessions', sid, { status: 'ended', busy: 0, last_seen_at: Math.max(s.last_seen_at, ev.at) });
+    this.upd('sessions', sid, { status: 'ended', busy: 0, busy_since: null, last_seen_at: Math.max(s.last_seen_at, ev.at) });
+    this.refreshHealth(sid, ev.at);
     for (const a of this.db.all(`SELECT * FROM agents WHERE session_id = ? AND status IN ('running','stalled','waiting')`, sid)) {
       this.completeAgent(a, false, 'session ended', undefined, ev.at);
     }
@@ -633,7 +733,11 @@ export class Projector {
       else if (!a) this.bumpPending(sid, ev.at);
       return;
     }
-    this.upd('sessions', sid, { busy: started ? 1 : 0 });
+    const cur = this.getSession(sid);
+    this.upd('sessions', sid, started
+      ? { busy: 1, busy_since: cur.busy ? (cur.busy_since ?? ev.at) : ev.at }
+      : { busy: 0, busy_since: null, last_turn_at: Math.max(cur.last_turn_at ?? 0, ev.at) });
+    this.refreshHealth(sid, ev.at);
     if (!started && d.ok === false) {
       this.addActivity({ sessionId: sid, kind: 'status', summary: `Turn failed${d.error ? ': ' + str(d.error) : ''}`, ok: false, at: ev.at });
     }
@@ -1450,7 +1554,11 @@ export class Projector {
       const s = this.getSession(id);
       if (!s || s.status !== 'active') continue;
       this.upd('sessions', id, { status: 'idle' });
+      this.refreshHealth(id, at);
       this.pushSession(id);
+    }
+    for (const id of d.health || []) { // v0.14: time-driven health changes (long idle, new stalls, a new day)
+      if (this.getSession(id) && this.refreshHealth(id, at)) this.pushSession(id);
     }
     for (const x of d.jobs || []) {
       const j = this.getJob(x.id);

@@ -7,6 +7,7 @@ import { fmtAgo, cwdTail, truncate } from '../format.js';
 import { emptyState } from '../ui.js';
 import { createNotesPanel } from '../notes.js';
 import { navigate, openTask } from '../router.js';
+import { reasonChips, ctxText } from '../health.js';
 
 const KIND = {
   ask: { icon: 'question', label: 'Asked you' },
@@ -37,7 +38,13 @@ export function mount(container) {
   const choiceCount = h('span', { class: 'panel-count mono' });
   const choiceWrap = h('section', { class: 'q-section', 'aria-label': 'Choices waiting', hidden: true },
     h('h2', { class: 'section-title' }, icon('checklist', 14), 'Choices waiting', choiceCount), choiceList);
+  // v0.14: sessions at critical health (context nearly full, a limit about to be hit)
+  const sessList = h('div', { class: 'q-list sessions-waiting', role: 'list', 'aria-label': 'Sessions needing attention' });
+  const sessCount = h('span', { class: 'panel-count mono' });
+  const sessWrap = h('section', { class: 'q-section', 'aria-label': 'Sessions', hidden: true },
+    h('h2', { class: 'section-title' }, icon('heartPulse', 14), 'Sessions', sessCount), sessList);
   const root = h('div', { class: 'inbox' },
+    sessWrap,
     choiceWrap,
     h('section', { class: 'q-section' }, h('h2', { class: 'section-title' }, icon('inbox', 14), 'Needs you', openCount), openList, clear),
     answeredWrap, empty);
@@ -111,6 +118,32 @@ export function mount(container) {
     r.open.setAttribute('aria-label', `Review ${n} choices on ${t.id}`);
   }
 
+  /* ---------- v0.14: critical-health sessions (derived from Session.health, not a question row) ---------- */
+  function makeSessionRow(sess) {
+    const r = {};
+    r.label = h('span', { class: 'q-label mono' }, 'Session health');
+    r.text = h('div', { class: 'q-text' });
+    r.meta = h('div', { class: 'q-meta' });
+    r.health = h('button', { class: 'btn btn-accent btn-sm', type: 'button' }, icon('heartPulse', 14), 'Open health');
+    r.thread = h('button', { class: 'btn btn-quiet btn-sm', type: 'button' }, icon('threads', 14), 'Open thread');
+    const el = h('article', { class: 'q-row k-session', role: 'listitem', 'data-session': sess.id },
+      h('span', { class: 'q-kind' }, icon('heartPulse', 18)),
+      h('div', { class: 'q-main' }, h('div', { class: 'q-head' }, r.label), r.text, r.meta, h('div', { class: 'q-actions' }, r.health, r.thread)));
+    el.__r = r;
+    r.health.addEventListener('click', () => navigate('health'));
+    r.thread.addEventListener('click', () => navigate('threads', [el.__s.id]));
+    return el;
+  }
+  function updateSessionRow(el, sess) {
+    const r = el.__r;
+    el.__s = sess;
+    const name = sess.title || cwdTail(sess.cwd) || sess.id;
+    const chips = reasonChips(sess).filter((c) => c.level === 'critical');
+    const why = (chips.length ? chips : reasonChips(sess)).map((c) => (c.advice ? `${c.text}: ${c.advice}` : c.text)).join(' · ');
+    setText(r.text, `${truncate(name, 48)} is at critical health. ${why}`);
+    setText(r.meta, `${ctxText(sess)}${state.ui.projectId === 'all' && state.projects.size > 1 ? ' · ' + sel.projectName(sess.projectId) : ''}`);
+  }
+
   function target(q) { return q.taskId && state.tasks.has(q.taskId) ? { kind: 'task', id: q.taskId } : { kind: 'session', id: q.sessionId }; }
 
   function togglePanel(el, force) {
@@ -173,6 +206,10 @@ export function mount(container) {
     const open = sel.openQuestions();
     const answered = sel.answeredQuestions();
     const choices = sel.choiceTasks();
+    const sessions = sel.sessionsNeedingYou();
+    reconcile(sessList, sessions, (x) => x.id, makeSessionRow, updateSessionRow);
+    setHidden(sessWrap, sessions.length === 0);
+    setText(sessCount, sessions.length ? String(sessions.length) : '');
     reconcile(choiceList, choices, (t) => t.id, makeChoiceRow, updateChoiceRow);
     setHidden(choiceWrap, choices.length === 0);
     setText(choiceCount, choices.length ? String(choices.length) : '');
@@ -188,8 +225,8 @@ export function mount(container) {
     setHidden(answeredList, !answeredOpen);
     setClass(answeredWrap, 'open', answeredOpen);
     answeredToggle.setAttribute('aria-expanded', String(answeredOpen));
-    setHidden(empty, !(state.ready && open.length === 0 && answered.length === 0 && choices.length === 0));
-    setHidden(clear, !(state.ready && open.length === 0 && answered.length > 0 && choices.length === 0));
+    setHidden(empty, !(state.ready && open.length === 0 && answered.length === 0 && choices.length === 0 && sessions.length === 0));
+    setHidden(clear, !(state.ready && open.length === 0 && answered.length > 0 && choices.length === 0 && sessions.length === 0));
   }
 
   function focusRow(id) {

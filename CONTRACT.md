@@ -785,3 +785,48 @@ Applying the result: the `job.result` event is the record. It sets `Concept.summ
 - Approve = `PATCH /v1/tasks/:id { status: 'done' }` (a workflow gate card uses `POST /v1/runs/:id/gates/:node` instead). Later = `{ status: 'later' }`.
 - Request changes = `POST /v1/notes { target: { kind: 'task', id }, text: '!Please change:\n- …', execute: true }`. The leading `!` skips the cheap-answer path (v0.4), so the live agent or a follow-up builder always gets it; the card leaves Review when that agent spawns.
 - Ticks on the `Checks:` list and the "Reviewed today" count are UI state in localStorage (`helm.review.checks.<T-n>`, `helm.review.today`), never sent to the hub.
+
+## v0.14 — Session health (mod side)
+- `session.heartbeat` data gains `contextWindow?` (tokens), `contextPercent?` (0–100) and
+  `rateLimits?: { kind: 'five_hour' | 'seven_day' | string, percentUsed: number, resetsAt: string | null }[]`
+  (from the engine's `$.session.usage()`), alongside the existing `tokens` and `costUsd`.
+
+### Hub (T-32)
+- **`Session` gains** `contextWindow: number | null`, `contextPercent: number | null` (0–100), `rateLimits: { kind, percentUsed, resetsAt: string | null }[]`
+  (the latest heartbeat's list; `[]` clears it), `busySince: number | null` (when the current turn started), `lastTurnAt: number | null` (when the last turn
+  ended), `runningAgents`, `stalledAgents` (live counts from `agents`), `costToday` (the session cost since the first heartbeat of the local day) and
+  `health: { level: 'ok' | 'warn' | 'critical', reasons: string[] }`. Heartbeat values are validated and clamped (percent 0–100; a rate limit needs a `kind` and a numeric `percentUsed`).
+- **`session_samples(id, session_id, at, tokens, percent, cost_usd)`**: a heartbeat appends a row only if the last one for that session is at least 60 s older (so
+  at most one a minute) and prunes that session's rows older than 7 days. A projection of events, so `--rebuild` reproduces it.
+- **`GET /v1/sessions/:id/health?hours=24`** (1–168, default 24) returns `{ session, samples: [{ at, tokens, percent, costUsd }], agents: { running, stalled, done24h }, cost24h }`
+  (404 for an unknown session). `cost24h` is the session cost minus its cost at the start of the window (0 baseline if the session began inside it).
+- **`GET /v1/health/sessions`** returns `{ sessions: [{ id, projectId, title, model, status, busy, contextPercent, contextWindow, rateLimits, costUsd, costToday, runningAgents, stalledAgents, health }], counts: { ok, warn, critical }, level }`
+  for every active or idle session, worst first.
+- **Health rules** (strictly above the number; the worst level wins; reasons are plain strings, in this order):
+
+  | Rule | Level | Reason text |
+  |---|---|---|
+  | context > 70% / > 85% | warn / critical | `Context 88%` |
+  | any rate limit > 80% / > 95% | warn / critical | `5-hour limit 92%, resets 15:00` (`7-day limit …`; `Tue 15:00` when not today) |
+  | stalled agents > 0 | warn | `2 stalled agents` |
+  | not busy for > 30 min (since `lastTurnAt`, else `startedAt`) while agents are running or stalled | warn | `Idle over 30 min with 2 agents running` |
+  | cost today > `HELM_COST_WARN_USD` (default 25) | warn | `Cost today $31.20 (over $25)` |
+
+  An ended session is always `ok`. Reasons carry no ticking numbers (no "idle 42 min"), so a sweep does not churn.
+- **When health is recomputed** (always from event time, never the wall clock): on each heartbeat, on each turn start or end, when a stalled agent recovers, when a session ends, and in `hub.sweep`.
+  The sweep decides which sessions changed (`data.health`: session ids, including the stalls it is about to record) and the projection recomputes them at the sweep's `at`. A session upsert is pushed
+  whenever the level or the reasons change. `HELM_COST_WARN_USD` / `costWarnUsd` is the only knob.
+- **Migration** is additive and safe on a live database: nine defaulted or nullable `sessions` columns (`context_window`, `context_percent`, `rate_limits`, `busy_since`, `last_turn_at`, `health_level`, `health_reasons`, `cost_day`, `cost_base`)
+  and the `session_samples` table. Old sessions read as `ok` with no context until their next heartbeat; `helmd --rebuild` back-fills from stored events. The seed gives the demo sessions varied context, limits and cost, with one critical session.
+
+### Web (T-32)
+- **Health screen** `#/health` (sidebar item "Health" with a heart-pulse icon beside Office; Spotlight command "Session health"). One card per live session in the current project scope, critical first, then by context. A card shows:
+  a context ring with percent and `tokens/window` plus a 24 h sparkline (from `/v1/sessions/:id/health`, refreshed every minute); 5-hour and 7-day usage bars with the reset time; cost today with a 24 h sparkline;
+  busy ("Working for …") or idle ("Idle · last turn … ago"); running and stalled agent counts (a button to Threads for that session); the model; and reason chips with one line of advice
+  ("Context 88%: compact or start a fresh session soon", "5-hour limit 92%: resets 15:00"). Each chip is amber or red from its own number. Gauges are `role="meter"` with `aria-valuetext`
+  ("Context 88% used, 880k of 1M tokens"); sparklines are labelled images; no state is colour-only.
+- **Office desks** get a small context ring in the health colour (tooltip lists the reasons) and an amber or red outline when the session is not healthy (the indigo "needs you" outline wins when an agent is waiting).
+- **Header**: a health dot beside the Helm spend: green, amber (a warning anywhere) or red (a critical session). Looks at every live session, not just the selected project. Click goes to `#/health`.
+  The Health sidebar badge counts sessions that are not healthy in scope.
+- **Inbox**: sessions at critical health appear in a new "Sessions" group (`sel.sessionsNeedingYou()`), with the reason and advice, "Open health" and "Open thread". The Inbox badge counts them.
+  This is not a `needsYou(task)` reason: the Board's yellow treatment stays for tasks only.
