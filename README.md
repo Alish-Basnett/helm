@@ -24,10 +24,18 @@ Claude Code sessions ──(mod: hooks/register.ts)──▶ helmd (hub/, SQLite
 
 ## Install
 
-Requires Node ≥ 24 (the hub uses `node:sqlite` and has no npm dependencies).
+Requires Node ≥ 24 (the hub uses `node:sqlite` and has no npm dependencies). At the prompt of a Claude Code terminal session:
+
+```
+/plugin install helm --marketplace Alish-Basnett/helm
+```
+
+Answer `y` to add the marketplace, then choose the user scope so every session loads it.
+
+To install from a local clone instead:
 
 ```bash
-claude plugin marketplace add ~/WebDev/builtbyAlish/helm
+claude plugin marketplace add /path/to/helm
 ```
 
 ```bash
