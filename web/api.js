@@ -67,6 +67,14 @@ export const api = {
   digests: (projectId, limit = 14) => request('GET', `/v1/digests${q({ projectId, limit })}`),
   // v0.5: git diff of a task's changed files (404 on hubs that predate it)
   taskDiff: (id, refresh = false) => request('GET', `/v1/tasks/${enc(id)}/diff${refresh ? '?refresh=1' : ''}`),
+  // v0.12 branch per task (404 on hubs that predate it)
+  gitInfo: (id) => request('GET', `/v1/tasks/${enc(id)}/git`),
+  createBranch: (id) => request('POST', `/v1/tasks/${enc(id)}/branch`),
+  updateBranch: (id) => request('POST', `/v1/tasks/${enc(id)}/branch/update`),
+  pushBranch: (id, remote) => request('POST', `/v1/tasks/${enc(id)}/push`, { confirm: true, ...(remote ? { remote } : {}) }),
+  linkPr: (id, url) => request('POST', `/v1/tasks/${enc(id)}/pr`, { url }),
+  deleteBranch: (id, opts = {}) => request('DELETE', `/v1/tasks/${enc(id)}/branch${q({ deleteBranch: opts.deleteBranch ? 1 : '', force: opts.force ? 1 : '' })}`),
+  refreshCi: (id) => request('POST', `/v1/tasks/${enc(id)}/ci/refresh`),
   // v0.4
   usage: (days = 7) => request('GET', `/v1/usage${q({ days })}`),
   // cost analytics: spend per day / project / model / task (404 on hubs that predate it)

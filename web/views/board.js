@@ -1,4 +1,5 @@
 // views/board.js — kanban: 5 columns + collapsible Later/Blocked lanes, drag & drop, inline composer.
+import { ciSummary, prChip } from '../git.js';
 import { h, reconcile, setText, setClass, setHidden, setAttr, bus, startTicker } from '../dom.js';
 import { icon } from '../icons.js';
 import { state, sel, lsGet, lsSet, setUI } from '../store.js';
@@ -214,7 +215,8 @@ export function mount(container) {
     r.tokens = h('span', { class: 'meta-item' }, icon('bolt', 13), h('span', { class: 'mono' }));
     r.files = h('span', { class: 'meta-item' }, icon('file', 13), h('span', { class: 'mono' }));
     r.dep = h('span', { class: 'dep-badge mono' }, icon('link', 12), h('span', {}));
-    r.meta = h('div', { class: 'card-meta' }, r.elapsed, r.tokens, r.files, r.dep);
+    r.git = h('span', { class: 'meta-item git-glyph', hidden: true }, icon('branch', 13), h('span', { class: 'ci-dot', 'aria-hidden': 'true' }));
+    r.meta = h('div', { class: 'card-meta' }, r.elapsed, r.tokens, r.files, r.git, r.dep);
     r.run = h('button', { class: 'run-chip', type: 'button', hidden: true });
     r.run.addEventListener('click', (e) => { e.stopPropagation(); const rid = r.run.__run; const run = state.runs.get(rid); if (run) navigate('workflows', [run.workflowId], { run: rid }); });
     r.approve = h('button', { class: 'card-approve', type: 'button' }, icon('check', 14), 'Approve');
@@ -325,6 +327,17 @@ export function mount(container) {
     const tokens = t.tokens || (agent && agent.tokens) || 0;
     setHidden(r.tokens, !tokens);
     if (tokens) setText(r.tokens.lastChild, fmtTokens(tokens));
+    // v0.12: a branch glyph, with a CI dot once the branch is pushed and GitHub has said something
+    const br = t.branch || null;
+    setHidden(r.git, !br);
+    if (br) {
+      const ci = ciSummary(br.ci);
+      const pc = prChip(br.pr);
+      r.git.className = `meta-item git-glyph${ci ? ` tone-${ci.tone}` : ''}`;
+      r.git.title = [br.name, br.pushedAt ? `pushed to ${br.remote}` : 'local branch', pc && `PR ${pc.text}`, ci && ci.label].filter(Boolean).join(' · ');
+      r.git.setAttribute('aria-label', r.git.title);
+      r.git.lastChild.hidden = !ci;
+    }
     const nf = (t.filesChanged || []).length;
     setHidden(r.files, !nf);
     if (nf) setText(r.files.lastChild, String(nf));

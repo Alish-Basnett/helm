@@ -17,6 +17,7 @@ import { renderDiffBody, langOf } from '../diffview.js';
 import { bindDraft, clearDraft } from '../drafts.js';
 import { codeEditor, blockView } from '../code.js';
 import { createAttachTray, bindAttachInput, attsOf } from '../attachments.js';
+import { createGitPanel } from '../gitpanel.js';
 import * as R from '../review.js';
 
 const SHORTCUTS = [
@@ -284,7 +285,10 @@ export function mount(container, route0) {
     c.checksHint = h('p', { class: 'rv-hint mono' }, 'Ticks are for you only: saved in this browser, never sent to the agent.');
     c.checksSec = h('section', { class: 'rv-sec', hidden: true }, h('h3', { class: 'rv-sec-title' }, icon('checklist', 14), 'Checks', c.checksCount), c.runChecks, c.ticks, c.checksHint);
 
-    c.scroll = h('div', { class: 'rv-scroll' }, h('div', { class: 'rv-content' }, c.head, c.recapSec, c.diffSec, c.checksSec));
+    /* git: branch, push, PR and CI (v0.12) */
+    c.git = createGitPanel({ getTask: task, variant: 'rv' });
+
+    c.scroll = h('div', { class: 'rv-scroll' }, h('div', { class: 'rv-content' }, c.head, c.recapSec, c.diffSec, c.git.el, c.checksSec));
 
     /* action bar + composer */
     c.composerSlot = h('div', { class: 'rv-composer-slot', hidden: true });
@@ -564,6 +568,7 @@ export function mount(container, route0) {
 
       if (taskHasFiles(t)) ensureDiff(t);
       paintDiff();
+      c.git.update(t);
       paintChecks(t);
 
       // actions
@@ -647,7 +652,7 @@ export function mount(container, route0) {
     if (!alive || e.metaKey || e.ctrlKey || e.altKey) return;
     const tg = e.target;
     if (tg && (/^(INPUT|TEXTAREA|SELECT)$/.test(tg.tagName) || tg.isContentEditable)) return;
-    if (document.querySelector('.spotlight-scrim:not([hidden])')) return;
+    if (document.querySelector('.spotlight-scrim:not([hidden]), .git-scrim')) return; // a dialog is open: its keys are its own
     if (tg && tg.closest && tg.closest('.dock-panel, .menu')) return;
     if (helpOpen) {
       if (e.key === 'Escape' || e.key === '?') { e.preventDefault(); e.stopPropagation(); toggleHelp(false); }

@@ -74,6 +74,7 @@ export function normalizeRow(entity, row) {
     if (!Array.isArray(row.choices)) row.choices = []; // v0.6 Choices
     if (row.parentTaskId === undefined) row.parentTaskId = null;
     if (row.autoStartedAt === undefined) row.autoStartedAt = null; // v0.7
+    if (row.branch === undefined) row.branch = null; // v0.12 branch / PR / CI
   } else if (entity === 'project') {
     if (row.autoStart === undefined) row.autoStart = false; // v0.7 Up next auto mode
   } else if (entity === 'run') {
@@ -303,6 +304,8 @@ export const sel = {
       const sn = task.startNoteId && state.notes.get(task.startNoteId);
       if (sn && sn.state === 'failed') add('autostart', 'Auto-start failed');
     }
+    // v0.12: the task's branch failed CI (a done/archived task never shows this: needsYou returned early above)
+    if (task.branch && task.branch.ci && task.branch.ci.state === 'failure') add('ci', 'CI failed');
     // v0.9: a workflow gate waiting for a decision (its card sits in Review with an Approve button)
     if (sel.gateOfTask(task)) add('gate', 'Approval needed');
     else if (task.status === 'review') add('review', 'Review');

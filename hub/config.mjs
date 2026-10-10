@@ -4,7 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const HUB_DIR = path.dirname(fileURLToPath(import.meta.url));
-export const VERSION = '0.16.0';
+export const VERSION = '0.17.0';
 
 const int = (v, d) => {
   if (v === undefined || v === null || v === '') return d;
@@ -38,6 +38,7 @@ export function loadConfig(o = {}, env = process.env) {
     blockMs: int(o.blockMs ?? env.HELM_BLOCK_MS, 10 * 60_000),
     idleMs: int(o.idleMs ?? env.HELM_IDLE_MS, 2 * 60_000),
     sweepMs: int(o.sweepMs ?? env.HELM_SWEEP_MS, 30_000),
+    gitPollMs: int(o.gitPollMs ?? env.HELM_GIT_POLL_MS, 30_000), // how often the GitHub poller looks for due branches
     keepChanges: int(o.keepChanges ?? env.HELM_CHANGES_KEEP, 5000),
     sseHeartbeatMs: int(o.sseHeartbeatMs ?? env.HELM_SSE_HEARTBEAT_MS, 15_000),
     tcp: o.tcp ?? true,

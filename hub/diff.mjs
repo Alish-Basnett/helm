@@ -41,10 +41,10 @@ function git(cwd, args, { okCodes = [0], buffer = false } = {}) {
 }
 
 // ------------------------------------------------------------------ paths
-const within = (root, p) => p === root || p.startsWith(root.endsWith(path.sep) ? root : root + path.sep);
+export const within = (root, p) => p === root || p.startsWith(root.endsWith(path.sep) ? root : root + path.sep);
 
 /** realpath that tolerates a missing tail (deleted files): resolve the deepest existing ancestor, re-append the rest. */
-function realpathLoose(p) {
+export function realpathLoose(p) {
   const tail = [];
   let cur = p;
   for (;;) {

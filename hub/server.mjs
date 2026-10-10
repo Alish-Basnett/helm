@@ -73,7 +73,7 @@ export async function startHub(opts = {}) {
     if (r === 'running') return { alreadyRunning: true, cfg };
   }
   const ownsPid = cfg.singleton;
-  const hub = new Hub(cfg, log, { clock: opts.clock });
+  const hub = new Hub(cfg, log, { clock: opts.clock, fetch: opts.fetch });
   const boot = { port: cfg.port };
   const sseClients = new Set();
   const remote = createRemote({ cfg, hub, log });
@@ -132,6 +132,12 @@ export async function startHub(opts = {}) {
     }, cfg.sweepMs);
   }
 
+  let gitTimer = null;
+  if (cfg.sweep) { // v0.12: poll GitHub for PRs and CI of pushed task branches (each branch has its own 2 minute schedule)
+    gitTimer = setInterval(() => { hub.gitSync.tick().catch((e) => log.warn('git sync failed', e)); }, cfg.gitPollMs);
+    gitTimer.unref?.();
+  }
+
   log.info(`helmd ready pid=${process.pid} tcp=${cfg.tcp ? `${cfg.host}:${boot.port}` : 'off'} sock=${cfg.unix ? cfg.sockFile : 'off'} db=${cfg.dbFile}`);
 
   let closed = false;
@@ -139,6 +145,7 @@ export async function startHub(opts = {}) {
     if (closed) return;
     closed = true;
     if (timer) clearInterval(timer);
+    if (gitTimer) clearInterval(gitTimer);
     for (const c of sseClients) { try { c.res.end(); } catch { /* ignore */ } }
     await remote.close();
     await Promise.all(servers.map((s) => new Promise((r) => {

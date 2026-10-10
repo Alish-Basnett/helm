@@ -95,6 +95,16 @@ route('GET', '/v1/sessions/:id/activity', ({ hub, params, query }) => {
 });
 route('POST', '/v1/sessions/:id/join', async ({ hub, params, json }) => hub.joinSession(params.id, await json()));
 route('GET', '/v1/tasks/:id/diff', ({ hub, params, query }) => hub.taskDiff(params.id, { refresh: /^(1|true|yes)$/i.test(query.get('refresh') || '') }));
+// v0.12 branch per task
+route('GET', '/v1/tasks/:id/git', ({ hub, params }) => hub.gitInfo(params.id));
+route('POST', '/v1/tasks/:id/branch', ({ hub, params }) => hub.createBranch(params.id));
+route('POST', '/v1/tasks/:id/branch/update', ({ hub, params }) => hub.updateBranch(params.id));
+route('DELETE', '/v1/tasks/:id/branch', ({ hub, params, query }) => hub.deleteBranch(params.id, {
+  deleteBranch: /^(1|true|yes)$/i.test(query.get('deleteBranch') || ''), force: /^(1|true|yes)$/i.test(query.get('force') || ''),
+}));
+route('POST', '/v1/tasks/:id/push', async ({ hub, params, json }) => hub.pushBranch(params.id, await json()));
+route('POST', '/v1/tasks/:id/pr', async ({ hub, params, json }) => hub.linkPr(params.id, await json()));
+route('POST', '/v1/tasks/:id/ci/refresh', ({ hub, params }) => hub.refreshCi(params.id));
 route('POST', '/v1/tasks/:id/start', ({ hub, params }) => hub.startTask(params.id));
 route('POST', '/v1/tasks/:id/choices/apply', async ({ hub, params, json }) => hub.applyChoices(params.id, await json()));
 route('POST', '/v1/tasks/:id/choices/reset', ({ hub, params }) => hub.resetChoices(params.id));

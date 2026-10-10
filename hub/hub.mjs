@@ -10,6 +10,8 @@ import {
 import { computeDiff, diffStat } from './diff.mjs';
 import { search as ftsSearch, learn as ftsLearn } from './search.mjs';
 import { WfEngine } from './wfengine.mjs';
+import * as gf from './gitflow.mjs';
+import { GitSync } from './gitsync.mjs';
 import { toTemplate, getTemplate, renderTemplate, agentOfSubagent, TEMPLATE_AGENTS, MAX_CHECKS, MAX_TAGS } from './templates.mjs';
 
 import { HttpError } from './errors.mjs';
@@ -29,7 +31,7 @@ const DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
 export { localDate };
 
 export class Hub {
-  constructor(cfg, log, { clock = Date.now } = {}) {
+  constructor(cfg, log, { clock = Date.now, fetch: fetchImpl } = {}) {
     this.cfg = cfg;
     this.log = log;
     this.clock = clock;
@@ -45,6 +47,8 @@ export class Hub {
     this.inAuto = false;            // re-entrancy guard for autoTick (also held during rebuild)
     this.lastAuto = [];             // task ids the most recent autoTick started
     this.replaying = false;         // true during rebuild(): replay applies recorded workflow events and never decides
+    this.gitBusy = new Set();       // v0.12: task ids with a git operation in flight (one at a time per task)
+    this.gitSync = new GitSync(this, { fetchImpl }); // v0.12: PR + CI polling for pushed branches (the timer lives in server.mjs)
     this.wf = new WfEngine(this);   // v0.9 workflows: decisions + commands (the reducer lives in workflows.mjs)
   }
   now() { return this.clock(); }
@@ -215,6 +219,159 @@ export class Hub {
       }
     }
     return diff;
+  }
+
+  // ------------------------------------------------------------ git branch per task (v0.12)
+  /** Run a git operation for one task, one at a time (a second click gets a 409 instead of racing the first). */
+  async gitLock(id, fn) {
+    if (this.gitBusy.has(id)) throw new HttpError(409, 'another git operation is already running for this task');
+    this.gitBusy.add(id);
+    try { return await fn(); } finally { this.gitBusy.delete(id); }
+  }
+  branchOf(t) { try { return t.branch ? JSON.parse(t.branch) : null; } catch { return null; } }
+  taskForGit(id) {
+    const t = this.p.getTask(id);
+    if (!t) throw notFound('task not found');
+    return t;
+  }
+  /** The Task as git code wants it (parsed, with the recap). */
+  gitTask(t) {
+    const x = toTask(t), a = t.agent_id ? this.p.getAgent(t.agent_id) : null;
+    return { id: x.id, title: x.title, recap: x.recap, git: x.git, filesChanged: x.filesChanged, doneAt: x.doneAt ?? (a && a.ended_at) ?? null };
+  }
+  /** Files that no longer match the diff frozen when the task finished (a live recompute against the snapshot). */
+  async driftWarnings(t) {
+    try {
+      const s = this.db.get('SELECT diff FROM task_diffs WHERE task_id = ?', t.id);
+      if (!s) return [];
+      const snap = JSON.parse(s.diff);
+      const live = await computeDiff(this.taskDiffInput(t), { now: this.now() });
+      if (live.source === 'none') return [];
+      const key = (f) => `${f.status}|${f.additions}|${f.deletions}|${f.patch}`;
+      const a = new Map(snap.files.map((f) => [f.rel, key(f)])), b = new Map(live.files.map((f) => [f.rel, key(f)]));
+      const bad = [...new Set([...a.keys(), ...b.keys()])].filter((r) => a.get(r) !== b.get(r));
+      return bad.length ? [`${bad.length} file${bad.length === 1 ? '' : 's'} differ from the diff recorded when the task finished: ${bad.slice(0, 3).join(', ')}${bad.length > 3 ? ', ...' : ''}`] : [];
+    } catch { return []; }
+  }
+  /** GET /v1/tasks/:id/git: what "Create branch" / "Push" would act on (for the preview and the confirm dialog). */
+  async gitInfo(id) {
+    const t = this.taskForGit(id);
+    const task = toTask(t), branch = task.branch;
+    const g = task.git;
+    const out = { taskId: id, eligible: false, reason: null, root: g ? g.root : null, base: g ? g.head : null, files: [], remotes: [], branch };
+    if (!g) out.reason = 'this task was not started inside a git repo';
+    else if (!task.filesChanged.length) out.reason = 'this task has no changed files';
+    else out.eligible = true;
+    const root = g ? g.root : null;
+    out.files = task.filesChanged.map((f) => (root && f.startsWith(root + '/') ? f.slice(root.length + 1) : f));
+    if (g) { try { out.remotes = await gf.listRemotes(branch ? branch.root : g.root); } catch (e) { out.remotesError = e.message; } }
+    return out;
+  }
+  /** POST /v1/tasks/:id/branch */
+  createBranch(id) {
+    return this.gitLock(id, async () => {
+      const t = this.taskForGit(id);
+      if (this.branchOf(t)) throw new HttpError(409, 'this task already has a branch; use Update branch');
+      const task = this.gitTask(t);
+      const drift = await this.driftWarnings(t);
+      const at = this.now();
+      const { record, warnings } = await gf.createBranch({ task, home: this.cfg.home, now: at });
+      if (this.closed) return null;
+      const next = this.tx(() => this.command('hub.task.branch', { taskId: id, branch: { ...record, github: null } }, at));
+      return { task: next, branch: next.branch, warnings: [...drift, ...warnings] };
+    });
+  }
+  /** POST /v1/tasks/:id/branch/update: re-copy the task's files and add a commit. */
+  updateBranch(id) {
+    return this.gitLock(id, async () => {
+      const t = this.taskForGit(id);
+      const cur = this.branchOf(t);
+      if (!cur) throw new HttpError(409, 'this task has no branch yet');
+      const task = this.gitTask(t);
+      const drift = await this.driftWarnings(t);
+      const at = this.now();
+      const r = await gf.updateBranch({ task, record: cur, home: this.cfg.home, now: at });
+      const warnings = [...drift, ...r.warnings];
+      if (this.closed) return null;
+      if (r.unchanged) return { task: toTask(this.p.getTask(id)), branch: cur, warnings, unchanged: true };
+      const next = this.tx(() => this.command('hub.task.branch', { taskId: id, branch: r.record }, at));
+      return { task: next, branch: next.branch, warnings, unchanged: false };
+    });
+  }
+  /** POST /v1/tasks/:id/push { remote?, confirm: true } */
+  pushBranch(id, body) {
+    return this.gitLock(id, async () => {
+      if (!isObj(body)) throw bad('body must be an object');
+      if (body.confirm !== true) throw bad('pushing needs { confirm: true } (the dashboard asks first)');
+      if (body.remote !== undefined && !isStr(body.remote)) throw bad('remote must be a string');
+      const t = this.taskForGit(id);
+      const cur = this.branchOf(t);
+      if (!cur) throw new HttpError(409, 'this task has no branch yet');
+      const task = this.gitTask(t);
+      const r = await gf.pushBranch({ task, record: cur, home: this.cfg.home, remote: body.remote || 'origin', now: this.now() });
+      if (this.closed) return null;
+      const patch = {
+        remote: r.remote, remoteUrl: r.remoteUrl, github: r.github, prUrl: r.prUrl, pushedAt: r.pushedAt, pushedCommit: r.pushedCommit, ci: null,
+        // a different remote is a different repo: any linked PR belongs to the old one
+        ...(cur.remote && cur.remote !== r.remote ? { pr: null } : {}),
+      };
+      const next = this.tx(() => this.command('hub.task.branch', { taskId: id, patch }, r.pushedAt));
+      this.gitSync.per.delete(id);
+      return { task: next, branch: next.branch, compareUrl: r.prUrl };
+    });
+  }
+  /** POST /v1/tasks/:id/pr { url } (url null or '' unlinks) */
+  linkPr(id, body) {
+    if (!isObj(body)) throw bad('body must be an object');
+    const t = this.taskForGit(id);
+    const cur = this.branchOf(t);
+    if (!cur) throw new HttpError(409, 'this task has no branch yet');
+    let pr = null;
+    if (body.url !== null && body.url !== '' && body.url !== undefined) {
+      if (!isStr(body.url)) throw bad('url must be a string');
+      const p = gf.parsePrUrl(body.url);
+      if (cur.github) {
+        const [o, r] = cur.github.split('/');
+        if (p.host !== 'github.com' && p.host !== 'www.github.com') throw bad(`expected a github.com pull request URL for ${cur.github}`);
+        if (!p.owner || p.owner.toLowerCase() !== o.toLowerCase() || p.repo.toLowerCase() !== r.toLowerCase()) throw bad(`that pull request is not in ${cur.github}`);
+      }
+      const keep = cur.pr && cur.pr.number === p.number && p.number != null ? cur.pr : null;
+      pr = { number: p.number, url: p.url, state: keep ? keep.state : 'open', merged: keep ? keep.merged : false };
+    } else if (body.url === undefined) throw bad('url is required (null unlinks)');
+    const next = this.tx(() => this.command('hub.task.branch', { taskId: id, patch: { pr } }, this.now()));
+    this.gitSync.per.delete(id);
+    return { task: next, branch: next.branch };
+  }
+  /** DELETE /v1/tasks/:id/branch?deleteBranch=1&force=1: remove the worktree, optionally the local branch. Remote branches are never touched. */
+  deleteBranch(id, { deleteBranch = false, force = false } = {}) {
+    return this.gitLock(id, async () => {
+      const t = this.taskForGit(id);
+      const cur = this.branchOf(t);
+      if (!cur) throw new HttpError(409, 'this task has no branch');
+      const at = this.now();
+      let r;
+      try {
+        r = await gf.cleanupBranch({ record: cur, home: this.cfg.home, deleteBranch, force });
+      } catch (e) {
+        if (e.extra && e.extra.worktreeRemoved && !this.closed) this.tx(() => this.command('hub.task.branch', { taskId: id, patch: { worktree: null } }, at));
+        throw e;
+      }
+      if (this.closed) return null;
+      const next = this.tx(() => (r.branchDeleted
+        ? this.command('hub.task.branch', { taskId: id, branch: null }, at)
+        : this.command('hub.task.branch', { taskId: id, patch: { worktree: null } }, at)));
+      this.gitSync.per.delete(id);
+      return { task: next, branchDeleted: r.branchDeleted };
+    });
+  }
+  /** POST /v1/tasks/:id/ci/refresh: poll GitHub for this branch now. */
+  async refreshCi(id) {
+    const t = this.taskForGit(id);
+    const cur = this.branchOf(t);
+    if (!cur || !cur.pushedAt) throw new HttpError(409, 'this task has no pushed branch');
+    if (!cur.github) throw new HttpError(409, 'CI status is only read for GitHub remotes');
+    await this.gitSync.refresh(id);
+    return { task: toTask(this.p.getTask(id)) };
   }
 
   /** Apply inside a savepoint: a poisoned event keeps its seq but cannot break the batch. */

@@ -432,3 +432,20 @@ export async function controlRun(runId, action) {
 export async function controlNode(runId, nodeId, action) {
   try { return takeRun(await api.nodeControl(runId, nodeId, action)); } catch (e) { toastError(e, `Could not ${action} the step`); return null; }
 }
+
+/* ---------- v0.12: a git branch + PR per task ---------- */
+// Every call resolves the hub's answer (or null after a toast). The pushed task row replaces the one in the store.
+async function gitCall(label, fn) {
+  try {
+    const r = await fn();
+    if (r && r.task) upsert('task', r.task);
+    return r;
+  } catch (e) { toastError(e, label); return null; }
+}
+export const createBranch = (id) => gitCall('Could not create the branch', () => api.createBranch(id));
+export const updateBranch = (id) => gitCall('Could not update the branch', () => api.updateBranch(id));
+/** Only ever called from the confirm dialog (a click on "Push branch"): the hub refuses without confirm: true. */
+export const pushBranch = (id, remote) => gitCall('Push failed', () => api.pushBranch(id, remote));
+export const linkPr = (id, url) => gitCall('Could not link the PR', () => api.linkPr(id, url));
+export const cleanBranch = (id, opts) => gitCall('Could not clean up', () => api.deleteBranch(id, opts));
+export const refreshCi = (id) => gitCall('Could not refresh CI', () => api.refreshCi(id));

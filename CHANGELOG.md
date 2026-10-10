@@ -4,6 +4,12 @@ All notable changes to Helm are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/). Shapes and endpoints are defined in `CONTRACT.md`.
 
+## [0.17.0] - 2026-10-10
+
+### Added
+
+- A git branch and PR per task (`CONTRACT.md` v0.12): "Create branch" makes `helm/T-n-slug` in a separate worktree under `$HELM_HOME/worktrees` with only the task's files (your working tree and branch are never touched), "Update branch" adds commits, "Push & open PR…" pushes behind a confirm dialog naming the remote and branch and links a GitHub compare page, a pasted PR link (or the hub, for public repos) becomes a PR chip, and unauthenticated GitHub polling shows CI badges on the task and a branch glyph with a CI dot on the card. `needsYou` gains "CI failed". No tokens: pushes use your own credentials. Hub: `Task.branch`, `hub.task.branch` / `hub.task.ci` events, `hub/gitflow.mjs`, `hub/gitsync.mjs`.
+
 ## [0.16.0] - 2026-10-10
 
 ### Added

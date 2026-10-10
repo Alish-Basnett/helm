@@ -20,6 +20,7 @@ import { bindDraft, clearDraft, getDraft } from '../drafts.js';
 import { codeOn, getPref, onPrefs } from '../prefs.js';
 import { codeEditor, blockView, renderDescription } from '../code.js';
 import { openTemplateEditor } from '../templates.js';
+import { createGitPanel } from '../gitpanel.js';
 
 const AGENT_STATUS = { running: 'Running', done: 'Done', failed: 'Failed', stalled: 'Stalled', waiting: 'Waiting for you' };
 
@@ -38,6 +39,7 @@ export function createSheet(dock) {
     ctx.timeline = null;
     ctx.replay && ctx.replay.destroy();
     ctx.files && ctx.files.destroy();
+    ctx.git && ctx.git.destroy();
     ctx.prestart && ctx.prestart.destroy();
     ctx = null;
     sheet.textContent = '';
@@ -99,6 +101,8 @@ export function createSheet(dock) {
     c.recapWrap = h('section', { class: 'sheet-section' }, h('h3', { class: 'section-title' }, icon('sparkle', 14), 'Recap'), c.recapBody, c.explain.el);
     // files (collapsed rows -> git diff)
     c.files = createFilesChanged({ getTask: () => state.tasks.get(id) || null, onOpen: (t, f) => setDiff(f.rel || f.path) });
+    // v0.12: branch, push, PR and CI
+    c.git = createGitPanel({ getTask: () => state.tasks.get(id) || null });
     // deps
     c.depsList = h('div', { class: 'dep-chips' });
     c.depAdd = h('select', { class: 'select select-sm', 'aria-label': 'Add dependency', onchange: () => addDep() });
@@ -126,7 +130,7 @@ export function createSheet(dock) {
     const body = h('div', { class: 'sheet-body' },
       c.choices.el, c.blocked, c.startStatus.el, c.prestart.el,
       h('section', { class: 'sheet-section status-row' }, h('label', { class: 'field-label' }, 'Status', c.select), c.quick),
-      c.agentWrap, c.conflictsWrap, c.descWrap, c.recapWrap, c.files.el, c.depsWrap, c.tlWrap);
+      c.agentWrap, c.conflictsWrap, c.descWrap, c.recapWrap, c.files.el, c.git.el, c.depsWrap, c.tlWrap);
     sheet.append(head, body);
     return c;
   }
@@ -283,6 +287,7 @@ export function createSheet(dock) {
 
     // files + diffs
     c.files.update(t);
+    c.git.update(t);
     updateChatBtn(t);
 
     // deps

@@ -65,7 +65,8 @@ CREATE TABLE IF NOT EXISTS tasks (
   explain_job TEXT,                       -- v0.2: JSON { id, state } of the latest explain job
   start_note_id TEXT,                     -- v0.3: the latest Start note
   git TEXT,                               -- v0.5: JSON { root, base, head, at } recorded at spawn (first base wins)
-  diff_stat TEXT                          -- v0.5: JSON { files, additions, deletions } from the latest snapshot / live diff
+  diff_stat TEXT,                         -- v0.5: JSON { files, additions, deletions } from the latest snapshot / live diff
+  branch TEXT                             -- v0.12: JSON Task.branch (git branch / PR / CI), from hub.task.branch + hub.task.ci
 );
 CREATE INDEX IF NOT EXISTS tasks_project ON tasks(project_id, status);
 CREATE INDEX IF NOT EXISTS tasks_session ON tasks(session_id);
@@ -266,6 +267,8 @@ export class Db {
     // v0.11: the templates table comes from SCHEMA (CREATE TABLE IF NOT EXISTS), so a live database gains it on open, empty.
     // Back-filling is `helmd --rebuild` (no old events mention templates, so nothing is lost either way).
     this.raw.exec('CREATE INDEX IF NOT EXISTS templates_project ON templates(project_id)');
+    // v0.12: Task.branch. Additive + nullable, safe on a live database (no old events mention branches, so nothing to back-fill).
+    if (!has('tasks', 'branch')) this.raw.exec('ALTER TABLE tasks ADD COLUMN branch TEXT');
   }
   prep(sql) {
     let s = this.cache.get(sql);

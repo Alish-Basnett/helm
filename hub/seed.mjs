@@ -632,6 +632,8 @@ export function seedGitRepo(home) {
     { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 10_000 });
   const put = (rel, text) => { fs.mkdirSync(path.dirname(path.join(dir, rel)), { recursive: true }); fs.writeFileSync(path.join(dir, rel), text); };
   try { git('init', '-q'); } catch { return null; }
+  // a local identity, so the demo's "Create branch" can commit on a machine that has no global one
+  git('config', 'user.email', 'demo@helm.local'); git('config', 'user.name', 'Helm Demo'); git('config', 'commit.gpgsign', 'false');
   put('README.md', '# meridian-api (demo)\n');
   put('src/auth/tokens.ts', [
     "import { sign, verify } from './jwt';", '',

@@ -689,6 +689,42 @@ type TaskTemplate = {
 - Board composer: a Templates button opens a searchable popover (most used, then most recent); blanks are asked inline, then Create or Create & start (a template without blanks has both buttons on its row).
 - `#/templates` (sidebar, under Learn): list, edit, duplicate, archive/restore, usage counts. Spotlight: `>template` (command "Start from template…") and template names in normal search.
 
+## v0.12 additions — a git branch and PR per task
+
+Brief: "Branch per task, open a PR from the task panel, link CI status back to the card." Helm never touches your working tree or current branch, never pushes without an explicit click plus a confirm dialog naming the remote and branch, and handles no tokens (pushes use your own credential helper / ssh agent; the PR is opened in your browser or pasted back).
+
+### Row
+`Task.branch: { name, root, worktree, commit, base, remote, pushedAt, prUrl, pr, ci, ... } | null` (`null` until created).
+- `name` `helm/T-<n>-<slug>` (slug: lower-case title, `[a-z0-9-]`, max 40). `root` real path of the repo top level. `worktree` `$HELM_HOME/worktrees/T-<n>` (null after a clean-up that kept the branch). `commit` the branch tip. `base` = `Task.git.head` (the HEAD at spawn, not the stash commit `Task.git.base`).
+- `remote` remote name, `pushedAt`, `prUrl` = GitHub compare URL (null for other hosts), `pr: { number, url, state: 'open'|'closed', merged } | null`.
+- `ci: { state: 'pending'|'success'|'failure'|'none', checks: [{ name, status, conclusion, url }], updatedAt } | { state: 'unknown', reason, updatedAt } | null`.
+- Extra fields: `remoteUrl` (credentials stripped), `github` (`owner/repo` or null), `pushedCommit` (what the remote has; `commit !== pushedCommit` = unpushed commits), `files` (repo-relative paths committed), `createdAt`, `updatedAt`.
+
+### Endpoints
+- `GET /v1/tasks/:id/git` -> `{ taskId, eligible, reason, root, base, files, remotes: [{ name, url, pushUrl?, host, github, owner, repo }], branch }` (preview + the push dialog's data; URLs never carry credentials).
+- `POST /v1/tasks/:id/branch` -> `{ task, branch, warnings }`. Needs `Task.git` and `filesChanged`. `git worktree add --detach <worktree> <git.head>` in `root`, `git checkout -b <name>` there, then **only the task's files** are copied from the working tree into the worktree (a file deleted in the working tree is `git rm`'d; files outside the repo, symlinks and gitignored files are skipped with a warning), committed with `T-n: <title>` and a body of the recap What / How plus "From Helm". The repo's own git identity is used (nothing is overridden), no co-author trailers, `--no-verify`, hooks off for these local steps. `409` when a branch exists already (use update), when nothing differs from the base, when the branch name exists in the repo, or git cannot commit (identity missing). A failed attempt removes its worktree and branch again.
+  Warnings (the operation continues): a file modified after `doneAt` (mtime), a file that differs from the frozen diff snapshot, a file that already had uncommitted edits when the task started (so the commit includes them).
+- `POST /v1/tasks/:id/branch/update` -> `{ task, branch, warnings, unchanged }`. Re-copies the files (re-adding the worktree when a clean-up removed it) and adds a commit `T-n: <title> (update)`; `unchanged: true` and no commit when nothing differs. Resets `ci` (the new tip is not pushed).
+- `POST /v1/tasks/:id/push { remote?, confirm: true }` -> `{ task, branch, compareUrl }`. `400` without `confirm: true`. Runs `git push -u <remote|origin> <branch>` from the worktree (60 s timeout, never forced, the user's own hooks and credentials apply). For GitHub remotes (https, ssh, scp-style) `prUrl = https://github.com/<o>/<r>/compare/<default>...<branch>?expand=1`, default branch from `git symbolic-ref refs/remotes/<remote>/HEAD`, else `main`, else `master`. Other hosts: pushed, `prUrl: null`. `502` with git's message on failure (credentials redacted).
+- `POST /v1/tasks/:id/pr { url }` -> `{ task, branch }`. Links a pasted PR URL (`pr.state 'open'` until the poller says otherwise); for a GitHub branch the URL must be that repo's `/pull/<n>`. `url: null` unlinks.
+- `DELETE /v1/tasks/:id/branch?deleteBranch=1&force=1` -> `{ task, branchDeleted }`. `git worktree remove` (and `branch -d`, or `-D` with `force`). Without `deleteBranch` the record stays with `worktree: null`. Remote branches are never deleted.
+- `POST /v1/tasks/:id/ci/refresh` -> `{ task }`: poll GitHub for this branch now (clears `unknown`).
+
+### Safety
+`execFile` only (no shell), per-call timeouts (20 s local, 60 s push), `GIT_DIR`/`GIT_WORK_TREE`/`GIT_INDEX_FILE` removed from the environment, literal pathspecs, `GIT_TERMINAL_PROMPT=0`. The repo `root` is real-path checked to be a git top level; the worktree must resolve under `$HELM_HOME/worktrees` before any command touches it; copies are real-path checked on both ends. One git operation per task at a time (`409` otherwise).
+
+### GitHub polling (hub timer, unauthenticated, public repos)
+While a GitHub branch is pushed: `GET /repos/<o>/<r>/pulls?head=<owner>:<branch>&state=all` every 2 min until a PR is found (then `GET /pulls/<n>` every 10 min until merged or closed), and `GET /repos/<o>/<r>/commits/<pushedCommit>/check-runs` every 2 min until `success` or `failure` (`none` is given up on after 15 min). `fetch` with a 10 s timeout and `User-Agent: helm-local`. `403`/`429` back the whole poller off (5 min doubling to 60 min, honouring Retry-After / X-RateLimit-Reset) and change nothing. `404`/`401` (private repo) or three network failures in a row record `ci = { state: 'unknown', reason }` and stop polling that branch. Unchanged results are not re-recorded.
+
+### Events (replayed by rebuild; the log carries every decision, replay never touches git or the network)
+`hub.task.branch { taskId, branch }` replaces `Task.branch` (null clears it); `hub.task.branch { taskId, patch }` merges fields (push result, PR, worktree); `hub.task.ci { taskId, ci }` sets `Task.branch.ci`. Migration: `tasks.branch TEXT` (additive, nullable). Config: `gitPollMs` / `HELM_GIT_POLL_MS` (default 30 s; each branch keeps its own 2 min schedule).
+
+### Web
+- **Git section** in Task details and in the Review pane. Before branching: "Create branch" with the name to be used, the base commit and the files. After: branch name (copy), commit, state (local only / unpushed commits / pushed), "Update branch", "Push & open PR…", "Clean up…".
+- **Push dialog**: the exact remote URL (and the push URL when it differs), branch, commit and files, a remote picker when there are several, "Push branch" / Cancel. After the push: "Open PR on GitHub" (the compare URL, new tab) and a "Paste PR link" field; other hosts just say pushed.
+- **Linked**: a PR chip (`#123 open|merged|closed`, links out) and CI badges: a summary plus one chip per check, each linking to its check URL; `unknown` shows the reason and a retry button.
+- **Board card**: a tiny branch glyph with a CI dot (green passing, red failing, amber running). `needsYou` adds "CI failed" for `ci.state === 'failure'`.
+
 ## Review queue (web only; no hub change)
 - `#/review[/T-n]`: tasks with `status: 'review'` in the project scope, ordered by when their agent finished (`Agent.endedAt`, else `Task.updatedAt`), oldest first by default.
 - Approve = `PATCH /v1/tasks/:id { status: 'done' }` (a workflow gate card uses `POST /v1/runs/:id/gates/:node` instead). Later = `{ status: 'later' }`.

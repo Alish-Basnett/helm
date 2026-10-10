@@ -59,7 +59,7 @@ export const toTask = (r) => ({
   conflicts: parse(r.conflicts, []), explainer: r.explainer ?? null, explainJob: parse(r.explain_job, null),
   startNoteId: r.start_note_id ?? null, git: parse(r.git, null), diffStat: parse(r.diff_stat, null),
   choices: parse(r.choices, []), parentTaskId: r.parent_task_id ?? null, autoStartedAt: r.auto_started_at ?? null,
-  runId: r.run_id ?? null, nodeId: r.node_id ?? null,
+  runId: r.run_id ?? null, nodeId: r.node_id ?? null, branch: parse(r.branch, null),
 });
 export const toNote = (r) => ({
   id: r.id, target: { kind: r.target_kind, id: r.target_id }, sessionId: r.session_id, text: r.text,
@@ -554,6 +554,8 @@ export class Projector {
       case 'hub.sweep': return this.hSweep(ev);
       case 'hub.task.diff': return this.hTaskDiff(ev);
       case 'hub.task.diffstat': return this.hTaskDiffStat(ev);
+      case 'hub.task.branch': return this.hTaskBranch(ev);
+      case 'hub.task.ci': return this.hTaskCi(ev);
       case 'task.choices': return this.onTaskChoices(ev);
       case 'hub.task.choices': return this.hTaskChoices(ev);
       case 'hub.template.create': case 'hub.template.update': case 'hub.template.used': return applyTemplate(this, ev);
@@ -719,6 +721,36 @@ export class Projector {
     if (!t) throw new Error('task not found');
     this.upd('tasks', taskId, { diff_stat: JSON.stringify(statOf({ totals: diffStat })) });
     this.pushTask(taskId);
+  }
+  /**
+   * hub.task.branch (v0.12): { taskId, branch } replaces Task.branch (null clears it); { taskId, patch } merges fields into it.
+   * Everything the hub decided (names, commits, urls, times) is carried in the event, so replay never touches git or the network.
+   */
+  hTaskBranch(ev) {
+    const { taskId } = ev.data;
+    const t = this.getTask(taskId);
+    if (!t) throw new Error('task not found');
+    let next;
+    if (ev.data.branch !== undefined) next = ev.data.branch;
+    else {
+      const cur = parse(t.branch, null);
+      if (!cur) throw new Error('task has no branch');
+      next = { ...cur, ...ev.data.patch };
+    }
+    this.upd('tasks', taskId, { branch: next ? JSON.stringify(next) : null });
+    this.pushTask(taskId);
+    return toTask(this.getTask(taskId));
+  }
+  /** hub.task.ci (v0.12): { taskId, ci } sets Task.branch.ci. Ignored when the branch is gone (a late poll result). */
+  hTaskCi(ev) {
+    const { taskId, ci } = ev.data;
+    const t = this.getTask(taskId);
+    if (!t) throw new Error('task not found');
+    const cur = parse(t.branch, null);
+    if (!cur) return null;
+    this.upd('tasks', taskId, { branch: JSON.stringify({ ...cur, ci: ci ?? null }) });
+    this.pushTask(taskId);
+    return toTask(this.getTask(taskId));
   }
   onToolCalled(ev) {
     const d = ev.data, sid = ev.sessionId, at = ev.at;

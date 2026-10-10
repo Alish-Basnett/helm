@@ -250,7 +250,7 @@ document.addEventListener('keydown', (e) => {
   if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey && (e.key === '.' || e.code === 'Period')) { e.preventDefault(); shelf.toggleAll(); return; }
   const tag = (e.target && e.target.tagName) || '';
   const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(tag) || (e.target && e.target.isContentEditable);
-  if (typing || e.metaKey || e.ctrlKey || e.altKey || spotlight.isOpen) return;
+  if (typing || e.metaKey || e.ctrlKey || e.altKey || spotlight.isOpen || document.querySelector('.git-scrim')) return;
   if (e.key === '/') { e.preventDefault(); spotlight.open(); }
   else if (e.key === 'n') { e.preventDefault(); newTask(); }
   else if (e.key === 't') { e.preventDefault(); talk.toggle(); }
