@@ -40,16 +40,22 @@ export class Hub {
     this.autoSnapshot = true;       // snapshot a task's diff when its agent completes (the seed switches this off)
     this.snapshots = new Set();     // in-flight snapshot promises (see flushSnapshots)
     this.closed = false;
+    this.inAuto = false;            // re-entrancy guard for autoTick (also held during rebuild)
+    this.lastAuto = [];             // task ids the most recent autoTick started
   }
   now() { return this.clock(); }
   setClock(fn) { this.clock = fn; }
 
   // ------------------------------------------------------------ plumbing
   tx(fn) {
-    return this.db.transaction(fn, {
+    const outer = this.db.depth === 0;
+    const r = this.db.transaction(fn, {
       onCommit: () => this.afterCommit(),
       onRollback: () => { this.p.dirty = false; },
     });
+    // v0.7: every committed ingest / command may free the project's slot, so re-evaluate auto mode.
+    if (outer) this.autoTick();
+    return r;
   }
   seqNow() {
     const r = this.db.get("SELECT seq FROM sqlite_sequence WHERE name = 'changes'");
@@ -235,6 +241,11 @@ export class Hub {
   rebuild() {
     const t0 = Date.now();
     let replayed = 0;
+    this.inAuto = true; // replay must never emit new events
+    try { this.rebuildInner(() => replayed++); } finally { this.inAuto = false; }
+    return { replayed, ms: Date.now() - t0 };
+  }
+  rebuildInner(count) {
     this.tx(() => {
       const floor = this.seqNow() + 1;
       for (const t of [...TABLES, 'search_docs', 'changes', 'counters']) this.db.run(`DELETE FROM ${t}`);
@@ -250,17 +261,73 @@ export class Hub {
           try { data = JSON.parse(r.data); } catch { /* keep {} */ }
           this.applySafely({ sessionId: r.session_id, seq: r.seq, type: r.type, at: r.at, data });
           last = r.id;
-          replayed++;
+          count();
         }
       }
       this.db.run('DELETE FROM changes WHERE seq <= ?', this.seqNow() - this.cfg.keepChanges);
     });
     this.lastPushed = this.seqNow();
-    return { replayed, ms: Date.now() - t0 };
+  }
+
+  // ------------------------------------------------------- auto mode (v0.7)
+  /**
+   * Start the top Up next task of every project with autoStart on and nothing in progress. The decision (task, session,
+   * note text) is made here and carried in the hub.task.autostart event, so replay never re-decides. Returns started ids.
+   */
+  autoTick(now = this.now()) {
+    if (this.inAuto || this.closed) return [];
+    this.inAuto = true;
+    const started = [];
+    try {
+      const ids = this.db.all('SELECT id FROM projects WHERE auto_start = 1 AND archived = 0 ORDER BY rowid').map((r) => r.id);
+      for (const id of ids) {
+        const plan = this.autoPlan(id, now);
+        if (!plan) continue;
+        this.tx(() => this.command('hub.task.autostart', plan, now));
+        started.push(plan.taskId);
+      }
+    } catch (e) {
+      this.log?.error('auto-start failed', e);
+    } finally {
+      this.inAuto = false;
+    }
+    this.lastAuto = started;
+    return started;
+  }
+  /** The next auto-start for a project, or null. See CONTRACT v0.7 for the rule. */
+  autoPlan(projectId, now) {
+    const { autoStartingMs, autoBackoffMs, sendingMs } = this.cfg;
+    if (this.db.get(`SELECT 1 AS x FROM tasks WHERE project_id = ? AND status = 'in_progress' LIMIT 1`, projectId)) return null;
+    const next = this.db.all(
+      `SELECT * FROM tasks WHERE project_id = ? AND status = 'next' ORDER BY ord, created_at, rowid`, projectId);
+    if (!next.length) return null;
+    for (const t of next) {
+      const n = t.start_note_id ? this.p.getNote(t.start_note_id) : null;
+      if (!n || n.state === 'failed') continue;
+      if (n.state === 'queued' || n.state === 'sending') return null;   // a start is in flight
+      if (now - n.created_at < autoStartingMs) return null;              // delivered, agent not up yet
+    }
+    const top = next[0];
+    const n = top.start_note_id ? this.p.getNote(top.start_note_id) : null;
+    if (n && n.state === 'failed') {
+      const failedAt = n.ran_at ?? (n.sending_at ? n.sending_at + sendingMs : n.queued_at ?? n.created_at);
+      if (now - failedAt < autoBackoffMs) return null;
+    }
+    let plan;
+    try { plan = this.startPlan(top); } catch (e) {
+      if (e instanceof HttpError) return null;  // no live session: retry when one appears
+      throw e;
+    }
+    return { taskId: top.id, sessionId: plan.sessionId, text: plan.text, reason: 'nothing in progress' };
   }
 
   // ---------------------------------------------------------------- sweep
   sweep(now = this.now()) {
+    const r = this.sweepCore(now);
+    this.autoTick(now); // backoff / starting windows expire with time, not with an event
+    return r;
+  }
+  sweepCore(now) {
     const { stallMs, blockMs, idleMs, sendingMs, jobMs } = this.cfg;
     const stall = this.db.all(
       `SELECT id FROM agents WHERE status = 'running' AND last_activity_at < ? ORDER BY rowid`, now - stallMs).map((r) => r.id);
@@ -406,7 +473,13 @@ export class Hub {
       if (typeof body.archived !== 'boolean') throw bad('archived must be a boolean');
       data.archived = body.archived;
     }
-    return this.tx(() => ({ project: this.command('hub.project.update', data, at) }));
+    if (body?.autoStart !== undefined) {
+      if (typeof body.autoStart !== 'boolean') throw bad('autoStart must be a boolean');
+      data.autoStart = body.autoStart;
+    }
+    this.lastAuto = [];
+    const project = this.tx(() => this.command('hub.project.update', data, at));
+    return { project: this.p.getProject(id) ? toProject(this.p.getProject(id)) : project, autoStarted: this.lastAuto.slice() };
   }
   joinSession(sessionId, body, at = this.now()) {
     if (!this.p.getSession(sessionId)) throw notFound('session not found');

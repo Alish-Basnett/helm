@@ -2,10 +2,10 @@
 import { h, reconcile, setText, setClass, setHidden, setAttr, bus, startTicker } from '../dom.js';
 import { icon } from '../icons.js';
 import { state, sel, lsGet, lsSet, setUI } from '../store.js';
-import { patchTask, createTask, quickActions, runQuickAction, startTask, canStart } from '../actions.js';
+import { patchTask, createTask, quickActions, runQuickAction, startTask, canStart, setAutoStart, autoTarget } from '../actions.js';
 import { createStartStatus } from '../replies.js';
 import { fmtElapsed, fmtTokens, truncate, agentLabel, STATUS_META, MAIN_COLUMNS, LANES, plural } from '../format.js';
-import { avatar, updateAvatar, modelBadge, updateModelBadge, nowDoingLine, statusDot, toast } from '../ui.js';
+import { avatar, updateAvatar, modelBadge, updateModelBadge, nowDoingLine, statusDot, toast, openMenu } from '../ui.js';
 import { openTask, navigate } from '../router.js';
 
 const DONE_LIMIT = 30;
@@ -20,6 +20,7 @@ export function mount(container) {
   let doneExpanded = false;
   let onlyNeeds = lsGet('helm.board.needsMe') === '1';
   const cols = {}; // status -> {el, body, count, composer, ...}
+  let nextUpIds = new Set(); // v0.7: the top Up next card of every project that is on Auto
 
   startTicker();
 
@@ -51,7 +52,57 @@ export function mount(container) {
       composer.el, body, more);
     wireDrop(body);
     cols[status] = { el, body, count, need, composer, more };
+    if (status === 'next') attachAutoControls(cols[status]);
     return el;
+  }
+
+  /** v0.7: Manual | Auto switch in the Up next header (a project popover in All projects) plus the hint line. */
+  function attachAutoControls(c) {
+    const manual = h('button', { class: 'auto-seg-btn', type: 'button', 'data-mode': 'manual', onclick: () => setMode(false) }, 'Manual');
+    const auto = h('button', { class: 'auto-seg-btn', type: 'button', 'data-mode': 'auto', onclick: () => setMode(true) }, 'Auto');
+    const glyph = h('span', { class: 'auto-glyph', 'aria-hidden': 'true', hidden: true, title: 'Auto mode is on' }, '⟳');
+    const seg = h('div', { class: 'auto-seg', role: 'group', 'aria-label': 'Up next mode' }, manual, auto);
+    const pick = h('button', { class: 'auto-pick', type: 'button', 'aria-haspopup': 'menu', title: 'Choose which projects start their Up next automatically',
+      onclick: () => openMenu(pick, sel.projects().map((p) => ({
+        label: p.name, sub: p.autoStart ? 'Auto' : 'Manual', active: !!p.autoStart, icon: p.autoStart ? 'play' : undefined,
+        onSelect: () => setAutoStart(p.id, !p.autoStart),
+      })), { minWidth: 240 }) }, h('span', {}, 'Auto'), h('span', { class: 'auto-pick-n mono' }));
+    const wrap = h('div', { class: 'auto-ctl' }, glyph, seg, pick);
+    const hint = h('div', { class: 'auto-hint', hidden: true }, 'Auto: next task starts when nothing is in progress');
+    const head = c.el.querySelector('.col-head');
+    head.insertBefore(wrap, head.querySelector('.icon-btn'));
+    c.el.insertBefore(hint, c.body);
+    function setMode(on) { const t = autoTarget(); if (t) setAutoStart(t.id, on); }
+    c.auto = { wrap, manual, auto, glyph, seg, pick, hint };
+  }
+  function renderAutoControls() {
+    const c = cols.next && cols.next.auto;
+    if (!c) return;
+    const ps = sel.projects();
+    const target = autoTarget();
+    const anyOn = ps.some((p) => p.autoStart);
+    setHidden(c.wrap, ps.length === 0);
+    setHidden(c.seg, !target);
+    setHidden(c.pick, !!target);
+    if (target) {
+      setClass(c.auto, 'on', !!target.autoStart); setClass(c.manual, 'on', !target.autoStart);
+      c.auto.setAttribute('aria-pressed', String(!!target.autoStart)); c.manual.setAttribute('aria-pressed', String(!target.autoStart));
+    } else {
+      const n = ps.filter((p) => p.autoStart).length;
+      setText(c.pick.lastChild, n ? `${n}/${ps.length}` : '');
+      setClass(c.pick, 'on', n > 0);
+    }
+    setHidden(c.glyph, !(target ? target.autoStart : anyOn));
+    setHidden(c.hint, !(target ? target.autoStart : anyOn));
+    // the card the hub will start next, per project on Auto
+    const tops = new Map();
+    for (const t of sel.scopedTasks()) {
+      const p = state.projects.get(t.projectId);
+      if (t.status !== 'next' || !p || !p.autoStart || String(t.id).startsWith('tmp-')) continue;
+      const cur = tops.get(t.projectId);
+      if (!cur || cmp(t, cur) < 0) tops.set(t.projectId, t);
+    }
+    nextUpIds = new Set(Array.from(tops.values(), (t) => t.id));
   }
 
   function buildLane(status) {
@@ -156,13 +207,14 @@ export function mount(container) {
     r.files = h('span', { class: 'meta-item' }, icon('file', 13), h('span', { class: 'mono' }));
     r.dep = h('span', { class: 'dep-badge mono' }, icon('link', 12), h('span', {}));
     r.meta = h('div', { class: 'card-meta' }, r.elapsed, r.tokens, r.files, r.dep);
+    r.nextUp = h('span', { class: 'next-up-chip', hidden: true, title: 'Auto mode starts this task next, once nothing is in progress' }, h('span', { 'aria-hidden': 'true' }, '⟳'), h('span', {}, 'Next up'));
     r.choices = h('button', { class: 'choices-chip', type: 'button', hidden: true }, h('span', { 'aria-hidden': 'true' }, '◆'), h('span', {}));
     r.choices.addEventListener('click', (e) => { e.stopPropagation(); openTask(r.choices.__task); });
     r.need = h('span', { class: 'need-pill', hidden: true }, h('span', { class: 'need-pill-dot', 'aria-hidden': 'true' }), h('span', {}));
     r.start = createStartStatus();
     r.actions = h('div', { class: 'card-actions' });
     const el = h('article', { class: 'card', tabindex: '0', draggable: 'true', 'data-id': t.id, role: 'group' },
-      r.actions, r.need, r.title, h('div', { class: 'card-sub' }, r.id, r.proj, r.conflict, r.choices), r.agent, r.blocked, r.start.el, r.meta);
+      r.actions, r.need, r.title, h('div', { class: 'card-sub' }, r.id, r.proj, r.conflict, r.choices, r.nextUp), r.agent, r.blocked, r.start.el, r.meta);
     el.__r = r;
     el.__animate = !!animate;
     el.__needs = null; // unknown until first update; a card created already waiting pulses once when the board has rendered before
@@ -229,6 +281,7 @@ export function mount(container) {
       setText(r.conflict.lastChild, plural(conflicts.length, 'file'));
       r.conflict.title = conflicts.map((c) => `${c.path} → ${c.otherTaskId || 'another agent'}`).join('\n');
     }
+    setHidden(r.nextUp, !(t.status === 'next' && nextUpIds.has(t.id)));
     const nChoices = sel.openChoiceCount(t);
     setHidden(r.choices, nChoices === 0);
     if (nChoices) {
@@ -401,6 +454,7 @@ export function mount(container) {
   function render() {
     if (dragId) { needsRender = true; return; }
     needsRender = false;
+    renderAutoControls();
     const tasks = sel.scopedTasks();
     const byStatus = {};
     for (const t of tasks) (byStatus[t.status] ||= []).push(t);

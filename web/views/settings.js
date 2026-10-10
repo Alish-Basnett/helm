@@ -1,11 +1,13 @@
 // views/settings.js — Settings: Appearance (theme, accent, text size, density), Talk & chat (code mode + style), About.
 // Every control writes through prefs.js, which applies it to <html> instantly and persists it.
-import { h, setText, startTicker } from '../dom.js';
+import { h, s as svg, setText, startTicker } from '../dom.js';
 import { icon } from '../icons.js';
 import { OPTIONS, getPref, setPref, onPrefs, resetAppearance, codeOn } from '../prefs.js';
 import { createCodeTurn } from '../code.js';
 import { createReply } from '../replies.js';
 import { setLinked } from '../tasklinks.js';
+import { toast, toastError } from '../ui.js';
+import { qrPath } from '../qr.js';
 
 const REPO = 'https://github.com/Alish-Basnett/helm';
 const LABELS = {
@@ -88,6 +90,88 @@ export function mount(container) {
   }
   syncs.push(paintPreview);
 
+  /* ----- Phone access: opt-in, token-protected LAN listener (see CONTRACT.md "Phone access") ----- */
+  const WARN = 'Anyone with this link on your network can add tasks and message your sessions.';
+  const phone = { status: null, busy: false, error: '', which: 0 };
+  const ptgl = h('button', {
+    class: 'tgl', type: 'button', role: 'switch', id: 'set-phone', 'aria-label': 'Phone access', disabled: true,
+    onclick: () => togglePhone(),
+  }, h('span', { class: 'tgl-knob' }));
+  const phoneBody = h('div', { class: 'phone-body', hidden: true });
+  const phoneErr = h('div', { class: 'phone-err', role: 'alert', hidden: true });
+  async function phoneCall(method, body) {
+    const res = await fetch('/v1/remote', {
+      method, cache: 'no-store',
+      headers: body ? { 'content-type': 'application/json' } : {}, body: body ? JSON.stringify(body) : undefined,
+    });
+    let j = null;
+    try { j = await res.json(); } catch { j = null; }
+    if (!res.ok) { const e = new Error((j && j.error) || `Request failed (${res.status})`); e.status = res.status; throw e; }
+    return j;
+  }
+  async function copyLink(text) {
+    let ok = false;
+    try { if (navigator.clipboard && navigator.clipboard.writeText) { await navigator.clipboard.writeText(text); ok = true; } } catch { /* fall through */ }
+    if (!ok) {
+      try {
+        const ta = h('textarea', { style: { position: 'fixed', opacity: '0' }, 'aria-hidden': 'true' });
+        ta.value = text; document.body.append(ta); ta.select();
+        ok = typeof document.execCommand === 'function' && document.execCommand('copy');
+        ta.remove();
+      } catch { ok = false; }
+    }
+    if (ok) toast('Phone link copied'); else toast('Could not copy: select the link and copy it', { kind: 'error' });
+  }
+  function paintPhone() {
+    const st = phone.status;
+    const on = !!(st && st.enabled);
+    ptgl.setAttribute('aria-checked', String(on));
+    ptgl.disabled = phone.busy || !st;
+    phoneErr.hidden = !phone.error;
+    phoneErr.textContent = phone.error;
+    phoneBody.hidden = !on;
+    phoneBody.textContent = '';
+    if (!on) return;
+    const urls = st.urls || [];
+    const pick = urls[Math.min(phone.which, urls.length - 1)];
+    phoneBody.append(h('div', { class: 'phone-warn', role: 'note' }, icon('warning', 16), h('span', {}, WARN)));
+    if (!pick) {
+      phoneBody.append(h('div', { class: 'set-hint' }, 'No network address found for this Mac. Connect to Wi-Fi or Ethernet, then switch phone access off and on again.'));
+      return;
+    }
+    if (urls.length > 1) {
+      const sel = h('select', { class: 'phone-sel', 'aria-label': 'Network interface', onchange: () => { phone.which = Number(sel.value); paintPhone(); } },
+        urls.map((u, i) => h('option', { value: String(i), selected: i === phone.which ? true : null }, `${u.name} · ${u.address}`)));
+      phoneBody.append(h('div', { class: 'set-hint' }, 'This Mac has several addresses. Pick the one on the same Wi-Fi as your phone.'), sel);
+    }
+    const qr = qrPath(pick.url);
+    phoneBody.append(
+      h('div', { class: 'phone-url mono', id: 'phone-url', 'aria-label': 'Phone link' }, pick.url),
+      h('div', { class: 'phone-actions' },
+        h('button', { class: 'btn btn-quiet btn-sm', type: 'button', id: 'phone-copy', onclick: () => copyLink(pick.url) }, icon('copy', 14), 'Copy link'),
+        h('a', { class: 'link-btn', href: '/m', target: '_blank', rel: 'noopener' }, 'Open on this Mac')),
+      qr
+        ? h('div', { class: 'phone-qrbox' }, svg('svg', { class: 'phone-qr', viewBox: `0 0 ${qr.size} ${qr.size}`, role: 'img', 'aria-label': 'QR code for the phone link', 'shape-rendering': 'crispEdges' },
+          svg('rect', { width: qr.size, height: qr.size, fill: '#fff' }), svg('path', { d: qr.d, fill: '#000' })))
+        : h('div', { class: 'set-hint' }, 'This link is too long for a QR code here; type it into your phone\u2019s browser instead.'),
+      h('div', { class: 'set-hint' }, 'Scan with the phone camera while on the same Wi-Fi. Switching phone access off closes the port and makes this link stop working.'));
+  }
+  async function togglePhone() {
+    if (phone.busy || !phone.status) return;
+    const next = !phone.status.enabled;
+    phone.busy = true; phone.error = ''; paintPhone();
+    try {
+      phone.status = await phoneCall('POST', { enabled: next });
+      phone.which = 0;
+      toast(next ? 'Phone access is on' : 'Phone access is off. The old link no longer works.');
+    } catch (e) { phone.error = e.message; toastError(e, 'Phone access'); }
+    phone.busy = false; paintPhone();
+  }
+  phoneCall('GET').then((j) => { phone.status = j; paintPhone(); }).catch((e) => {
+    phone.error = e.status === 404 || e.status === 405 ? 'This hub is too old for phone access. Update the Helm hub.' : `Could not read phone access: ${e.message}`;
+    paintPhone();
+  });
+
   /* ----- About ----- */
   const ver = h('span', { class: 'mono' }, '…');
   fetch('/v1/health', { cache: 'no-store' }).then((r) => r.json()).then((j) => setText(ver, j && j.version ? `v${j.version}` : 'unknown')).catch(() => setText(ver, 'hub unreachable'));
@@ -107,6 +191,10 @@ export function mount(container) {
       row('Code mode', 'Makes Talk and Task chat look like source code from a distance: your messages become variables, replies become doc comments. Still easy to read and type in.', tgl, 'set-codemode'),
       row('Code mode style', 'Changes keywords and comment syntax.', seg('codestyle', 'Code mode style'), 'set-codestyle'),
       h('div', { class: 'set-previewbox' }, h('div', { class: 'set-hint set-prevlabel' }, icon('code', 14), 'Live preview'), preview)),
+    h('section', { class: 'set-card', 'aria-labelledby': 'set-h-phone' },
+      h('h2', { class: 'set-h', id: 'set-h-phone' }, 'Phone access'),
+      row('Phone access', 'Add tasks and notes from your phone on the same Wi-Fi. Off by default; protected by a secret link. Anyone with this link on your network can add tasks and message your sessions.', ptgl, 'set-phoneaccess'),
+      phoneErr, phoneBody),
     h('section', { class: 'set-card', 'aria-labelledby': 'set-h-about' },
       h('h2', { class: 'set-h', id: 'set-h-about' }, 'About'),
       row('Helm', 'Local hub version', ver, 'set-version'),

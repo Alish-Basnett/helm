@@ -14,7 +14,7 @@ import { createFloating, createBubble, loadFloat, saveFloat } from '../floating.
 import { cwdTail } from '../format.js';
 import { emptyState, modelBadge, updateModelBadge, toast } from '../ui.js';
 import { getPref, codeOn, onPrefs } from '../prefs.js';
-import { createCodeTurn, composerView } from '../code.js';
+import { createCodeTurn, composerView, codeEditor } from '../code.js';
 
 const STATE_LABEL = { draft: 'Draft', queued: 'Queued', sending: 'Sending…', ran: 'Delivered', failed: 'Failed' };
 
@@ -43,24 +43,16 @@ export function createTalk(opts) {
   const tray = createAttachTray({ onChange: () => setClass(composer, 'has-att', tray.count > 0) });
   const attachBtn = h('button', { class: 'icon-btn note-attach', type: 'button', 'aria-label': 'Attach files', title: 'Attach files (or drop / paste)', onclick: () => binding.pick() }, icon('paperclip', 18));
   // code mode: a highlighted layer sits under the (transparent-text) textarea, so typing is coloured live
-  const hl = h('pre', { class: 'cm-hl', 'aria-hidden': 'true' });
-  const inputWrap = h('div', { class: 'talk-inputwrap' }, hl, ta);
+  const editor = codeEditor(ta, { className: 'talk-inputwrap', view: (t, st, el) => composerView(t, st, el.getAttribute('placeholder') || '') });
+  const inputWrap = editor.el;
   const composer = h('div', { class: 'note-composer talk-composer' }, tray.el, inputWrap, attachBtn, send, hint, cheapHint);
   const el = h('section', { class: ['talk', isTask && 'task-chat', opts.inline && 'inline'], 'aria-label': isTask ? 'Task chat' : 'Talk' }, list, empty, composer);
   const binding = bindAttachInput({ box: el, ta, tray, disabled: () => ta.disabled });
 
   const nearEnd = () => list.scrollHeight - list.scrollTop - list.clientHeight < 80;
   const scrollToEnd = () => { list.scrollTop = list.scrollHeight; };
-  function syncCode() {
-    if (!codeOn()) { ta.style.textIndent = ''; return; }
-    const v = composerView(ta.value, getPref('codestyle'), ta.getAttribute('placeholder') || '');
-    hl.textContent = '';
-    hl.append(...v.nodes);
-    ta.style.textIndent = `${v.prefixLen}ch`;
-    hl.scrollTop = ta.scrollTop;
-  }
+  const syncCode = editor.sync;
   const autosize = () => { ta.style.height = 'auto'; ta.style.height = Math.min(ta.scrollHeight, 140) + 'px'; syncCode(); };
-  ta.addEventListener('scroll', () => { hl.scrollTop = ta.scrollTop; });
 
   async function submit(run) {
     const text = ta.value.trim();
@@ -167,7 +159,7 @@ export function createTalk(opts) {
   const offPrefs = onPrefs((k) => { if (k === 'code' || k === 'codestyle') applyMode(); });
   const off = subscribe((changed) => { if (changed.has('note') || changed.has('session') || changed.has('task')) render(); });
   requestAnimationFrame(scrollToEnd); // re-pin once the thread is attached and laid out
-  return { el, destroy() { off(); offPrefs(); binding.destroy(); tray.destroy(); }, focus: () => ta.focus(), scrollToEnd, render };
+  return { el, destroy() { off(); offPrefs(); editor.destroy(); binding.destroy(); tray.destroy(); }, focus: () => ta.focus(), scrollToEnd, render };
 }
 export const createChat = createTalk;
 

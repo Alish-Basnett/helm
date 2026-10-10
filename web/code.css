@@ -23,7 +23,7 @@
 }
 
 /* ---------- lines: a gutter number (CSS counter, not selectable) + wrapped code ---------- */
-.talk-thread, .set-preview { counter-reset: cm-ln; }
+.talk-thread, .set-preview, .note-list, .cm-block { counter-reset: cm-ln; }
 .cm-line {
   display: grid; grid-template-columns: var(--cm-gut-w) minmax(0, 1fr); column-gap: 14px; counter-increment: cm-ln;
   font: var(--cm-fs)/1.65 var(--mono); font-variant-ligatures: none; letter-spacing: 0; color: var(--cm-text); tab-size: 2;
@@ -88,27 +88,27 @@ html[data-code="on"] .talk-empty { color: var(--cm-com); font: var(--cm-fs)/1.5 
 html[data-code="on"] .tk-turn { gap: 0; animation: none; }
 
 /* ---------- composer: transparent textarea over a highlighted layer ---------- */
-.talk-inputwrap { position: relative; flex: 1; min-width: 0; }
-.talk-inputwrap .cm-hl { display: none; }
+:is(.talk-inputwrap, .cm-ed) { position: relative; flex: 1; min-width: 0; }
+:is(.talk-inputwrap, .cm-ed) .cm-hl { display: none; }
 html[data-code="on"] .talk-composer { background: var(--cm-bg); }
-html[data-code="on"] .talk-inputwrap { background: var(--cm-bg-2); border-radius: 10px; box-shadow: inset 0 0 0 .5px var(--separator); transition: box-shadow var(--dur) var(--ease); }
-html[data-code="on"] .talk-inputwrap:focus-within { box-shadow: inset 0 0 0 1.5px var(--accent), 0 0 0 4px var(--accent-soft); }
-html[data-code="on"] .talk-inputwrap .cm-hl, html[data-code="on"] .talk-inputwrap textarea.talk-input {
+html[data-code="on"] :is(.talk-inputwrap, .cm-ed) { background: var(--cm-bg-2); border-radius: 10px; box-shadow: inset 0 0 0 .5px var(--separator); transition: box-shadow var(--dur) var(--ease); }
+html[data-code="on"] :is(.talk-inputwrap, .cm-ed):focus-within { box-shadow: inset 0 0 0 1.5px var(--accent), 0 0 0 4px var(--accent-soft); }
+html[data-code="on"] :is(.talk-inputwrap, .cm-ed) .cm-hl, html[data-code="on"] :is(.talk-inputwrap, .cm-ed) textarea:is(.talk-input, .cm-ta) {
   font: var(--cm-fs)/1.55 var(--mono); letter-spacing: 0; font-variant-ligatures: none; font-variant-numeric: normal; tab-size: 2;
   padding: 9px 12px; margin: 0; border: 0; width: 100%; white-space: pre-wrap; overflow-wrap: anywhere; word-break: normal; text-align: left;
 }
-html[data-code="on"] .talk-inputwrap .cm-hl { display: block; position: absolute; inset: 0; overflow: hidden; pointer-events: none; color: var(--cm-text); background: none; }
-html[data-code="on"] .talk-inputwrap textarea.talk-input,
-html[data-code="on"] .talk-inputwrap textarea.talk-input:focus {
+html[data-code="on"] :is(.talk-inputwrap, .cm-ed) .cm-hl { display: block; position: absolute; inset: 0; overflow: hidden; pointer-events: none; color: var(--cm-text); background: none; }
+html[data-code="on"] :is(.talk-inputwrap, .cm-ed) textarea:is(.talk-input, .cm-ta),
+html[data-code="on"] :is(.talk-inputwrap, .cm-ed) textarea:is(.talk-input, .cm-ta):focus {
   position: relative; display: block; background: transparent; box-shadow: none; color: transparent; -webkit-text-fill-color: transparent;
   caret-color: var(--cm-text); scrollbar-width: none; min-height: 40px;
 }
-html[data-code="on"] .talk-inputwrap textarea.talk-input::-webkit-scrollbar { display: none; }
-html[data-code="on"] .talk-inputwrap textarea.talk-input::placeholder { color: transparent; }
-html[data-code="on"] .talk-inputwrap textarea.talk-input::selection { background: color-mix(in srgb, var(--accent) 35%, transparent); }
-html[data-code="on"] .talk-inputwrap:has(textarea:disabled) { opacity: .5; }
-html[data-code="on"] .talk-inputwrap .cm-hl .cm-ic { padding: 0; background: none; }
-html[data-code="on"] .talk-inputwrap .cm-hl .cm-b { font-weight: inherit; }
+html[data-code="on"] :is(.talk-inputwrap, .cm-ed) textarea:is(.talk-input, .cm-ta)::-webkit-scrollbar { display: none; }
+html[data-code="on"] :is(.talk-inputwrap, .cm-ed) textarea:is(.talk-input, .cm-ta)::placeholder { color: transparent; }
+html[data-code="on"] :is(.talk-inputwrap, .cm-ed) textarea:is(.talk-input, .cm-ta)::selection { background: color-mix(in srgb, var(--accent) 35%, transparent); }
+html[data-code="on"] :is(.talk-inputwrap, .cm-ed):has(textarea:disabled) { opacity: .5; }
+html[data-code="on"] :is(.talk-inputwrap, .cm-ed) .cm-hl .cm-ic { padding: 0; background: none; }
+html[data-code="on"] :is(.talk-inputwrap, .cm-ed) .cm-hl .cm-b { font-weight: inherit; }
 
 /* attachments waiting in the composer read as import lines */
 html[data-code="on"] .talk-composer .att-chip { background: transparent; box-shadow: none; padding: 1px 4px; border-radius: 4px; font: var(--cm-fs)/1.5 var(--mono); max-width: 100%; }
@@ -125,3 +125,33 @@ html[data-code="on"] .talk-composer .att-chip.error .att-state { color: var(--cm
 html[data-codestyle="py"][data-code="on"] .talk-composer .att-chip-text::before { content: "file = open("; }
 html[data-codestyle="py"][data-code="on"] .talk-composer .att-chip-text::after { content: ")"; }
 html[data-code="on"] .talk-composer .note-hint { font-family: var(--mono); }
+
+/* ---------- description (view + editor) and notes panels ---------- */
+.desc-text.cm-desc { white-space: normal; background: var(--cm-bg); border-radius: 8px; padding: 8px 8px 8px 0; margin: 0; box-shadow: inset 0 0 0 .5px var(--separator); }
+.desc-text.cm-desc:hover { background: var(--cm-bg-2); }
+.desc-text.cm-desc .cm-code { max-width: none; }
+.cm-desc-block .cm-line:first-child .cm-code { color: var(--cm-com); }
+
+/* gutter editor: the layer is one numbered row per typed line, the textarea sits over the code column */
+html[data-code="on"] .cm-ed.cm-ed-block { background: var(--cm-bg); }
+html[data-code="on"] .cm-ed.cm-ed-block .cm-hl { counter-reset: cm-ln; padding: 8px 12px 8px 0; }
+html[data-code="on"] .cm-ed.cm-ed-block textarea.cm-ta, html[data-code="on"] .cm-ed.cm-ed-block textarea.cm-ta:focus {
+  padding: 8px 12px 8px calc(var(--cm-gut-w) + 14px); line-height: 1.65; min-height: 88px; resize: none; overflow: hidden;
+}
+html[data-code="on"] .cm-ed.cm-ed-block .cm-code { max-width: none; }
+html[data-code="on"] .cm-ed.cm-ed-block .cm-line { padding-right: 12px; }
+html[data-code="on"] .desc-editor .cm-ed { flex: none; }
+html[data-code="on"] .desc-hint { margin-right: auto; align-self: center; color: var(--cm-com); font-size: 11px; }
+.desc-hint { display: none; }
+html[data-code="on"] .desc-hint { display: inline; }
+
+html[data-code="on"] .notes-panel .note-list { background: var(--cm-bg); border-radius: 8px; padding: 6px 4px; margin: 0 0 8px; }
+html[data-code="on"] .notes-panel .note { padding: 0; gap: 0; animation: none; }
+html[data-code="on"] .notes-panel .note:hover { background: transparent; }
+html[data-code="on"] .notes-panel .note-empty { color: var(--cm-com); font-family: var(--mono); }
+html[data-code="on"] .notes-panel .note-cm { flex: 1; min-width: 0; }
+html[data-code="on"] .notes-panel .note-edit {
+  font: var(--cm-fs)/1.55 var(--mono); letter-spacing: 0; padding: 8px 12px; background: transparent; color: transparent; -webkit-text-fill-color: transparent; caret-color: var(--cm-text); border: 0; box-shadow: none; resize: none; min-height: 40px; width: 100%; white-space: pre-wrap; overflow-wrap: anywhere;
+}
+html[data-code="on"] .notes-panel .cm-ed:has(.note-edit) { background: var(--cm-bg-2); border-radius: 10px; box-shadow: inset 0 0 0 1.5px var(--accent); margin: 2px 0; }
+html[data-code="on"] .notes-panel .note-composer { background: var(--cm-bg); border-radius: 10px; padding: 4px; }

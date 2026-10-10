@@ -68,6 +68,9 @@ export function normalizeRow(entity, row) {
     if (row.startNoteId === undefined) row.startNoteId = null;
     if (!Array.isArray(row.choices)) row.choices = []; // v0.6 Choices
     if (row.parentTaskId === undefined) row.parentTaskId = null;
+    if (row.autoStartedAt === undefined) row.autoStartedAt = null; // v0.7
+  } else if (entity === 'project') {
+    if (row.autoStart === undefined) row.autoStart = false; // v0.7 Up next auto mode
   }
   return row;
 }
@@ -269,6 +272,11 @@ export const sel = {
     if (agent && agent.status === 'waiting') add('waiting', 'Waiting for you');
     for (const n of state.notes.values()) {
       if (n.state === 'failed' && n.target && n.target.kind === 'task' && n.target.id === task.id) { add('note', 'Note failed'); break; }
+    }
+    // v0.7: the hub's auto-start of this task failed (its start note failed); it retries after a 5 minute back-off
+    if (task.status === 'next' && task.autoStartedAt) {
+      const sn = task.startNoteId && state.notes.get(task.startNoteId);
+      if (sn && sn.state === 'failed') add('autostart', 'Auto-start failed');
     }
     if (task.status === 'review') add('review', 'Review');
     return out;

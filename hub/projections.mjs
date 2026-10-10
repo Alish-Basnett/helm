@@ -36,7 +36,7 @@ const baseName = (p) => {
 };
 
 // ---------------------------------------------------------------- row mappers
-export const toProject = (r) => ({ id: r.id, name: r.name, createdAt: r.created_at, archived: !!r.archived });
+export const toProject = (r) => ({ id: r.id, name: r.name, createdAt: r.created_at, archived: !!r.archived, autoStart: !!r.auto_start });
 export const toSession = (r) => ({
   id: r.id, projectId: r.project_id, cwd: r.cwd, title: r.title, model: r.model,
   startedAt: r.started_at, lastSeenAt: r.last_seen_at, status: r.status, busy: !!r.busy,
@@ -56,7 +56,7 @@ export const toTask = (r) => ({
   createdAt: r.created_at, updatedAt: r.updated_at, doneAt: r.done_at ?? null,
   conflicts: parse(r.conflicts, []), explainer: r.explainer ?? null, explainJob: parse(r.explain_job, null),
   startNoteId: r.start_note_id ?? null, git: parse(r.git, null), diffStat: parse(r.diff_stat, null),
-  choices: parse(r.choices, []), parentTaskId: r.parent_task_id ?? null,
+  choices: parse(r.choices, []), parentTaskId: r.parent_task_id ?? null, autoStartedAt: r.auto_started_at ?? null,
 });
 export const toNote = (r) => ({
   id: r.id, target: { kind: r.target_kind, id: r.target_id }, sessionId: r.session_id, text: r.text,
@@ -540,6 +540,7 @@ export class Projector {
       case 'hub.note.retry': return this.hNoteRetry(ev);
       case 'hub.note.claim': return this.hNoteClaim(ev);
       case 'hub.task.start': return this.hTaskStart(ev);
+      case 'hub.task.autostart': return this.hTaskStart({ ...ev, data: { ...ev.data, id: ev.data.taskId } }, ev.data.reason || 'auto');
       case 'hub.question.dismiss': return this.hQuestionDismiss(ev);
       case 'hub.job.create': return this.hJobCreate(ev);
       case 'hub.job.claim': return this.hJobClaim(ev);
@@ -1051,6 +1052,7 @@ export class Projector {
     const f = {};
     if (d.name !== undefined) { f.name = cut(str(d.name), 200); f.auto = 0; }
     if (d.archived !== undefined) f.archived = d.archived ? 1 : 0;
+    if (d.autoStart !== undefined) f.auto_start = d.autoStart ? 1 : 0;
     this.upd('projects', p.id, f);
     const np = this.getProject(p.id);
     this.setDoc('project', np.id, np.name, '', { at: ev.at });
@@ -1266,7 +1268,7 @@ export class Projector {
     return toNote(nn);
   }
   /** Start a task from the dashboard: a queued session note carrying the delegation prompt, task -> next. */
-  hTaskStart(ev) {
+  hTaskStart(ev, autoReason = null) {
     const { id, sessionId, text } = ev.data;
     const t = this.getTask(id);
     if (!t) throw new Error('task not found');
@@ -1281,7 +1283,10 @@ export class Projector {
       sessionId, taskId: id, kind: 'note', summary: `Note ${nid} queued: ${cut(text, 200)}`, at: ev.at,
     });
     this.setTaskStatus(t, 'next', ev.at, null);
-    this.upd('tasks', id, { start_note_id: nid });
+    this.upd('tasks', id, { start_note_id: nid, auto_started_at: autoReason ? ev.at : null });
+    if (autoReason) {
+      this.addActivity({ sessionId, taskId: id, kind: 'status', summary: `Auto-started: ${cut(autoReason, 120)}`, at: ev.at });
+    }
     this.indexTask(this.getTask(id));
     this.pushTask(id);
     return { note: toNote(this.getNote(nid)), task: toTask(this.getTask(id)) };

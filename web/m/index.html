@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="dark light">
+  <meta name="theme-color" content="#f2f2f7" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#0a0b0d" media="(prefers-color-scheme: dark)">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Helm">
+  <meta name="referrer" content="no-referrer">
+  <title>Helm quick capture</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%235ce1e6' stroke-width='1.8' stroke-linecap='round'%3E%3Ccircle cx='12' cy='12' r='3'/%3E%3Cpath d='M12 3v4M12 17v4M3 12h4M17 12h4M5.6 5.6l2.8 2.8M15.6 15.6l2.8 2.8M18.4 5.6l-2.8 2.8M8.4 15.6l-2.8 2.8'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/m/m.css">
+  <script src="/m/m.js" defer></script>
+</head>
+<body>
+  <header class="bar">
+    <h1>Helm</h1>
+    <span id="conn" class="conn" role="status" aria-live="polite"><i class="dot" aria-hidden="true"></i><span id="conn-text">Connecting</span></span>
+  </header>
+
+  <main class="page">
+    <div id="banner" class="banner" role="alert" hidden></div>
+
+    <label class="field-label" for="project">Project</label>
+    <div class="select-wrap"><select id="project" class="ctl" aria-label="Project"></select></div>
+
+    <h2 class="section">New task</h2>
+    <form id="task-form" class="card" autocomplete="off">
+      <input id="task-title" class="ctl row" type="text" placeholder="Title" enterkeyhint="done" maxlength="300" aria-label="Task title">
+      <textarea id="task-desc" class="ctl row" rows="3" placeholder="Details (optional)" aria-label="Task details"></textarea>
+      <div id="task-attach" class="attach"></div>
+      <div class="actions">
+        <button type="button" id="task-add" class="btn">Add</button>
+        <button type="submit" id="task-start" class="btn primary">Add &amp; start</button>
+      </div>
+      <p id="task-msg" class="msg" role="status" hidden></p>
+    </form>
+
+    <h2 class="section">Note to session</h2>
+    <form id="note-form" class="card" autocomplete="off">
+      <div class="select-wrap inset"><select id="session" class="ctl" aria-label="Live session"></select></div>
+      <textarea id="note-text" class="ctl row" rows="3" placeholder="Message for the session" aria-label="Note text"></textarea>
+      <div id="note-attach" class="attach"></div>
+      <div class="actions">
+        <button type="submit" id="note-send" class="btn primary wide">Send now</button>
+      </div>
+      <p id="note-msg" class="msg" role="status" hidden></p>
+    </form>
+
+    <h2 class="section">Needs you <span id="needs-count" class="badge" hidden>0</span></h2>
+    <ul id="needs" class="card list" aria-live="polite"></ul>
+
+    <h2 class="section">Sent from here</h2>
+    <ul id="sent" class="card list" aria-live="polite"></ul>
+
+    <p class="foot">Helm hub · <span id="where"></span></p>
+  </main>
+  <noscript><p style="padding:24px;font:16px system-ui">This page needs JavaScript.</p></noscript>
+</body>
+</html>

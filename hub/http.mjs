@@ -64,6 +64,11 @@ route('POST', '/v1/events', async ({ hub, json }) => {
   return { accepted: r.accepted, duplicates: r.duplicates, lastSeq: r.lastSeq, rejected: r.rejected, lastSeqBySession: r.lastSeqBySession };
 });
 route('GET', '/v1/projects', ({ hub }) => ({ projects: hub.state().projects }));
+route('GET', '/v1/projects/:id', ({ hub, params }) => {
+  const project = hub.state().projects.find((p) => p.id === params.id);
+  if (!project) throw new HttpError(404, 'project not found');
+  return { project };
+});
 route('POST', '/v1/projects', async ({ hub, json }) => created(hub.createProject(await json())));
 route('PATCH', '/v1/projects/:id', async ({ hub, params, json }) => hub.updateProject(params.id, await json()));
 route('GET', '/v1/tasks', ({ hub, query }) => ({
@@ -72,7 +77,11 @@ route('GET', '/v1/tasks', ({ hub, query }) => ({
     projectId: query.get('projectId') || undefined,
   }),
 }));
-route('POST', '/v1/tasks', async ({ hub, json }) => created(hub.createTask(await json())));
+route('POST', '/v1/tasks', async ({ hub, json, remote, remoteListener }) => {
+  const r = hub.createTask(await json());
+  if (remoteListener && r.note) remote.trackNote(r.note.id); // a start note's reply goes back to the phone too
+  return created(r);
+});
 route('GET', '/v1/tasks/:id', ({ hub, params }) => hub.taskDetail(params.id));
 route('PATCH', '/v1/tasks/:id', async ({ hub, params, json }) => hub.updateTask(params.id, await json()));
 route('GET', '/v1/sessions/:id/inbox', ({ hub, params }) => hub.claimInbox(params.id));
@@ -96,7 +105,11 @@ route('GET', '/v1/digests', ({ hub, query }) => ({
 route('GET', '/v1/conflicts', ({ hub }) => ({ conflicts: hub.conflicts() }));
 route('GET', '/v1/questions', ({ hub, query }) => ({ questions: hub.questions({ state: query.get('state') || undefined }) }));
 route('POST', '/v1/questions/:id/dismiss', ({ hub, params }) => hub.dismissQuestion(params.id));
-route('POST', '/v1/notes', async ({ hub, json }) => created(hub.createNote(await json())));
+route('POST', '/v1/notes', async ({ hub, json, remote, remoteListener }) => {
+  const r = hub.createNote(await json());
+  if (remoteListener) remote.trackNote(r.note.id); // the phone may read the reply back
+  return created(r);
+});
 route('POST', '/v1/notes/execute', async ({ hub, json }) => hub.executeNotes(await json()));
 route('PATCH', '/v1/notes/:id', async ({ hub, params, json }) => hub.updateNote(params.id, await json()));
 route('DELETE', '/v1/notes/:id', ({ hub, params }) => hub.deleteNote(params.id));
@@ -113,6 +126,18 @@ route('POST', '/v1/attachments', async ({ hub, raw, req }) => {
 route('GET', '/v1/attachments/:id', ({ hub, params }) => {
   const a = hub.attachmentFile(params.id);
   return { [FILE]: a };
+});
+// Phone access (opt-in LAN listener). Loopback / unix socket only: never reachable through the phone listener.
+const loopbackOnly = (ctx) => {
+  const a = ctx.req.socket.remoteAddress;
+  if (ctx.remoteListener || !(a === undefined || a === null || /^(127\.|::1$|::ffff:127\.)/i.test(a))) throw new HttpError(403, 'phone access can only be changed from this Mac');
+};
+route('GET', '/v1/remote', (ctx) => { loopbackOnly(ctx); return ctx.remote.status(); });
+route('POST', '/v1/remote', async (ctx) => {
+  loopbackOnly(ctx);
+  const body = await ctx.json();
+  if (typeof body.enabled !== 'boolean') throw new HttpError(400, 'body must be { enabled: boolean }');
+  return body.enabled ? ctx.remote.enable() : ctx.remote.disable();
 });
 route('GET', '/v1/usage', ({ hub, query }) => hub.usage(intParam(query.get('days'), 7, 1, 90)));
 route('GET', '/v1/usage/breakdown', ({ hub, query }) => hub.usageBreakdown(intParam(query.get('days'), 7, 1, 90)));
@@ -161,7 +186,21 @@ async function parseJsonBody(req) {
 }
 
 /** CSRF / DNS-rebinding guard: the hub can inject prompts into sessions, so browsers must not drive it cross-site. */
-function guard(req, viaTcp, mutating) {
+function guard(req, viaTcp, mutating, remoteListener = false) {
+  if (remoteListener) {
+    // the phone listener is reached by LAN name/IP, so Host can't be checked; the token authenticates, and a browser
+    // that sends an Origin must be on the page's own origin (stops cross-site pages riding the cookie)
+    if (mutating) {
+      const origin = req.headers.origin;
+      if (origin) {
+        let same = false;
+        try { same = new URL(origin).host === req.headers.host; } catch { /* malformed */ }
+        if (!same) throw new HttpError(403, 'forbidden origin');
+      }
+      if (req.headers['sec-fetch-site'] === 'cross-site') throw new HttpError(403, 'cross-site request refused');
+    }
+    return;
+  }
   if (viaTcp) {
     const host = req.headers.host;
     if (host && !LOCAL_HOST.test(host)) throw new HttpError(403, 'forbidden host');
@@ -194,7 +233,7 @@ function sendAttachment(req, res, a, cors) {
 }
 
 // ----------------------------------------------------------------------- SSE
-function handleStream(hub, cfg, req, res, query, sseClients) {
+function handleStream(hub, cfg, req, res, query, sseClients, redact = false) {
   res.writeHead(200, {
     'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache, no-transform',
     Connection: 'keep-alive', 'X-Accel-Buffering': 'no',
@@ -202,7 +241,7 @@ function handleStream(hub, cfg, req, res, query, sseClients) {
   res.write('retry: 3000\n: connected\n\n');
   const send = (rows) => {
     for (const r of rows) {
-      res.write(`id: ${r.seq}\nevent: change\ndata: {"entity":"${r.entity}","op":"${r.op}","row":${r.row}}\n\n`);
+      res.write(`id: ${r.seq}\nevent: change\ndata: {"entity":"${r.entity}","op":"${r.op}","row":${redact ? 'null' : r.row}}\n\n`);
     }
     if (res.writableLength > 8 * 1024 * 1024) res.destroy(); // client not reading
   };
@@ -223,7 +262,7 @@ function handleStream(hub, cfg, req, res, query, sseClients) {
 }
 
 // -------------------------------------------------------------------- static
-function serveStatic(cfg, req, res, pathname) {
+function serveStatic(cfg, req, res, pathname, noFallback = false) {
   const root = cfg.webRoot;
   let rel;
   try { rel = decodeURIComponent(pathname); } catch { return sendJson(res, 400, { error: 'bad path' }); }
@@ -241,9 +280,9 @@ function serveStatic(cfg, req, res, pathname) {
     } catch { return null; }
   };
   let hit = tryFile(path.join(root, rel));
-  if (!hit && !path.extname(rel)) hit = tryFile(path.join(root, 'index.html')); // SPA fallback
+  if (!hit && !noFallback && !path.extname(rel)) hit = tryFile(path.join(root, 'index.html')); // SPA fallback
   if (!hit) {
-    if (!path.extname(rel) || rel === '/') {
+    if (!noFallback && (!path.extname(rel) || rel === '/')) {
       const body = '<!doctype html><meta charset="utf-8"><title>Helm hub</title><body style="font:16px system-ui;padding:2rem">'
         + '<h1>Helm hub is running</h1><p>The web UI is not installed (no <code>web/index.html</code> found). '
         + 'The API is available under <code>/v1/</code>.</p></body>';
@@ -264,7 +303,7 @@ function serveStatic(cfg, req, res, pathname) {
 }
 
 // -------------------------------------------------------------------- handler
-export function createHandler({ hub, cfg, log, boot = {}, viaTcp, sseClients }) {
+export function createHandler({ hub, cfg, log, boot = {}, viaTcp, sseClients, remote = null, remoteListener = false }) {
   return async function handler(req, res) {
     try {
       const url = new URL(req.url, 'http://localhost');
@@ -281,8 +320,8 @@ export function createHandler({ hub, cfg, log, boot = {}, viaTcp, sseClients }) 
 
       if (!pathname.startsWith('/v1/') && pathname !== '/v1') {
         if (method !== 'GET' && method !== 'HEAD') return sendJson(res, 405, { error: 'method not allowed' });
-        guard(req, viaTcp, false);
-        return serveStatic(cfg, req, res, pathname);
+        guard(req, viaTcp, false, remoteListener);
+        return serveStatic(cfg, req, res, pathname, remoteListener);
       }
 
       let matched = null;
@@ -303,15 +342,15 @@ export function createHandler({ hub, cfg, log, boot = {}, viaTcp, sseClients }) 
         return sendJson(res, pathMatched ? 405 : 404, { error: pathMatched ? 'method not allowed' : 'not found' }, cors);
       }
       const isInbox = /\/(inbox|jobs)$/.test(pathname); // GETs that claim (mutate) rows get the CSRF guard too
-      guard(req, viaTcp, method !== 'GET' && method !== 'HEAD' || isInbox);
+      guard(req, viaTcp, method !== 'GET' && method !== 'HEAD' || isInbox, remoteListener);
 
       const ctx = {
-        hub, cfg, boot, params: matched.params, query: url.searchParams, req, res,
+        hub, cfg, boot, remote, remoteListener, params: matched.params, query: url.searchParams, req, res,
         json: () => parseJsonBody(req),
         raw: (limit) => readBody(req, limit),
       };
       const out = await matched.r.fn(ctx);
-      if (out === STREAM) return handleStream(hub, cfg, req, res, url.searchParams, sseClients);
+      if (out === STREAM) return handleStream(hub, cfg, req, res, url.searchParams, sseClients, remoteListener);
       if (out && out[FILE]) return sendAttachment(req, res, out[FILE], cors);
       if (out && out[CREATED]) return sendJson(res, 201, out[CREATED], cors);
       return sendJson(res, 200, out, cors);

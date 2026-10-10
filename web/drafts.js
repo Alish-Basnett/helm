@@ -8,10 +8,15 @@ function writeAll(all) {
   try { localStorage.setItem(KEY, JSON.stringify(all)); } catch { /* storage blocked: keep in memory only */ }
 }
 
-/** Restore the saved draft into `ta` and keep saving it as the user types. */
-export function bindDraft(ta, key) {
+/**
+ * Restore the saved draft into `ta` and keep saving it as the user types.
+ * opts.base: the text the box starts from when it is editing something that already exists (a task description):
+ * a saved draft then replaces it, and text equal to `base` is not worth keeping.
+ */
+export function bindDraft(ta, key, opts = {}) {
+  const base = opts.base;
   const saved = readAll()[key];
-  if (saved && !ta.value) {
+  if (saved && (base != null ? saved !== base : !ta.value)) {
     ta.value = saved;
     // let auto-grow and the code-mode highlight layer catch up
     queueMicrotask(() => ta.dispatchEvent(new Event('input', { bubbles: true })));
@@ -21,11 +26,14 @@ export function bindDraft(ta, key) {
     clearTimeout(t);
     t = setTimeout(() => {
       const all = readAll();
-      if (ta.value.trim()) all[key] = ta.value; else delete all[key];
+      if (ta.value.trim() && ta.value !== base) all[key] = ta.value; else delete all[key];
       writeAll(all);
     }, 250);
   });
 }
+
+/** The saved draft text for `key`, or ''. */
+export function getDraft(key) { return readAll()[key] || ''; }
 
 export function clearDraft(key) {
   const all = readAll();

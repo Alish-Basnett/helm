@@ -209,6 +209,9 @@ export class Db {
     // v0.6 (T-21): Choices + task parent link. Additive, defaulted, safe on a live database; `helmd --rebuild` back-fills.
     if (!has('tasks', 'choices')) this.raw.exec("ALTER TABLE tasks ADD COLUMN choices TEXT NOT NULL DEFAULT '[]'");
     if (!has('tasks', 'parent_task_id')) this.raw.exec('ALTER TABLE tasks ADD COLUMN parent_task_id TEXT');
+    // v0.7 (T-41): Up next auto mode. Additive + defaulted, safe on a live database; `helmd --rebuild` back-fills.
+    if (!has('projects', 'auto_start')) this.raw.exec('ALTER TABLE projects ADD COLUMN auto_start INTEGER NOT NULL DEFAULT 0');
+    if (!has('tasks', 'auto_started_at')) this.raw.exec('ALTER TABLE tasks ADD COLUMN auto_started_at INTEGER');
   }
   prep(sql) {
     let s = this.cache.get(sql);

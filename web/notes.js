@@ -8,6 +8,8 @@ import { addNote, editNote, deleteNote, executeNotes, retryNote } from './action
 import { createAttachTray, createAttachmentList, bindAttachInput, attsOf } from './attachments.js';
 import { toast } from './ui.js';
 import { setLinked } from './tasklinks.js';
+import { getPref, codeOn, onPrefs } from './prefs.js';
+import { codeEditor, composerView, noteAsCode, varName } from './code.js';
 
 const STATE_LABEL = { draft: 'Draft', queued: 'Queued', sending: 'Sending…', failed: 'Failed' };
 
@@ -45,7 +47,9 @@ export function createNotesPanel(opts) {
     : null;
   const tray = createAttachTray({ onChange: () => setClass(composer, 'has-att', tray.count > 0) });
   const attachBtn = h('button', { class: 'icon-btn note-attach', type: 'button', 'aria-label': 'Attach files', title: 'Attach files (or drop / paste)', onclick: () => binding.pick(), disabled: opts.disabled }, icon('paperclip', 18));
-  const composer = h('div', { class: 'note-composer' }, tray.el, ta, attachBtn, sendBtn, hint, taskHint);
+  // code mode: a highlighted layer under the (transparent-text) textarea; plain textarea otherwise
+  const editor = codeEditor(ta, { view: (v, st, el) => composerView(v, st, el.getAttribute('placeholder') || '') });
+  const composer = h('div', { class: 'note-composer' }, tray.el, editor.el, attachBtn, sendBtn, hint, taskHint);
   const el = h('section', { class: ['panel notes-panel', prompt && 'prompt-mode'], 'aria-label': title },
     h('header', { class: 'panel-head' },
       h('h3', { class: 'panel-title' }, icon(prompt ? 'send' : 'note', 15), title, countEl),
@@ -67,10 +71,11 @@ export function createNotesPanel(opts) {
     ta.value = '';
     clearDraft(draftKey);
     autosize();
+    editor.sync();
     const p = addNote(target, text, { execute: run, attachments: atts });
     list.scrollTop = list.scrollHeight;
     const made = await p;
-    if (!made) { if (!ta.value) { ta.value = text; autosize(); } tray.restore(taken); }
+    if (!made) { if (!ta.value) { ta.value = text; autosize(); editor.sync(); } tray.restore(taken); }
   }
   ta.addEventListener('input', autosize);
   ta.addEventListener('keydown', (e) => {
@@ -86,12 +91,14 @@ export function createNotesPanel(opts) {
     const atts = createAttachmentList();
     const reply = createReply();
     const wait = createWaitLine();
-    const body = h('div', { class: 'note-body' }, text, atts.el, meta, reply.el, wait.el);
+    const std = h('div', { class: 'note-std' }, text, atts.el, meta, reply.el, wait.el);
+    const cmHost = h('div', { class: 'note-cm', hidden: true });
+    const body = h('div', { class: 'note-body' }, std, cmHost);
     const edit = h('button', { class: 'icon-btn sm', type: 'button', 'aria-label': 'Edit note', title: 'Edit', onclick: () => beginEdit(row) }, icon('pencil', 14));
     const del = h('button', { class: 'icon-btn sm', type: 'button', 'aria-label': 'Delete note', title: 'Delete', onclick: () => deleteNote(row.__id) }, icon('trash', 14));
     const actions = h('div', { class: 'note-actions' }, edit, del);
     const row = h('li', { class: 'note' }, body, actions);
-    row.__text = text; row.__meta = meta; row.__atts = atts; row.__reply = reply; row.__wait = wait; row.__actions = actions; row.__id = n.id; row.__editing = false;
+    row.__std = std; row.__cmHost = cmHost; row.__text = text; row.__meta = meta; row.__atts = atts; row.__reply = reply; row.__wait = wait; row.__actions = actions; row.__id = n.id; row.__editing = false;
     text.addEventListener('click', () => { if (row.__note.state === 'draft' && !getSelection().toString()) beginEdit(row); });
     return row;
   }
@@ -102,14 +109,19 @@ export function createNotesPanel(opts) {
     row.__editing = true;
     const input = h('textarea', { class: 'note-edit', rows: '2', 'aria-label': 'Edit draft note' });
     input.value = n.text;
-    row.__text.hidden = true;
-    row.__text.after(input);
+    const asCode = codeOn();
+    const host = asCode ? row.__cmHost : row.__text; // what the editor stands in for
+    const ed = codeEditor(input, { view: (v, st) => composerView(v, st, '', varName(n.id)) });
+    host.hidden = true;
+    host.after(ed.el);
+    ed.sync();
     const done = (save) => {
       if (!row.__editing) return;
       row.__editing = false;
       const v = input.value;
-      input.remove();
-      row.__text.hidden = false;
+      ed.destroy();
+      ed.el.remove();
+      host.hidden = false;
       if (save && v.trim() && v.trim() !== n.text) editNote(n.id, v);
     };
     input.addEventListener('keydown', (e) => {
@@ -145,7 +157,20 @@ export function createNotesPanel(opts) {
         meta.appendChild(h('span', {}, STATE_LABEL[n.state] || n.state));
       }
     }
-    setHidden(row.__actions, n.state !== 'draft' || !!n.__pending);
+    const code = codeOn();
+    setHidden(row.__actions, code || n.state !== 'draft' || !!n.__pending);
+    setHidden(row.__std, code);
+    if (code) {
+      // the same code representation as Talk: `const n12 = "…"; // ✓ delivered`, replies as /** @reply */ blocks
+      if (!row.__editing) setHidden(row.__cmHost, false);
+      try {
+        noteAsCode(row.__cmHost, n, getPref('codestyle'), {
+          onSend: () => executeNotes(target), onDelete: (x) => deleteNote(x.id), onRetry: (x) => retryNote(x.id), onEdit: () => beginEdit(row),
+        });
+      } catch (e) { console.error('[helm] code render failed', e); }
+      return;
+    }
+    setHidden(row.__cmHost, true);
     row.__atts.update(n.attachments);
     // the reply is the point of a ran note: keep it independent of everything above
     try { row.__reply.update(n); } catch (e) { console.error('[helm] reply render failed', e); }
@@ -159,6 +184,7 @@ export function createNotesPanel(opts) {
     setText(execLabel, drafts ? `Execute ${drafts}` : 'Execute');
     execBtn.disabled = drafts === 0;
     setClass(execBtn, 'has-drafts', drafts > 0);
+    setClass(el, 'cm-on', codeOn());
     empty.hidden = notes.length > 0;
     list.hidden = notes.length === 0;
     const before = list.scrollHeight - list.scrollTop - list.clientHeight;
@@ -168,6 +194,7 @@ export function createNotesPanel(opts) {
 
   startTicker();
   render();
+  const offPrefs = onPrefs((k) => { if (k === 'code' || k === 'codestyle') render(); });
   const off = subscribe((changed) => { if (changed.has('note') || changed.has('task')) render(); });
-  return { el, render, destroy() { off(); binding.destroy(); tray.destroy(); }, focus: () => ta.focus() };
+  return { el, render, destroy() { off(); offPrefs(); editor.destroy(); binding.destroy(); tray.destroy(); }, focus: () => ta.focus() };
 }

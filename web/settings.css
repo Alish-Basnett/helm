@@ -72,3 +72,15 @@
 .set-preview { border-radius: 12px; overflow: hidden; padding: 6px 0; background: var(--bg-3); }
 .set-preview .tk-turn { padding: 6px 10px; }
 .set-preview.cm-surface { background: var(--cm-bg); counter-reset: cm-ln; padding: 8px 8px 8px 0; }
+
+/* ---------- Phone access ---------- */
+.phone-body { display: flex; flex-direction: column; gap: var(--sp-3); padding: 12px 0 var(--sp-2); border-top: .5px solid var(--separator); }
+.phone-body[hidden], .phone-err[hidden] { display: none; }
+.phone-err { color: var(--red); font-size: 13px; padding: 8px 0; }
+.phone-warn { display: flex; gap: 8px; align-items: flex-start; padding: 10px 12px; border-radius: 10px; background: color-mix(in srgb, var(--orange) 14%, transparent); color: var(--label); font-size: 13px; font-weight: 600; line-height: 1.4; }
+.phone-warn svg { flex: none; color: var(--orange); margin-top: 1px; }
+.phone-url { font-size: 15px; line-height: 1.45; padding: 10px 12px; border-radius: 10px; background: var(--bg-3); word-break: break-all; user-select: all; }
+.phone-actions { display: flex; gap: var(--sp-3); align-items: center; flex-wrap: wrap; }
+.phone-qrbox { align-self: flex-start; padding: 12px; background: #fff; border-radius: 12px; box-shadow: var(--shadow-1); }
+.phone-qr { display: block; width: 232px; height: 232px; max-width: 100%; }
+.phone-sel { align-self: flex-start; min-height: 32px; border-radius: 8px; border: 0; background: var(--fill-2); color: var(--label); padding: 0 10px; font-size: 13px; }

@@ -478,3 +478,19 @@
 .th-axis-plot:active { cursor: grabbing; }
 .th-grid, .th-tl .th-plot, .th-group .th-plot { overflow: hidden; }
 .th-axis-now.pinned { transform: translateX(-100%); }
+
+/* ---- v0.7: Up next auto mode ---- */
+.auto-ctl { display: inline-flex; align-items: center; gap: 6px; flex: none; margin-left: auto; }
+.auto-ctl[hidden], .auto-seg[hidden], .auto-pick[hidden], .auto-glyph[hidden], .auto-hint[hidden], .next-up-chip[hidden] { display: none; }
+.auto-glyph { color: var(--accent); font-size: 13px; line-height: 1; }
+.auto-seg { display: inline-flex; padding: 2px; border-radius: 99px; background: var(--fill-2); box-shadow: inset 0 0 0 .5px var(--separator); }
+.auto-seg-btn { border: 0; background: none; color: var(--label-2); font-size: 11px; font-weight: 600; line-height: 1; padding: 4px 9px; border-radius: 99px; cursor: pointer; }
+.auto-seg-btn:hover { color: var(--label); }
+.auto-seg-btn.on { background: var(--bg-2, var(--elevated)); color: var(--label); box-shadow: var(--shadow-1); }
+.auto-seg-btn[data-mode="auto"].on { background: var(--accent); color: #fff; }
+.auto-seg-btn:focus-visible, .auto-pick:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.auto-pick { display: inline-flex; align-items: center; gap: 5px; border: 0; border-radius: 99px; padding: 4px 9px; font-size: 11px; font-weight: 600; line-height: 1; cursor: pointer; background: var(--fill-2); color: var(--label-2); box-shadow: inset 0 0 0 .5px var(--separator); }
+.auto-pick.on { background: var(--accent-soft); color: var(--accent); }
+.auto-hint { margin: 0 14px 6px; font-size: 11px; color: var(--label-3); }
+.next-up-chip { display: inline-flex; align-items: center; gap: 4px; padding: 0 7px; min-height: 18px; border-radius: 99px; font-size: 10.5px; font-weight: 700; color: var(--accent); background: var(--accent-soft); white-space: nowrap; }
+.col-next .col-head { flex-wrap: wrap; row-gap: 4px; }

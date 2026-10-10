@@ -4,7 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const HUB_DIR = path.dirname(fileURLToPath(import.meta.url));
-export const VERSION = '0.9.0';
+export const VERSION = '0.10.0';
 
 const int = (v, d) => {
   if (v === undefined || v === null || v === '') return d;
@@ -23,9 +23,15 @@ export function loadConfig(o = {}, env = process.env) {
     pidFile: path.join(home, 'helmd.pid'),
     portFile: path.join(home, 'helmd.port'),
     attachDir: path.join(home, 'attachments'),
+    remoteFile: path.join(home, 'remote.json'), // phone access: { enabled, token } (mode 0600)
+    remoteHost: o.remoteHost ?? env.HELM_REMOTE_HOST ?? '0.0.0.0', // narrow it with HELM_REMOTE_HOST
+    remotePort: int(o.remotePort ?? env.HELM_REMOTE_PORT, 7778),
+    remote: o.remote ?? true, // false: never open the phone-access listener (tests)
     logFile: path.join(home, 'helmd.log'),
     webRoot: path.resolve(o.webRoot ?? env.HELM_WEB ?? path.join(HUB_DIR, '..', 'web')),
     stallMs: int(o.stallMs ?? env.HELM_STALL_MS, 5 * 60_000),
+    autoStartingMs: int(o.autoStartingMs ?? env.HELM_AUTO_STARTING_MS, 3 * 60_000), // a delivered start still counts as starting
+    autoBackoffMs: int(o.autoBackoffMs ?? env.HELM_AUTO_BACKOFF_MS, 5 * 60_000),   // wait after a failed auto-start
     sendingMs: int(o.sendingMs ?? env.HELM_SENDING_MS, 10 * 60_000), // note stuck in `sending` -> failed
     jobMs: int(o.jobMs ?? env.HELM_JOB_MS, 5 * 60_000), // job claimed (or queued) but never answered -> failed
     blockMs: int(o.blockMs ?? env.HELM_BLOCK_MS, 10 * 60_000),

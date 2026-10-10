@@ -380,3 +380,55 @@ Opening a v0.1 database adds the new tables/columns in place. Old events are not
   viewport only). Header controls: session picker (+ "All sessions"), status chips, model filter, search,
   density, Tree/Timeline; choices persist in `localStorage["helm.threads"]`. Keys: Up/Down move, Enter opens,
   Left/Right fold, `/` focuses search.
+
+## v0.7 additions — Up next auto mode
+- `Project` gains `autoStart: boolean` (default false). `PATCH /v1/projects/:id { autoStart }` (boolean, else 400)
+  records it in the `hub.project.update` event and returns `{ project, autoStarted: string[] }` (task ids the hub started
+  because of this very change). New `GET /v1/projects/:id` → `{ project }`. `/v1/state`, `/v1/projects` and the SSE
+  `project` upsert all carry `autoStart`. `Task` gains `autoStartedAt: number | null` (set by an auto-start, cleared by a manual Start).
+- **The rule.** The hub re-evaluates after every committed ingest or command and in every sweep. For each non-archived
+  project with `autoStart` on: if no task is `in_progress` (review and blocked do not count) and nothing is "starting",
+  it starts the top task in `next` (lowest `order`, then oldest `createdAt`) through the normal start logic (a queued
+  session note on the project's live session; same session choice as v0.3 Start). "Starting" = a `next` task whose
+  `startNoteId` note is `queued` or `sending`, or whose start note was created less than 3 minutes ago and has not failed
+  (`HELM_AUTO_STARTING_MS`). At most one auto-start is in flight per project.
+- **No live session** → nothing happens and nothing is recorded; the next ingest (e.g. `session.started`) or sweep retries.
+- **Failed start** (the start note `failed`, including a `sending` timeout) → the project holds for 5 minutes
+  (`HELM_AUTO_BACKOFF_MS`) measured from the failure, then retries the same top task (it never skips ahead). Clients show
+  needs-you "Auto-start failed" for a `next` task with `autoStartedAt` whose start note failed.
+- **Event** `hub.task.autostart { taskId, sessionId, text, reason }`: the decision is made before the event and carried in
+  it (like the sweep), so `--rebuild` replays it without re-deciding and never emits events. Applying it is `hub.task.start`
+  plus `autoStartedAt` and an Activity row `Auto-started: <reason>`.
+- Migration: `projects.auto_start` and `tasks.auto_started_at` are additive, defaulted columns; `--rebuild` back-fills.
+- Web: Up next header has a Manual | Auto switch (a project popover in All projects), a hint line while Auto is on, a
+  "Next up" marker on the top card, a Spotlight "Toggle auto mode" command, and a toast `Auto mode on: starting T-n`.
+
+## Phone access — quick-capture page and opt-in LAN listener
+The hub only listens on `127.0.0.1` (and the unix socket) and refuses non-local Host/Origin, because it can inject prompts
+into Claude sessions. Phone access is a separate, **off by default**, token-protected listener. Nothing about the loopback
+behaviour changes.
+
+- **Page**: `web/m/index.html`, `m.js`, `m.css`, served at `/m` (loopback needs no token: `http://localhost:7777/m`). Standalone, no
+  imports. Project picker (remembered), New task (`POST /v1/tasks`, `start: true` for "Add & start"; a refused start comes back as
+  `{ task, error }` and is shown), Note to session (`POST /v1/notes` with `execute: true`; the reply is read back from `/v1/state`),
+  photo/file attach (`POST /v1/attachments`; a task carries the saved paths in its description, a note carries the ids), and a read-only
+  "Needs you" list.
+- **Control (loopback / unix socket only; 403 on the phone listener)**: `GET /v1/remote` → `{ enabled, port, token|null, url|null, urls[] }`;
+  `POST /v1/remote { enabled: boolean }` → the same. Enabling generates (or reuses the saved) 32-byte base64url token and listens on
+  `0.0.0.0:${HELM_REMOTE_PORT:-7778}` (`HELM_REMOTE_HOST` narrows it). Disabling closes the listener and **rotates the token**. A taken
+  port is a 409. `urls[]` = `{ name, address, url: "http://<lan-ipv4>:<port>/m#k=<token>" }` from `os.networkInterfaces()`.
+- **State**: `$HELM_HOME/remote.json` `{ enabled, token }`, mode 0600 (atomic rewrite). On start the listener returns only if `enabled`.
+- **Gate on the phone listener** (every request, in this order): ban check (429) → 60 requests/min/IP (429 + `Retry-After`) →
+  allow-list (403) → token (401) → router. Allow-list: `GET /m`, `GET /m/*`, `GET /v1/state`, `GET /v1/stream`, `POST /v1/tasks`,
+  `POST /v1/notes`, `POST /v1/attachments`, `GET /v1/attachments/:id`; any path that changes under decoding/normalisation is 403.
+  Token = `Authorization: Bearer <token>` or cookie `helm_k` (set by the page from the URL hash), compared in constant time. 5 failed
+  auths from one IP within 10 min = 10-minute ban. The page shell (`/m`, `/m/`, `/m/index.html`, `/m/m.js`, `/m/m.css`) is served without a
+  token because it is code, not data, and must load before it can read the hash. A mutating request with an `Origin` must match `Host`
+  (cookie CSRF), and `Sec-Fetch-Site: cross-site` is refused. Every request is logged to `helmd.log` as `remote <METHOD> "<path>" <status> ip=<ip>`
+  (never the token).
+- **What the phone sees**: `GET /v1/state` on the phone listener is filtered to `{ projects, sessions, tasks, notes, seq }`: sessions without
+  `cwd`; only tasks that need the user, each with `needs: string[]` (Review, N choices, Question, Waiting for you, Note failed, Auto-start
+  failed); notes of those tasks plus notes created through the phone listener (replies included, attachment paths removed).
+  `GET /v1/stream` carries `row: null` (the page refetches `/v1/state`).
+- **Web**: Settings > Phone access: toggle, warning ("Anyone with this link on your network can add tasks and message your sessions."),
+  the link, Copy, and a QR code from `web/qr.js` (own encoder: byte mode, level M, versions 1-10 = up to 213 bytes; a longer link falls back to text).

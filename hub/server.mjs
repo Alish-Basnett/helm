@@ -5,6 +5,7 @@ import { loadConfig } from './config.mjs';
 import { createLogger } from './log.mjs';
 import { Hub } from './hub.mjs';
 import { createHandler } from './http.mjs';
+import { createRemote } from './remote.mjs';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -75,6 +76,8 @@ export async function startHub(opts = {}) {
   const hub = new Hub(cfg, log, { clock: opts.clock });
   const boot = { port: cfg.port };
   const sseClients = new Set();
+  const remote = createRemote({ cfg, hub, log });
+  remote.setInner(createHandler({ hub, cfg, log, boot, viaTcp: true, sseClients, remote, remoteListener: true }));
   const servers = [];
   const cleanupFiles = () => {
     for (const f of [cfg.sockFile, cfg.portFile]) { try { fs.unlinkSync(f); } catch { /* gone */ } }
@@ -86,7 +89,7 @@ export async function startHub(opts = {}) {
   };
 
   const mk = (viaTcp) => {
-    const s = http.createServer(createHandler({ hub, cfg, log, boot, viaTcp, sseClients }));
+    const s = http.createServer(createHandler({ hub, cfg, log, boot, viaTcp, sseClients, remote }));
     s.on('clientError', (err, socket) => { try { socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n'); } catch { /* ignore */ } });
     servers.push(s);
     return s;
@@ -116,6 +119,8 @@ export async function startHub(opts = {}) {
     throw e;
   }
 
+  await remote.init(); // phone access comes back only if it was on when the hub last stopped
+
   let timer = null;
   if (cfg.sweep) {
     timer = setInterval(() => {
@@ -134,6 +139,7 @@ export async function startHub(opts = {}) {
     closed = true;
     if (timer) clearInterval(timer);
     for (const c of sseClients) { try { c.res.end(); } catch { /* ignore */ } }
+    await remote.close();
     await Promise.all(servers.map((s) => new Promise((r) => {
       s.close(() => r());
       try { s.closeAllConnections(); } catch { /* ignore */ }
@@ -142,5 +148,5 @@ export async function startHub(opts = {}) {
     cleanupFiles();
     log.info('helmd stopped');
   }
-  return { hub, cfg, log, port: boot.port, close, servers, alreadyRunning: false };
+  return { hub, cfg, log, port: boot.port, close, servers, remote, alreadyRunning: false };
 }

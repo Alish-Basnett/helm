@@ -98,6 +98,36 @@ export async function patchProject(id, patch, errLabel = 'Could not update proje
   }
 }
 
+/** v0.7: switch a project's Up next between Manual and Auto. Toasts what the hub did (it may start a task at once). */
+export async function setAutoStart(id, on) {
+  const before = state.projects.get(id);
+  if (!before || before.autoStart === on) return null;
+  const optimistic = { ...before, autoStart: on };
+  upsert('project', optimistic);
+  try {
+    const res = await api.patchProject(id, { autoStart: on });
+    // An older hub ignores the field and still answers 200: never claim success it did not confirm.
+    if (res?.project?.autoStart !== on) throw new Error('The hub did not apply auto mode. Restart it (node hub/helmd.mjs --stop, then --detach).');
+    upsert('project', res.project);
+    const started = (res.autoStarted || [])[0];
+    if (!on) toast('Manual mode: you start tasks yourself');
+    else toast(started ? `Auto mode on: starting ${started}` : 'Auto mode on: the next task starts when nothing is in progress');
+    return res;
+  } catch (e) {
+    if (state.projects.get(id) === optimistic) upsert('project', before);
+    toastError(e, 'Could not change auto mode');
+    return null;
+  }
+}
+
+/** The project the Up next switch controls: the selected one, or the only one that exists. */
+export function autoTarget() {
+  const s = sel.scopeProject();
+  if (s) return s;
+  const ps = sel.projects();
+  return ps.length === 1 ? ps[0] : null;
+}
+
 export async function archiveProject(id, archived = true) {
   const p = state.projects.get(id);
   const res = await patchProject(id, { archived }, archived ? 'Could not archive project' : 'Could not restore project');

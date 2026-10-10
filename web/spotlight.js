@@ -4,7 +4,7 @@ import { icon } from './icons.js';
 import { state, sel, setUI } from './store.js';
 import { api } from './api.js';
 import { setPref, codeOn } from './prefs.js';
-import { setStatus, startTask, canStart } from './actions.js';
+import { setStatus, startTask, canStart, setAutoStart, autoTarget } from './actions.js';
 import { navigate, openTask, route, setDiff } from './router.js';
 import { diffEntry, ensureDiff, onDiff, taskHasFiles } from './diffs.js';
 import { fmtAgo, truncate, STATUS_META } from './format.js';
@@ -97,6 +97,9 @@ export function createSpotlight(root) {
       for (const x of ct) cmds.push({ taskCmd: true, hay: `${x.id} ${x.title}`.toLowerCase(), title: `Review ${sel.openChoiceCount(x)} choices · ${x.id} ${truncate(x.title, 50)}`, sub: sel.projectName(x.projectId), icon: 'checklist', run: () => openTask(x.id) });
       if (!ct.length) cmds.push({ title: 'No choices waiting', sub: 'When an agent proposes options they appear here', icon: 'checklist', disabled: true });
     }
+    const at = autoTarget();
+    if (at) cmds.push({ title: 'Toggle auto mode', sub: `${at.name}: ${at.autoStart ? 'Auto → Manual' : 'Manual → Auto'}`, icon: 'play', run: () => setAutoStart(at.id, !at.autoStart) });
+    else for (const p of sel.projects()) cmds.push({ title: `Toggle auto mode · ${p.name}`, sub: p.autoStart ? 'Auto → Manual' : 'Manual → Auto', icon: 'play', run: () => setAutoStart(p.id, !p.autoStart) });
     cmds.push({ title: 'Settings', sub: 'Theme, accent, text size, code mode…', icon: 'gear', run: () => navigate('settings') });
     cmds.push({ title: 'Toggle code mode', sub: 'Make Talk look like source code', icon: 'code', run: () => setPref('code', codeOn() ? 'off' : 'on') });
     cmds.push({ title: 'Toggle theme', sub: 'System · Light · Dark', icon: 'sun', run: () => bus.emit('toggle-theme') });

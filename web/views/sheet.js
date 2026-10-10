@@ -15,6 +15,9 @@ import { createReplay } from '../replay.js';
 import { createExplain } from '../explain.js';
 import { openTask, closeTask, navigate, route, setDiff } from '../router.js';
 import { createChoices } from '../choices.js';
+import { bindDraft, clearDraft, getDraft } from '../drafts.js';
+import { codeOn, getPref, onPrefs } from '../prefs.js';
+import { codeEditor, blockView, renderDescription } from '../code.js';
 
 const AGENT_STATUS = { running: 'Running', done: 'Done', failed: 'Failed', stalled: 'Stalled', waiting: 'Waiting for you' };
 
@@ -77,7 +80,7 @@ export function createSheet(dock) {
     // v0.6 choices: the first thing on the card when an agent proposed options
     c.choices = createChoices({ getTask: () => state.tasks.get(id) || null });
     // description
-    c.desc = h('div', { class: 'desc-text', tabindex: '0', role: 'button', 'aria-label': 'Edit description', onclick: () => editDesc(), onkeydown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); editDesc(); } } });
+    c.desc = h('div', { class: 'desc-text', tabindex: '0', role: 'button', 'aria-label': 'Edit description', onclick: (e) => { if (!e.target.closest('button, a') && !String(getSelection()).length) editDesc(); }, onkeydown: (e) => { if (e.target === c.desc && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); editDesc(); } } });
     c.descWrap = h('section', { class: 'sheet-section' }, h('h3', { class: 'section-title' }, 'Description', h('button', { class: 'icon-btn sm', type: 'button', 'aria-label': 'Edit description', onclick: () => editDesc() }, icon('pencil', 14))), c.desc);
     // conflicts (v0.2 radar)
     c.conflictList = h('ul', { class: 'conflict-list' });
@@ -131,22 +134,32 @@ export function createSheet(dock) {
     if (v !== t.title) patchTask(taskId, { title: v }, 'Could not rename task');
   }
 
-  function editDesc() {
+  function editDesc({ focus = true } = {}) {
     const t = state.tasks.get(taskId);
     if (!t || !ctx || ctx.editingDesc) return;
     ctx.editingDesc = true;
-    const ta = h('textarea', { class: 'desc-edit', rows: '4', 'aria-label': 'Description' });
-    ta.value = t.description || '';
+    const id = taskId;
+    const key = `desc:${id}`;
+    const base = t.description || '';
+    const ta = h('textarea', { class: 'desc-edit', rows: '4', 'aria-label': 'Description', spellcheck: 'false' });
+    ta.value = base;
+    bindDraft(ta, key, { base }); // a saved draft replaces the text; it is dropped on save or cancel
+    // code mode: transparent textarea over a highlighted `const description = \`…\`;` layer with a line-number gutter
+    const editor = codeEditor(ta, { block: true, className: 'desc-code', view: (v, st) => blockView(v, st, 'write a description') });
     const done = (save) => {
       if (!ctx || !ctx.editingDesc) return;
       ctx.editingDesc = false;
       const v = ta.value;
+      ta.value = ''; // so a debounced draft save that is still pending finds nothing to keep
+      clearDraft(key);
+      editor.destroy();
       wrap.remove();
       ctx.desc.hidden = false;
-      if (save && v.trim() !== (t.description || '').trim()) patchTask(taskId, { description: v.trim() }, 'Could not save description');
+      if (save && v.trim() !== base.trim()) patchTask(id, { description: v.trim() }, 'Could not save description');
     };
-    const wrap = h('div', { class: 'desc-editor' }, ta,
+    const wrap = h('div', { class: 'desc-editor' }, editor.el,
       h('div', { class: 'desc-editor-actions' },
+        h('span', { class: 'desc-hint mono' }, '⌘↵ save · esc cancel'),
         h('button', { class: 'btn btn-quiet btn-sm', type: 'button', onclick: () => done(false) }, 'Cancel'),
         h('button', { class: 'btn btn-primary btn-sm', type: 'button', onclick: () => done(true) }, 'Save')));
     ta.addEventListener('keydown', (e) => {
@@ -155,7 +168,8 @@ export function createSheet(dock) {
     });
     ctx.desc.hidden = true;
     ctx.desc.after(wrap);
-    ta.focus();
+    editor.sync();
+    if (focus) ta.focus();
   }
 
   function addDep() {
@@ -218,8 +232,18 @@ export function createSheet(dock) {
 
     // description
     const d = (t.description || '').trim();
-    setText(c.desc, d || 'Add a description…');
-    setClass(c.desc, 'placeholder', !d);
+    const asCode = codeOn();
+    setClass(c.desc, 'cm-desc', asCode);
+    setClass(c.desc, 'placeholder', !d && !asCode);
+    if (asCode) {
+      // code mode: the description is a code block; rebuilt only when what it shows changes
+      const style = getPref('codestyle');
+      const sig = `code|${style}|${t.id}|${t.status}|${d}`;
+      if (c.desc.__sig !== sig) { c.desc.__sig = sig; c.desc.textContent = ''; c.desc.append(renderDescription(t, style)); }
+    } else if (c.desc.__sig !== `text|${d}`) {
+      c.desc.__sig = `text|${d}`;
+      c.desc.textContent = d || 'Add a description…';
+    }
 
     // recap
     const r = t.recap;
@@ -351,6 +375,7 @@ export function createSheet(dock) {
     setUI({ selectedTaskId: taskId });
     ctx = build(taskId);
     update();
+    if (getDraft(`desc:${taskId}`) && getDraft(`desc:${taskId}`) !== (state.tasks.get(taskId) || {}).description) editDesc({ focus: false }); // unfinished edit: pick it back up
     panel.open({ focus: !panel.isOpen, front: true });
     load(taskId);
   }
@@ -365,6 +390,7 @@ export function createSheet(dock) {
     update();
   });
 
+  const offPrefs = onPrefs((k) => { if ((k === 'code' || k === 'codestyle') && taskId && ctx) update(); });
   const offDock = dock.subscribe(() => { if (taskId && ctx) { const t = state.tasks.get(taskId); if (t) updateChatBtn(t); } });
-  return { show, update, get taskId() { return taskId; }, destroy() { off(); offDock(); } };
+  return { show, update, get taskId() { return taskId; }, destroy() { off(); offDock(); offPrefs(); } };
 }

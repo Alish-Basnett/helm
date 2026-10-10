@@ -4,6 +4,21 @@ All notable changes to Helm are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/). Shapes and endpoints are defined in `CONTRACT.md`.
 
+## [0.10.0] - 2026-10-10
+
+### Added
+
+- Auto mode for Up next (per project, kept in the hub): when nothing is in progress, the top Up next task starts
+  by itself, one at a time, with a 5-minute backoff after a failed start. Adds a Manual | Auto switch, a
+  "Next up" marker, "Auto-started" in the activity log and an "Auto-start failed" needs-you reason.
+- Code mode now also covers the task description (view and editor) and every notes panel and note box.
+
+- Phone quick capture at `/m` (`web/m/`): add a task (with or without starting it), send a note to a live session and read the
+  reply, attach a photo or file, and see what needs you. Works on the Mac at `http://localhost:7777/m`.
+- Phone access (Settings > Phone access), off by default: `POST /v1/remote { enabled }` (loopback only) opens a token-protected
+  LAN listener on port 7778 with a route allow-list, rate limiting, a ban after repeated bad tokens and request logging. The link
+  comes with a QR code from a small built-in encoder. Switching it off closes the port and rotates the token.
+
 ## [0.9.0] - 2026-10-10
 
 ### Added

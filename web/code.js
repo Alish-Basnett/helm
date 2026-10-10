@@ -7,6 +7,7 @@ import { shortAnswer, replyModel, replyPending, replyDeadline } from './replies.
 import { modelInfo } from './format.js';
 import { api } from './api.js';
 import { openLightbox, isImage, fmtSize } from './attachments.js';
+import { getPref, codeOn, onPrefs } from './prefs.js';
 
 /* ================= tokenizer ================= */
 const words = (s) => new Set(s.split(/\s+/).filter(Boolean));
@@ -171,20 +172,21 @@ export function varName(id) {
   return `${WORDS[x % WORDS.length]}${(x >>> 8) % 100}`;
 }
 
-/** The note as a line of source: `const n7 = "…";` (template literal when it spans lines). Escapes so it is valid code. */
-export function messageSource(n, style) {
+/** `const name = "…";` (template literal when multi-line, or when `multi` is forced). Escapes so it is valid code. */
+export function stringDecl(name, text, style, multi) {
   const st = styleOf(style);
-  const v = varName(n.id);
-  const text = norm(n.text);
-  const multi = text.includes('\n');
+  text = norm(text);
+  if (multi == null) multi = text.includes('\n');
   if (st.id === 'py') {
-    if (!multi) return `${v} = "${text.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
-    return `${v} = """${text.replace(/\\/g, '\\\\').replace(/"{3}/g, '\\"\\"\\"').replace(/"$/, '\\"')}"""`;
+    if (!multi) return `${name} = "${text.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+    return `${name} = """${text.replace(/\\/g, '\\\\').replace(/"{3}/g, '\\"\\"\\"').replace(/"$/, '\\"')}"""`;
   }
-  const decl = st.id === 'ts' ? `const ${v}: string = ` : `const ${v} = `;
+  const decl = st.id === 'ts' ? `const ${name}: string = ` : `const ${name} = `;
   if (!multi) return `${decl}"${text.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}";`;
   return `${decl}\`${text.replace(/\\/g, '\\\\').replace(/`/g, '\\`').replace(/\$\{/g, '\\${')}\`;`;
 }
+/** The note as a line of source: `const n7 = "…";`. */
+export const messageSource = (n, style) => stringDecl(varName(n.id), n.text, style);
 
 const line = (nodes, cls, hang) => h('div', { class: ['cm-line', cls], style: hang ? { '--hang': `${hang}ch` } : null }, h('span', { class: 'cm-code' }, nodes));
 /** A comment line: ` * text` (JS/TS) or `# text` (Python). */
@@ -206,7 +208,11 @@ function stateComment(n, style, ctx) {
     kids.push('✗ failed');
     if (n.error) kids.push(' — ', h('span', { class: 'cm-err', title: n.error }, n.error));
     kids.push(' ', act('retry()', ctx.onRetry));
-  } else if (n.state === 'draft') kids.push('✎ draft ', act('send()', ctx.onSend), ' ', act('delete()', ctx.onDelete));
+  } else if (n.state === 'draft') {
+    kids.push('✎ draft ', act('send()', ctx.onSend), ' ');
+    if (ctx.onEdit) kids.push(act('edit()', ctx.onEdit), ' ');
+    kids.push(act('delete()', ctx.onDelete));
+  }
   else kids.push(String(n.state));
   const tone = n.__pending ? 'sending' : n.state;
   return h('span', { class: `cm-c cm-state cm-st-${tone}` }, kids);
@@ -370,16 +376,25 @@ function createReplyBlock() {
 }
 
 /* ================= one turn: my line(s) + Claude's reply ================= */
-/** ctx: { onSend(n), onDelete(n), onRetry(n) } → { el, update(note, style) } */
+/** ctx: { onSend(n), onDelete(n), onRetry(n), onEdit?(n) } → { el, update(note, style) }. onEdit adds an `edit()` token
+ *  to draft lines and makes a click on a draft's code start editing it. */
 export function createCodeTurn(ctx = {}) {
   const noop = () => {};
-  const c = { onSend: ctx.onSend || noop, onDelete: ctx.onDelete || noop, onRetry: ctx.onRetry || noop };
+  const c = { onSend: ctx.onSend || noop, onDelete: ctx.onDelete || noop, onRetry: ctx.onRetry || noop, onEdit: ctx.onEdit || null };
   let sig = '';
+  let cur = null;
   const me = h('div', { class: 'cm-me' });
+  if (c.onEdit) {
+    me.addEventListener('click', (e) => {
+      if (!cur || cur.state !== 'draft' || cur.__pending || e.target.closest('button, a') || String(getSelection()).length) return;
+      c.onEdit(cur);
+    });
+  }
   const reply = createReplyBlock();
   const wait = h('div', { class: 'cm-line cm-wait', role: 'status', hidden: true }, h('span', { class: 'cm-code' }));
   const el = h('div', { class: 'cm-turn' }, me, reply.el, wait);
   function update(n, style) {
+    cur = n;
     const st = styleOf(style);
     const s = [style, n.id, n.text, n.state, n.ranAt, n.error || '', n.__pending ? 1 : 0, taskLinkSig(n.text), (n.attachments || []).map((a) => a.id).join(',')].join('\u0001');
     if (s !== sig) {
@@ -409,17 +424,8 @@ export function createCodeTurn(ctx = {}) {
 }
 
 /* ================= composer overlay ================= */
-/** What the highlighted layer under the textarea shows: `const msg = "` + the typed text + `";`. Text is never altered. */
-export function composerView(text, style, placeholder) {
-  const st = styleOf(style);
-  text = norm(text);
-  const multi = text.includes('\n');
-  const py = st.id === 'py';
-  const q = multi ? (py ? '"""' : '`') : '"';
-  const pre = [];
-  if (py) pre.push(h('span', { class: 'cm-i' }, 'msg'), h('span', { class: 'cm-p' }, ' = '));
-  else pre.push(h('span', { class: 'cm-k' }, 'const'), ' ', h('span', { class: 'cm-i' }, 'msg'), st.id === 'ts' ? h('span', { class: 'cm-p' }, ': ') : '', st.id === 'ts' ? h('span', { class: 'cm-t' }, 'string') : '', h('span', { class: 'cm-p' }, ' = '));
-  const plainPrefix = py ? 'msg = ' : st.id === 'ts' ? 'const msg: string = ' : 'const msg = ';
+/** The typed text as a string body: `inline code` and T-n references coloured, the text itself never altered. */
+function bodyNodes(text, st) {
   const body = [];
   for (const part of text.split(/(`[^`\n]+`|(?<![A-Za-z0-9_])T-\d+(?![A-Za-z0-9_]))/)) {
     if (!part) continue;
@@ -427,7 +433,115 @@ export function composerView(text, style, placeholder) {
     else if (/^T-\d+$/.test(part)) body.push(h('span', { class: 'cm-t' }, part));
     else body.push(part);
   }
-  const nodes = [...pre, h('span', { class: 'cm-s' }, [q, h('span', { class: 'cm-sb' }, body), q]), h('span', { class: 'cm-p' }, py ? '' : ';')];
+  return body;
+}
+/** `const msg = ` (or `msg = ` in Python) as nodes, plus its plain-text length for the textarea's text-indent. */
+function declHead(st, name) {
+  const py = st.id === 'py';
+  const nodes = py
+    ? [h('span', { class: 'cm-i' }, name), h('span', { class: 'cm-p' }, ' = ')]
+    : [h('span', { class: 'cm-k' }, 'const'), ' ', h('span', { class: 'cm-i' }, name), st.id === 'ts' ? h('span', { class: 'cm-p' }, ': ') : '', st.id === 'ts' ? h('span', { class: 'cm-t' }, 'string') : '', h('span', { class: 'cm-p' }, ' = ')];
+  const len = py ? `${name} = `.length : (st.id === 'ts' ? `const ${name}: string = ` : `const ${name} = `).length;
+  return { nodes, len };
+}
+
+/** What the highlighted layer under the textarea shows: `const msg = "` + the typed text + `";`. Text is never altered. */
+export function composerView(text, style, placeholder, name = 'msg') {
+  const st = styleOf(style);
+  text = norm(text);
+  const multi = text.includes('\n');
+  const py = st.id === 'py';
+  const q = multi ? (py ? '"""' : '`') : '"';
+  const head = declHead(st, name);
+  const nodes = [...head.nodes, h('span', { class: 'cm-s' }, [q, h('span', { class: 'cm-sb' }, bodyNodes(text, st)), q]), h('span', { class: 'cm-p' }, py ? '' : ';')];
   if (!text && placeholder) nodes.push(' ', h('span', { class: 'cm-c cm-ph' }, `${st.com} ${placeholder}`));
-  return { nodes, prefixLen: plainPrefix.length + q.length };
+  return { nodes, prefixLen: head.len + q.length };
+}
+
+/** Like composerView but one entry per typed line (`lines`), for an editor with a line-number gutter. The text is
+ *  always shown as a template literal (or triple-quoted string), so the quotes never flip while typing. */
+export function blockView(text, style, placeholder, name = 'description') {
+  const st = styleOf(style);
+  text = norm(text);
+  const py = st.id === 'py';
+  const q = py ? '"""' : '`';
+  const head = declHead(st, name);
+  const parts = text.split('\n');
+  const lines = parts.map((ln, i) => {
+    const nodes = [];
+    if (i === 0) nodes.push(...head.nodes, h('span', { class: 'cm-s' }, q));
+    nodes.push(h('span', { class: 'cm-s cm-sb' }, bodyNodes(ln, st)));
+    if (i === parts.length - 1) {
+      nodes.push(h('span', { class: 'cm-s' }, q), h('span', { class: 'cm-p' }, py ? '' : ';'));
+      if (!text && placeholder) nodes.push(' ', h('span', { class: 'cm-c cm-ph' }, `${st.com} ${placeholder}`));
+    }
+    return nodes;
+  });
+  return { lines, prefixLen: head.len + q.length };
+}
+
+/**
+ * Code mode for any textarea: a highlighted layer sits under the (transparent-text) textarea so typing is coloured live.
+ * Returns { el, hl, sync, destroy }; put `el` (it now holds the textarea) where the textarea used to be. Nothing happens
+ * while Code mode is off, and the layer follows the setting live. opts:
+ *   view(text, style, ta) → { nodes, prefixLen } (inline composer) or { lines, prefixLen } (gutter + one entry per line)
+ *   block   – the gutter variant: also grows the textarea to its content so the layers stay aligned
+ *   className – extra class(es) for the wrapper
+ */
+export function codeEditor(ta, opts = {}) {
+  const view = opts.view || ((t, st) => composerView(t, st, ta.getAttribute('placeholder') || ''));
+  const block = !!opts.block;
+  const hl = h('pre', { class: 'cm-hl', 'aria-hidden': 'true' });
+  const el = h('div', { class: ['cm-ed', block && 'cm-ed-block', opts.className] }, hl, ta);
+  ta.classList.add('cm-ta');
+  function sync() {
+    if (!codeOn()) { ta.style.textIndent = ''; hl.textContent = ''; if (block) ta.style.height = ''; return; }
+    const v = view(ta.value, getPref('codestyle'), ta);
+    hl.textContent = '';
+    if (v.lines) hl.append(...v.lines.map((nodes) => line(nodes, 'cm-msg')));
+    else hl.append(...v.nodes);
+    ta.style.textIndent = `${v.prefixLen}ch`;
+    if (block) { ta.style.height = 'auto'; ta.style.height = `${Math.max(ta.scrollHeight, 0)}px`; }
+    hl.scrollTop = ta.scrollTop;
+  }
+  const onScroll = () => { hl.scrollTop = ta.scrollTop; };
+  ta.addEventListener('input', sync);
+  ta.addEventListener('scroll', onScroll);
+  const off = onPrefs((k) => { if (k === 'code' || k === 'codestyle') sync(); });
+  sync();
+  return { el, hl, sync, destroy() { off(); ta.removeEventListener('input', sync); ta.removeEventListener('scroll', onScroll); } };
+}
+
+/* ================= blocks: any text as a code block ================= */
+/** Source text → a block of numbered, highlighted code lines (DOM only). opts: { cls } extra class for the block. */
+export function renderCodeBlock(src, style, opts = {}) {
+  const lines = tokenizeLines(src, styleOf(style).lang).map((t) => line(tokNodes(t, false), 'cm-msg'));
+  return h('div', { class: ['cm-block', opts.cls] }, lines);
+}
+
+/** A task's description as source: a typed header object and the text as a template literal. */
+export function descriptionSource(task, style) {
+  const st = styleOf(style);
+  const id = JSON.stringify(String(task.id || ''));
+  const status = JSON.stringify(String(task.status || ''));
+  const text = norm(task.description).trim();
+  const head = st.id === 'py' ? `task = {"id": ${id}, "status": ${status}}`
+    : st.id === 'ts' ? `export const task: Task = { id: ${id}, status: ${status} };`
+      : `export const task = { id: ${id}, status: ${status} };`;
+  const body = text
+    ? stringDecl('description', text, style, true)
+    : `${stringDecl('description', '', style, false)} ${st.com} click to add a description`;
+  return `${head}\n${body}`;
+}
+/** The description view: a code block; a click anywhere on it (not on a task chip) calls opts.onEdit. */
+export function renderDescription(task, style, opts = {}) {
+  return renderCodeBlock(descriptionSource(task, style), style, { cls: 'cm-desc-block' });
+}
+
+/** One note in code form (`const n12 = "…"; // ✓ delivered 2m ago`, reply as a `/** @reply *\/` block), cached on `host`. */
+export function noteAsCode(host, n, style, ctx) {
+  let cm = host.__cm;
+  if (!cm) { cm = host.__cm = createCodeTurn(ctx); host.append(cm.el); }
+  cm.update(n, style);
+  return cm;
 }
