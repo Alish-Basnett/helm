@@ -1,0 +1,5 @@
+{
+  "name": "helm-local",
+  "owner": { "name": "Alish Basnet" },
+  "plugins": [{ "name": "helm", "source": "./" }]
+}

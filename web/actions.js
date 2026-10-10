@@ -1,0 +1,293 @@
+// actions.js — optimistic user actions with rollback + toast on error.
+import { api } from './api.js';
+import { state, upsert, remove, sel } from './store.js';
+import { toast, toastError } from './ui.js';
+
+let tmpCounter = 0;
+const tmpId = (p) => `tmp-${p}-${Date.now().toString(36)}${++tmpCounter}`;
+
+/* ---------- tasks ---------- */
+export async function patchTask(id, patch, errLabel = 'Could not update task') {
+  const before = state.tasks.get(id);
+  if (!before) return null;
+  const now = Date.now();
+  const optimistic = { ...before, ...patch };
+  if (patch.status && patch.status !== before.status) {
+    if (patch.status === 'done') optimistic.doneAt = now;
+    if (patch.status !== 'blocked') optimistic.blockedReason = patch.status === before.status ? before.blockedReason : null;
+  }
+  upsert('task', optimistic);
+  try {
+    const { task } = await api.patchTask(id, patch);
+    if (task) upsert('task', task);
+    return task;
+  } catch (e) {
+    if (state.tasks.get(id) === optimistic) upsert('task', before);
+    toastError(e, errLabel);
+    return null;
+  }
+}
+
+export function setStatus(id, status, label) {
+  const t = state.tasks.get(id);
+  if (!t || t.status === status) return Promise.resolve(null);
+  return patchTask(id, { status }, label || 'Could not move task');
+}
+
+export async function createTask({ projectId, title, description, status = 'backlog', dependsOn, sessionId }) {
+  title = (title || '').trim();
+  if (!title) return null;
+  const col = sel.scopedTasks().filter((t) => t.status === status && t.projectId === projectId);
+  const order = col.reduce((m, t) => Math.max(m, t.order || 0), 0) + 1;
+  const tmp = {
+    id: tmpId('T'), projectId, sessionId: sessionId || null, title, description: description || '', status,
+    agentId: null, order, blockedReason: null, dependsOn: dependsOn || [], filesChanged: [], tokens: 0, recap: null,
+    createdAt: Date.now(), updatedAt: Date.now(), doneAt: null, __pending: true,
+  };
+  upsert('task', tmp);
+  try {
+    const body = { projectId, title, status };
+    if (description) body.description = description;
+    if (dependsOn && dependsOn.length) body.dependsOn = dependsOn;
+    if (sessionId) body.sessionId = sessionId;
+    const { task } = await api.createTask(body);
+    remove('task', tmp.id);
+    if (task) upsert('task', task);
+    return task;
+  } catch (e) {
+    remove('task', tmp.id);
+    toastError(e, 'Could not create task');
+    return null;
+  }
+}
+
+/* ---------- projects ---------- */
+export async function createProject(name) {
+  name = (name || '').trim();
+  if (!name) return null;
+  const tmp = { id: tmpId('P'), name, createdAt: Date.now(), archived: false, __pending: true };
+  upsert('project', tmp);
+  try {
+    const { project } = await api.createProject(name);
+    remove('project', tmp.id);
+    if (project) upsert('project', project);
+    return project;
+  } catch (e) {
+    remove('project', tmp.id);
+    toastError(e, 'Could not create project');
+    return null;
+  }
+}
+
+export async function patchProject(id, patch, errLabel = 'Could not update project') {
+  const before = state.projects.get(id);
+  if (!before) return null;
+  const optimistic = { ...before, ...patch };
+  upsert('project', optimistic);
+  try {
+    const { project } = await api.patchProject(id, patch);
+    if (project) upsert('project', project);
+    return project;
+  } catch (e) {
+    if (state.projects.get(id) === optimistic) upsert('project', before);
+    toastError(e, errLabel);
+    return null;
+  }
+}
+
+export async function archiveProject(id, archived = true) {
+  const p = state.projects.get(id);
+  const res = await patchProject(id, { archived }, archived ? 'Could not archive project' : 'Could not restore project');
+  if (res && archived && p) {
+    toast(`Archived “${p.name}”`, { action: { label: 'Undo', onClick: () => archiveProject(id, false) } });
+  }
+  return res;
+}
+
+export async function joinSession(sessionId, projectId) {
+  const s = state.sessions.get(sessionId);
+  if (!s || s.projectId === projectId) return null;
+  const before = { session: s, tasks: [] };
+  const optimistic = { ...s, projectId };
+  upsert('session', optimistic);
+  for (const t of state.tasks.values()) {
+    if (t.sessionId === sessionId && t.projectId !== projectId) {
+      before.tasks.push(t);
+      upsert('task', { ...t, projectId });
+    }
+  }
+  try {
+    const { session } = await api.join(sessionId, projectId);
+    if (session) upsert('session', session);
+    toast(`Moved to ${sel.projectName(projectId)}`, { kind: 'success' });
+    return session;
+  } catch (e) {
+    if (state.sessions.get(sessionId) === optimistic) upsert('session', before.session);
+    for (const t of before.tasks) upsert('task', t);
+    toastError(e, 'Could not move session');
+    return null;
+  }
+}
+
+/* ---------- notes ---------- */
+export async function addNote(target, text, { execute = false } = {}) {
+  text = (text || '').trim();
+  if (!text) return null;
+  const sessionId = target.kind === 'session' ? target.id : (state.tasks.get(target.id) || {}).sessionId || '';
+  const tmp = {
+    id: tmpId('N'), target: { kind: target.kind, id: target.id }, sessionId, text,
+    state: execute ? 'queued' : 'draft', createdAt: Date.now(), queuedAt: execute ? Date.now() : null,
+    ranAt: null, via: null, error: null, __pending: true,
+  };
+  upsert('note', tmp);
+  let created = null;
+  try {
+    const { note } = await api.createNote({ kind: target.kind, id: target.id }, text);
+    created = note;
+    remove('note', tmp.id);
+    if (note) upsert('note', note);
+  } catch (e) {
+    remove('note', tmp.id);
+    toastError(e, 'Could not add note');
+    return null;
+  }
+  if (execute) await executeNotes(target);
+  return created;
+}
+
+export async function editNote(id, text) {
+  const before = state.notes.get(id);
+  text = (text || '').trim();
+  if (!before || !text || before.text === text) return null;
+  const optimistic = { ...before, text };
+  upsert('note', optimistic);
+  try {
+    const res = await api.patchNote(id, text);
+    if (res && res.note) upsert('note', res.note);
+    return res;
+  } catch (e) {
+    if (state.notes.get(id) === optimistic) upsert('note', before);
+    toastError(e, 'Could not edit note');
+    return null;
+  }
+}
+
+export async function deleteNote(id) {
+  const before = state.notes.get(id);
+  if (!before) return;
+  remove('note', id);
+  try {
+    await api.deleteNote(id);
+  } catch (e) {
+    if (!state.notes.has(id)) upsert('note', before);
+    toastError(e, 'Could not delete note');
+  }
+}
+
+export async function executeNotes(target) {
+  const drafts = sel.notesFor(target.kind, target.id).filter((n) => n.state === 'draft' && !n.__pending);
+  if (!drafts.length) return [];
+  const now = Date.now();
+  const optimistic = drafts.map((n) => ({ ...n, state: 'queued', queuedAt: now }));
+  optimistic.forEach((n) => upsert('note', n));
+  try {
+    const { notes } = await api.executeNotes({ kind: target.kind, id: target.id });
+    (notes || []).forEach((n) => upsert('note', n));
+    return notes;
+  } catch (e) {
+    drafts.forEach((n, i) => { if (state.notes.get(n.id) === optimistic[i]) upsert('note', n); });
+    toastError(e, 'Could not execute notes');
+    return [];
+  }
+}
+
+export async function retryNote(id) {
+  const before = state.notes.get(id);
+  if (!before) return;
+  const optimistic = { ...before, state: 'queued', error: null, queuedAt: Date.now() };
+  upsert('note', optimistic);
+  try {
+    const res = await api.retryNote(id);
+    if (res && res.note) upsert('note', res.note);
+  } catch (e) {
+    if (state.notes.get(id) === optimistic) upsert('note', before);
+    toastError(e, 'Could not retry note');
+  }
+}
+
+/* ---------- card actions (shared by board, sheet, spotlight) ---------- */
+export function quickActions(task) {
+  const out = [];
+  if (task.status !== 'done') out.push({ key: 'done', label: 'Done', icon: 'check', to: 'done' });
+  if (task.status === 'blocked') out.push({ key: 'retry', label: 'Retry', icon: 'retry', to: 'next' });
+  if (task.status === 'later') out.push({ key: 'next', label: 'Up next', icon: 'arrowRight', to: 'next' });
+  if (task.status !== 'later') out.push({ key: 'later', label: 'Later', icon: 'bookmark', to: 'later' });
+  out.push({ key: 'archive', label: 'Archive', icon: 'archive', to: 'archived' });
+  return out;
+}
+
+export function runQuickAction(task, action) {
+  const p = setStatus(task.id, action.to, `Could not ${action.label.toLowerCase()}`);
+  if (action.to === 'archived') {
+    toast(`Archived ${task.id}`, { action: { label: 'Undo', onClick: () => setStatus(task.id, task.status) } });
+  }
+  return p;
+}
+
+/* ---------- v0.2: questions inbox ---------- */
+export async function dismissQuestion(id) {
+  const before = state.questions.get(id);
+  if (!before || before.state === 'answered') return null;
+  const optimistic = { ...before, state: 'answered', answeredAt: Date.now() };
+  upsert('question', optimistic);
+  try {
+    const res = await api.dismissQuestion(id);
+    if (res && res.question) upsert('question', res.question);
+    return res;
+  } catch (e) {
+    if (state.questions.get(id) === optimistic) upsert('question', before);
+    toastError(e, 'Could not dismiss question');
+    return null;
+  }
+}
+
+/* ---------- v0.2: jobs (explain deeper, daily digest) ---------- */
+const jobBusy = (j) => !!j && (j.state === 'queued' || j.state === 'running');
+
+/** Ask a live session (Haiku) to explain a task in more depth. Returns the job, or null. */
+export async function explainTask(id) {
+  const before = state.tasks.get(id);
+  if (!before) return null;
+  const current = sel.explainJob(before);
+  if (jobBusy(current)) return current;
+  upsert('task', { ...before, explainJob: { id: 'tmp-explain', state: 'queued' } });
+  try {
+    const { job } = await api.explain(id);
+    if (job) {
+      upsert('job', job);
+      const t = state.tasks.get(id);
+      if (t) upsert('task', { ...t, explainJob: { id: job.id, state: job.state } });
+    }
+    return job || null;
+  } catch (e) {
+    const t = state.tasks.get(id);
+    if (t && t.explainJob && t.explainJob.id === 'tmp-explain') upsert('task', { ...t, explainJob: before.explainJob || null });
+    toastError(e, 'Could not start explanation');
+    return null;
+  }
+}
+
+/** Ask a live session to write the digest for today (or `date`), for a project or everything. */
+export async function generateDigest({ projectId, date } = {}) {
+  const body = {};
+  if (projectId && projectId !== 'all') body.projectId = projectId;
+  if (date) body.date = date;
+  try {
+    const { job } = await api.generateDigest(body);
+    if (job) upsert('job', job);
+    return job || null;
+  } catch (e) {
+    toastError(e, 'Could not start digest');
+    return null;
+  }
+}

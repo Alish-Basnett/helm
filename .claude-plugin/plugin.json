@@ -1,0 +1,23 @@
+{
+  "name": "helm",
+  "version": "0.2.0",
+  "description": "Mission control for Claude Code: live kanban, Office, Threads, recaps, executable notes and spotlight across sessions.",
+  "author": {
+    "name": "Alish Basnet"
+  },
+  "userConfig": {
+    "obsidianExport": {
+      "type": "boolean",
+      "title": "Export recaps to Obsidian",
+      "description": "Append every task recap to a daily note in your Obsidian vault.",
+      "default": false
+    },
+    "obsidianPath": {
+      "type": "string",
+      "title": "Obsidian folder",
+      "description": "Vault folder for the learning log (a Helm/ subfolder is created).",
+      "default": "/Users/alishbasnet/WebDev/builtbyAlish/ClearFlow/Learning"
+    }
+  },
+  "types": "./types/index.d.ts"
+}
