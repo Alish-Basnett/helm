@@ -8,6 +8,7 @@
 import path from 'node:path';
 import { applyWf, bookRunUsage } from './workflows.mjs';
 import { applyTemplate } from './templates.mjs';
+import { applyConcept, conceptsOnRecap, storeSummary } from './concepts.mjs';
 
 export const STALL_REASON = 'no activity for 10 min';
 export const SENDING_TIMEOUT_ERROR = 'delivery unconfirmed — retry';
@@ -86,7 +87,7 @@ export const toDigest = (r) => ({
   id: r.id, date: r.date, projectId: r.project_id ?? null, text: r.text, createdAt: r.created_at,
 });
 
-export const USAGE_KINDS = ['recap', 'answer', 'explain', 'digest', 'note_turn', 'wf_step', 'wf_review', 'wf_draft'];
+export const USAGE_KINDS = ['recap', 'answer', 'explain', 'digest', 'note_turn', 'wf_step', 'wf_review', 'wf_draft', 'concept_summary'];
 /** Kinds that count as work the user asked for (the rest is Helm's own overhead). */
 export const REQUESTED_KINDS = ['note_turn', 'wf_step'];
 export const NOTE_VIAS = ['prompt', 'send_message', 'followup_spawn', 'answer', 'start'];
@@ -559,6 +560,7 @@ export class Projector {
       case 'task.choices': return this.onTaskChoices(ev);
       case 'hub.task.choices': return this.hTaskChoices(ev);
       case 'hub.template.create': case 'hub.template.update': case 'hub.template.used': return applyTemplate(this, ev);
+      case 'hub.concept.update': case 'hub.concept.merge': return applyConcept(this, ev);
       default:
         if (ev.type.startsWith('wf.')) return applyWf(this, ev);
         this.log?.warn(`unknown event type ignored: ${ev.type}`);
@@ -856,6 +858,7 @@ export class Projector {
     const recap = { what: str(d.what), how: str(d.how), learned: str(d.learned), concepts };
     this.upd('tasks', t.id, { recap: JSON.stringify(recap), recap_at: at, updated_at: Math.max(t.updated_at, at) });
     this.indexRecap(this.getTask(t.id));
+    conceptsOnRecap(this, t.id, concepts, at);
     this.pushTask(t.id);
     this.ensureSession(ev.sessionId, at);
     this.addActivity({
@@ -974,6 +977,9 @@ export class Projector {
       this.upd('jobs', j.id, { state: 'running', claimed_at: j.claimed_at ?? at, result: cut(text, 20000), error: null, done_at: null });
       this.pushJob(j.id);
       return;
+    } else if (j.kind === 'concept_summary') {
+      // v0.13: the page becomes Concept.summary (the slug may have been merged away since the job was made)
+      storeSummary(this, str(parse(j.input, {}).concept?.slug), text, at);
     } else if (j.kind === 'digest') {
       this.createDigest({ date: str(parse(j.input, {}).date), projectId: j.project_id, text: cut(text, 20000), at });
     }

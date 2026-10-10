@@ -16,6 +16,7 @@ import { createNotesPanel } from '../notes.js';
 import { createTalk } from './talk.js';
 import { taskChip } from '../tasklinks.js';
 import { navigate, setArgs, openTask } from '../router.js';
+import { conceptTag } from '../concepts.js';
 
 const akey = (a) => a.toolUseId || a.id;
 const AGENT_STATUS = { running: 'Running', done: 'Done', failed: 'Failed', stalled: 'Stalled', waiting: 'Waiting for you' };
@@ -1098,7 +1099,7 @@ export function mount(container) {
             for (const [k, v] of [['What', rc.what], ['How', rc.how], ['Learned', rc.learned]]) {
               r.recap.append(h('div', { class: 'recap-row' }, h('div', { class: 'recap-label' }, k), h('p', { class: 'recap-text' }, v || '—')));
             }
-            if (rc.concepts && rc.concepts.length) r.recap.append(h('div', { class: 'tags' }, rc.concepts.map((c) => h('button', { class: 'tag', type: 'button', onclick: () => navigate('learn', [], { concept: c }) }, icon('tag', 12), c))));
+            if (rc.concepts && rc.concepts.length) r.recap.append(h('div', { class: 'tags' }, rc.concepts.map((c) => conceptTag(c))));
           }
         }
         // prompt box

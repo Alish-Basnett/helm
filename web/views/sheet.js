@@ -21,6 +21,7 @@ import { codeOn, getPref, onPrefs } from '../prefs.js';
 import { codeEditor, blockView, renderDescription } from '../code.js';
 import { openTemplateEditor } from '../templates.js';
 import { createGitPanel } from '../gitpanel.js';
+import { conceptTag } from '../concepts.js';
 
 const AGENT_STATUS = { running: 'Running', done: 'Done', failed: 'Failed', stalled: 'Stalled', waiting: 'Waiting for you' };
 
@@ -272,7 +273,7 @@ export function createSheet(dock) {
         c.recapBody.append(
           recapRow('What', r.what), recapRow('How', r.how), recapRow('Learned', r.learned),
           r.concepts && r.concepts.length
-            ? h('div', { class: 'tags' }, r.concepts.map((cn) => h('button', { class: 'tag', type: 'button', onclick: () => navigate('learn', [], { concept: cn }) }, icon('tag', 12), cn)))
+            ? h('div', { class: 'tags' }, r.concepts.map((cn) => conceptTag(cn)))
             : null);
       }
     }

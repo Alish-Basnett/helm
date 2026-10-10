@@ -725,6 +725,61 @@ While a GitHub branch is pushed: `GET /repos/<o>/<r>/pulls?head=<owner>:<branch>
 - **Linked**: a PR chip (`#123 open|merged|closed`, links out) and CI badges: a summary plus one chip per check, each linking to its check URL; `unknown` shows the reason and a retry button.
 - **Board card**: a tiny branch glyph with a CI dot (green passing, red failing, amber running). `needsYou` adds "CI failed" for `ci.state === 'failure'`.
 
+## v0.13 additions — concepts (Learn++: a knowledge base built from recaps)
+
+Every `recap.generated` tags the ideas it touched (`Task.recap.concepts`). Helm gathers those tags into **concepts**: one page per idea, with the tasks that taught it. The hub still never calls a model; a page is written by a `concept_summary` Job (the v0.2 mechanism). `GET /v1/learn` is unchanged (the Feed tab still uses it).
+
+```ts
+type Concept = {
+  slug: string;                 // URL id, e.g. 'sqlite'; fixed at creation (a rename changes `name`, never the slug)
+  name: string;                 // display name; starts as the lower-cased first-seen tag (or the built-in canonical name)
+  aliases: string[];            // other spellings that land here: seen variants, user aliases, merged-away names (<= 20, lower-case)
+  summary: string | null;       // markdown page. Only on GET /v1/concepts/:slug (and PATCH/merge answers have it null); elsewhere null
+  hasSummary: boolean;          // true when a summary exists, even where `summary` is null
+  summaryAt: number | null;
+  taskIds: string[];            // newest first; taskAts is parallel (the recap time of each)
+  taskAts: number[];
+  firstSeenAt: number; lastSeenAt: number; count: number;   // count = taskIds.length
+  related: string[];            // slugs, top 5 by number of tasks shared with this concept (ties: slug)
+  pinned: boolean;
+  needsSummary: boolean;        // count >= 3 and no summary. A flag only: the hub never starts a job by itself (it costs money)
+}
+```
+
+### Building (deterministic)
+- Each tag is reduced to a **match key**: slug (`NFKD`, lower-case, `[a-z0-9]` runs joined by `-`, `+` -> `plus`, `#` -> `sharp`), hyphens removed, one trailing `s` dropped (not after `ss`/`us`/`is`; `ies` -> `y`), then the built-in alias map (`js`->javascript, `ts`->typescript, `py`->python, `golang`->go, `postgres`/`psql`->postgresql, `k8s`->kubernetes, `a11y`->accessibility, `i18n`, `l10n`, `sql-lite`->sqlite, `nodejs`->node, ... see `BUILTIN_ALIASES` in `hub/concepts.mjs`). Equal keys are the same concept (`tests` = `test`, `sql-lite` = `sqlite`). Table `concept_keys(key -> slug)` is the lookup.
+- `recap.generated` replaces the task's links: it is removed from every concept it was in and added to the concepts its tags resolve to (a regenerated recap can drop a concept; one with no tasks, no pin and no summary disappears). Unknown keys create a concept (`count` etc. come from `concept_tasks(slug, task_id, at)`, `at` = the recap event time). Related = co-occurrence inside one task's recap.
+- **Back-fill**: opening a database from before v0.13 builds concepts once from the recaps already stored on tasks (`meta.concepts_backfilled`); `helmd --rebuild` reproduces them from the event log (recaps plus the commands below), byte for byte.
+
+### Endpoints
+- `GET /v1/concepts?q=&sort=recent|count|name` -> `{ concepts: Concept[] }` (all of them, no `summary`). `q` is a case-insensitive substring over name, slug and aliases (punctuation ignored). `sort`: `recent` = lastSeenAt desc (default), `count` desc, `name` A-Z; anything else 400.
+- `GET /v1/concepts/:slug` -> `{ concept: Concept (with summary), tasks: { id, title, projectId, status, what, how, learned, doneAt, at }[] }` newest first (`at` = recap time). `:slug` may be any alias or spelling of the concept; the answer carries the canonical `concept.slug`. 404 unknown.
+- `PATCH /v1/concepts/:slug { name?, pinned?, aliases?, summary? }` -> `{ concept }`. `name` 1-60 chars; `aliases` array of <= 20 strings (replaces the list; 409 `"x" already belongs to the concept "y": merge them instead` when an alias is another concept's name/alias; a removed alias stops redirecting); `summary` string or null (hand-edit / clear a bad page). 400 on bad input or an empty body.
+- `POST /v1/concepts/merge { from, into }` -> `{ concept }` (the survivor). Moves all tasks, adds `from`'s name and aliases to `into`'s aliases, keeps the pin (either side) and the summary (`into`'s, else `from`'s); `from` disappears (SSE `delete`), its names keep resolving to `into`, and future recaps tagged with them land there. 400 same concept or bad body, 404 unknown.
+- `POST /v1/concepts/:slug/summarize` -> `{ job }` (200). Creates the `concept_summary` Job below. A queued/running job for the same concept is returned instead of a new one. Session rule as digests: any *active* session (latest `lastSeenAt`), none -> 409 `{ error: 'no live session' }`. 404 unknown concept.
+
+### `concept_summary` job
+`Job.kind = 'concept_summary'`, `Job.taskId = null`, `Job.projectId = null` (concepts are global; project-scoped `/v1/state` still lists these jobs). `Job.input`:
+```
+{ concept: { slug, name, aliases: string[], count },
+  learnedLines: { taskId, title, learned, how }[],   // the 20 most recent tasks, newest first; learned/how cut to 600 chars
+  related: string[] }                                // names of the related concepts
+```
+**What the mod must send:** `{ sessionId, seq, type: 'job.result', data: { jobId, ok: true, text } }` where `text` is a markdown page under 300 words with exactly these sections, in order: `## What it is`, `## How you used it` (bullets citing tasks as `T-n`, taken from `learnedLines`), `## Pitfalls`, `## Go deeper`. Failure: `{ jobId, ok: false, error }`. Suggested model: Haiku, `maxTokens` ~900, `JSON.stringify(job.input)` as the prompt (`JOB_SYSTEM.concept_summary` / `JOB_MODEL.concept_summary` in `hooks/register.ts`). Meter it with `helm.usage` kind **`concept_summary`** (accepted since v0.13).
+
+Applying the result: the `job.result` event is the record. It sets `Concept.summary` (<= 8000 chars) and `summaryAt` on the concept named by `input.concept.slug` (resolved through the key map if it was merged meanwhile), re-indexes it in FTS and pushes the concept; the job ends `done`. A failed job changes nothing. A late result for a job the sweep timed out is still applied (same rule as every job).
+
+### State, events, search
+- `/v1/state` gains `concepts`: the 200 most recently seen (`lastSeenAt` desc, then slug), **without** `summary` (fetch the page per concept). SSE entity `concept`: `upsert` with the same summary-less row (watch `summaryAt` / `hasSummary` to know a page changed) and `delete` with row `{ slug }` (after a merge or when a recap dropped the last task). Web rows are keyed by `slug`.
+- FTS kind `concept` (`ref` = slug, title = name, body = aliases + summary); `projectId` null. Removed when the concept disappears.
+- Events (session `_hub`): `hub.concept.update { slug, patch }`, `hub.concept.merge { from, into }`. Concept creation and linking are part of applying `recap.generated`; the summary is part of applying `job.result`. All three are replayed by `helmd --rebuild` without deciding anything again.
+
+### Web
+- **Learn has two tabs**: Feed (the digest card, concept pills, Today strip and recap cards, as before) and Concepts. Routes: `#/learn` (Feed), `#/learn/concepts`, `#/learn/c/<slug>`.
+- **Concepts tab**: search box (hub `q`), sort Recent / Most used / A-Z, "Pinned first" toggle (remembered), cards with name, task count, last seen, a 14-day sparkline (from `taskAts`), related chips, a pin button and a "page" / "needs a page" flag.
+- **Concept page**: header (name, "Also called" aliases with add/remove, Pin, Rename, "Merge into…" with a confirm step); **The page** (summary markdown with `T-n` chips, or "Write the page" which creates the job and shows "Haiku is writing…" until the `job.result` lands; "Rewrite" afterwards; failed jobs show the error and Retry); **Where you learned it** (timeline of tasks with What / How / Learned and chips that open the Dock); **Related concepts**. With Code mode on the page renders as a doc comment (`/** @concept name … */ export function name() {}`).
+- Every recap concept chip (task details, Learn feed, Review queue, Threads) opens its concept page; Spotlight searches concepts (group "Concepts") and has "Go to Concepts".
+
 ## Review queue (web only; no hub change)
 - `#/review[/T-n]`: tasks with `status: 'review'` in the project scope, ordered by when their agent finished (`Agent.endedAt`, else `Task.updatedAt`), oldest first by default.
 - Approve = `PATCH /v1/tasks/:id { status: 'done' }` (a workflow gate card uses `POST /v1/runs/:id/gates/:node` instead). Later = `{ status: 'later' }`.

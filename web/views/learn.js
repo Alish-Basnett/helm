@@ -1,4 +1,5 @@
-// views/learn.js — concept pills, "today" strip, recap cards (What · How · Learned).
+// views/learn.js — Learn: two tabs. Feed = digest card, concept pills, "today" strip, recap cards (What · How · Learned);
+// Concepts = searchable concept cards (views/concepts.js); #/learn/c/<slug> = one concept's page.
 import { h, reconcile, setText, setClass, setHidden, startTicker } from '../dom.js';
 import { icon } from '../icons.js';
 import { state, sel, upsert } from '../store.js';
@@ -8,7 +9,9 @@ import { fmtAgo, fmtDay, startOfToday, truncate } from '../format.js';
 import { emptyState } from '../ui.js';
 import { setMarkdown } from '../markdown.js';
 import { createExplain } from '../explain.js';
-import { openTask, setArgs, navigate, route } from '../router.js';
+import { openTask, navigate, route } from '../router.js';
+import { createConceptsTab, createConceptPage } from './concepts.js';
+import { conceptTag } from '../concepts.js';
 
 const pad2 = (n) => String(n).padStart(2, '0');
 const localDate = (d = new Date()) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
@@ -18,7 +21,8 @@ function parseDay(str) {
   return m ? new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])) : null;
 }
 
-export function mount(container) {
+/** The Feed tab: everything Learn showed before concepts got their own pages. */
+function createFeed(container) {
   let data = null; // concepts[]
   let error = null;
   let loading = true;
@@ -187,11 +191,11 @@ export function mount(container) {
       }
     }
     const names = Array.from(r.concepts);
-    const tsig = names.join('|') + '|' + concept;
+    const tsig = names.join('|') + '|' + concept + '|' + state.concepts.size;
     if (x.tags.__sig !== tsig) {
       x.tags.__sig = tsig;
       x.tags.textContent = '';
-      names.forEach((n) => x.tags.append(h('button', { class: 'tag' + (n === concept ? ' on' : ''), type: 'button', onclick: () => setConcept(n === concept ? null : n) }, icon('tag', 12), n)));
+      names.forEach((n) => x.tags.append(conceptTag(n, { on: n === concept })));
     }
   }
 
@@ -265,5 +269,52 @@ export function mount(container) {
       if (d !== digestSel) { digestSel = d; fetchedMissing = false; renderDigest(); }
     },
     destroy() { clearTimeout(timer); reqId++; root.remove(); },
+  };
+}
+
+const TABS = [['feed', 'Feed'], ['concepts', 'Concepts']];
+const tabOf = (r) => (r.args[0] === 'c' && r.args[1] ? 'page' : r.args[0] === 'concepts' ? 'concepts' : 'feed');
+
+export function mount(container, r0) {
+  const r = r0 || route();
+  let tab = tabOf(r);
+  const feedHost = h('div', { class: 'learn-pane', 'data-pane': 'feed' });
+  const conceptsHost = h('div', { class: 'learn-pane', 'data-pane': 'concepts' });
+  const pageHost = h('div', { class: 'learn-pane', 'data-pane': 'page' });
+  const tabBtns = TABS.map(([k, label]) => h('button', { class: 'learn-tab', type: 'button', role: 'tab', 'data-tab': k, onclick: () => navigate('learn', k === 'feed' ? [] : [k]) }, label));
+  const tabBar = h('div', { class: 'learn-tabs', role: 'tablist', 'aria-label': 'Learn' }, tabBtns);
+  const root = h('div', { class: 'learn-root' }, tabBar, feedHost, conceptsHost, pageHost);
+  container.appendChild(root);
+
+  const feed = createFeed(feedHost);
+  const concepts = createConceptsTab(conceptsHost);
+  const page = createConceptPage(pageHost);
+
+  function show(rt) {
+    const prev = tab;
+    tab = tabOf(rt);
+    for (const b of tabBtns) {
+      const on = b.getAttribute('data-tab') === (tab === 'page' ? 'concepts' : tab);
+      setClass(b, 'on', on);
+      b.setAttribute('aria-selected', String(on));
+    }
+    setHidden(feedHost, tab !== 'feed');
+    setHidden(conceptsHost, tab !== 'concepts');
+    setHidden(pageHost, tab !== 'page');
+    if (tab === 'concepts') concepts.activate(); else concepts.deactivate();
+    if (tab === 'page') page.show(rt.args[1]); else page.hide();
+    if (tab === 'feed') { feed.setRoute(rt); if (prev !== 'feed') feed.update(new Set(['task', 'digest', 'job'])); } // it missed updates while hidden
+  }
+  show(r);
+
+  return {
+    watch: ['task', 'ui', 'digest', 'job', 'concept'],
+    update(changed) {
+      if (tab === 'feed') feed.update(changed);
+      else if (tab === 'concepts') concepts.update(changed);
+      else page.update(changed);
+    },
+    setRoute(rt) { show(rt); },
+    destroy() { feed.destroy(); concepts.destroy(); page.destroy(); root.remove(); },
   };
 }

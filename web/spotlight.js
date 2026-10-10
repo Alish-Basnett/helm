@@ -23,8 +23,9 @@ const KIND = {
   digest: { label: 'Digests', icon: 'calendar' },
   workflow: { label: 'Workflows', icon: 'workflow' },
   template: { label: 'Templates', icon: 'templates' },
+  concept: { label: 'Concepts', icon: 'tag' },
 };
-const KIND_ORDER = ['task', 'template', 'question', 'workflow', 'session', 'note', 'recap', 'digest', 'activity', 'project'];
+const KIND_ORDER = ['task', 'concept', 'template', 'question', 'workflow', 'session', 'note', 'recap', 'digest', 'activity', 'project'];
 
 export function createSpotlight(root) {
   let isOpen = false;
@@ -39,7 +40,7 @@ export function createSpotlight(root) {
 
   const input = h('input', {
     class: 'spot-input', type: 'text', role: 'combobox', 'aria-expanded': 'true', 'aria-controls': 'spot-list', 'aria-autocomplete': 'list',
-    placeholder: 'Search tasks, questions, notes, recaps, digests…  (type > for commands)', spellcheck: 'false', autocomplete: 'off', 'aria-label': 'Search Helm',
+    placeholder: 'Search tasks, concepts, questions, notes, recaps, digests…  (type > for commands)', spellcheck: 'false', autocomplete: 'off', 'aria-label': 'Search Helm',
   });
   const mode = h('span', { class: 'spot-mode mono', hidden: true }, 'COMMAND');
   const list = h('div', { class: 'spot-list', id: 'spot-list', role: 'listbox', 'aria-label': 'Results' });
@@ -70,6 +71,7 @@ export function createSpotlight(root) {
       { title: 'Go to Inbox', sub: 'Questions waiting for you', icon: 'inbox', run: () => navigate('inbox') },
       { title: 'Review queue', sub: 'Diff, recap and Approve / Request changes for every task in Review', icon: 'review', run: () => navigate('review') },
       { title: 'Go to Learn', icon: 'learn', run: () => navigate('learn') },
+      { title: 'Go to Concepts', sub: 'Everything your recaps taught you, one page per idea', icon: 'tag', run: () => navigate('learn', ['concepts']) },
       { title: 'Go to Templates', sub: 'Saved tasks you start in one click', icon: 'templates', run: () => navigate('templates') },
       { title: 'Switch project: All projects', sub: state.ui.projectId === 'all' ? 'current' : '', icon: 'folder', run: () => setUI({ projectId: 'all' }) },
       ...sel.projects().map((p) => ({ title: `Switch project: ${p.name}`, sub: state.ui.projectId === p.id ? 'current' : '', icon: 'folder', run: () => setUI({ projectId: p.id }) })),
@@ -134,6 +136,7 @@ export function createSpotlight(root) {
       case 'question': return navigate('inbox', r.id ? [r.id] : []);
       case 'digest': return navigate('learn', [], r.id ? { digest: r.id } : {});
       case 'workflow': return navigate('workflows', [r.id]);
+      case 'concept': return navigate('learn', ['c', r.id]);
       case 'template': { const tp = state.templates.get(r.id); if (tp) { setTimeout(() => openUseDialog(tp), 0); } return; }
       case 'project': setUI({ projectId: r.id }); return navigate('board');
       default:

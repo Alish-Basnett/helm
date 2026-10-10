@@ -15,6 +15,7 @@ const KEYS = {
   question: 'questions', job: 'jobs', digest: 'digests', // v0.2 (missing keys from an older hub are treated as empty)
   workflow: 'workflows', run: 'runs', // v0.9
   template: 'templates', // v0.11
+  concept: 'concepts', // v0.13: keyed by slug (normalizeRow mirrors it into `id`)
 };
 
 export const state = {
@@ -29,6 +30,7 @@ export const state = {
   workflows: new Map(),
   runs: new Map(), // Run rows with `nodes` inlined
   templates: new Map(), // v0.11 task templates (archived ones included; selectors filter)
+  concepts: new Map(), // v0.13 top concepts by last seen (no summaries; the page fetches its own)
   activity: new Map(), // id -> Activity (bounded)
   usageToday: { overheadUsd: 0, requestedUsd: 0 }, // v0.4 Helm overhead meter
   seq: 0,
@@ -41,7 +43,7 @@ export const state = {
   },
 };
 
-const ver = { project: 0, session: 0, agent: 0, task: 0, note: 0, question: 0, job: 0, digest: 0, workflow: 0, run: 0, template: 0, activity: 0, usage: 0 };
+const ver = { project: 0, session: 0, agent: 0, task: 0, note: 0, question: 0, job: 0, digest: 0, workflow: 0, run: 0, template: 0, concept: 0, activity: 0, usage: 0 };
 
 /* ---------- subscriptions ---------- */
 const listeners = new Set();
@@ -81,6 +83,17 @@ export function normalizeRow(entity, row) {
     if (!Array.isArray(row.nodes)) row.nodes = []; // v0.9
   } else if (entity === 'workflow') {
     if (row.archived === undefined) row.archived = false;
+  } else if (entity === 'concept') {
+    row.id = row.slug; // v0.13
+    if (!Array.isArray(row.aliases)) row.aliases = [];
+    if (!Array.isArray(row.taskIds)) row.taskIds = [];
+    if (!Array.isArray(row.taskAts)) row.taskAts = [];
+    if (!Array.isArray(row.related)) row.related = [];
+    if (row.summary === undefined) row.summary = null;
+    if (row.hasSummary === undefined) row.hasSummary = !!row.summary;
+    if (row.summaryAt === undefined) row.summaryAt = null;
+    row.pinned = !!row.pinned;
+    row.needsSummary = !!row.needsSummary;
   } else if (entity === 'template') {
     if (!Array.isArray(row.checks)) row.checks = []; // v0.11
     if (!Array.isArray(row.tags)) row.tags = [];
@@ -152,7 +165,7 @@ function replaceAll(s) {
   for (const k in KEYS) {
     const map = state[KEYS[k]];
     map.clear();
-    for (const row of s[KEYS[k]] || []) map.set(row.id, normalizeRow(k, row));
+    for (const row of s[KEYS[k]] || []) { normalizeRow(k, row); map.set(row.id, row); }
     mark(k);
   }
   setUsageToday(s.usageToday);
@@ -170,7 +183,7 @@ export function applyChange(msg) {
     return;
   }
   if (msg.entity === 'usage') { if (msg.op !== 'delete') setUsageToday(msg.row); return; }
-  if (msg.op === 'delete') remove(msg.entity, msg.row && msg.row.id);
+  if (msg.op === 'delete') remove(msg.entity, msg.row && (msg.row.id != null ? msg.row.id : msg.row.slug));
   else upsert(msg.entity, msg.row);
 }
 
@@ -343,6 +356,26 @@ export const sel = {
       .filter((t) => (includeArchived || !t.archived) && (!scoped || pid === 'all' || t.projectId == null || t.projectId === pid))
       .sort((a, b) => (b.usage || 0) - (a.usage || 0) || (b.lastUsedAt || b.updatedAt || 0) - (a.lastUsedAt || a.updatedAt || 0)
         || String(a.id).localeCompare(String(b.id), undefined, { numeric: true }));
+  },
+
+  /* ----- v0.13: concepts ----- */
+  /** The store's concepts (top 200 by last seen), pinned ones first when asked, then by `by`: recent | count | name. */
+  concepts({ by = 'recent', pinnedFirst = false } = {}) {
+    const cmp = {
+      recent: (a, b) => (b.lastSeenAt || 0) - (a.lastSeenAt || 0),
+      count: (a, b) => (b.count || 0) - (a.count || 0) || (b.lastSeenAt || 0) - (a.lastSeenAt || 0),
+      name: (a, b) => String(a.name).localeCompare(String(b.name), undefined, { sensitivity: 'base' }),
+    }[by] || (() => 0);
+    return Array.from(state.concepts.values()).sort((a, b) => (pinnedFirst ? (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0) : 0) || cmp(a, b) || String(a.slug).localeCompare(String(b.slug)));
+  },
+  /** Newest concept_summary job for a slug (any state), or null. */
+  conceptJob(slug) {
+    let best = null;
+    for (const j of state.jobs.values()) {
+      if (j.kind !== 'concept_summary' || !j.input || !j.input.concept || j.input.concept.slug !== slug) continue;
+      if (!best || (j.createdAt || 0) > (best.createdAt || 0) || ((j.createdAt || 0) === (best.createdAt || 0) && String(j.id) > String(best.id))) best = j;
+    }
+    return best;
   },
 
   /* ----- v0.2: jobs + digests ----- */

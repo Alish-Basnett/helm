@@ -99,6 +99,12 @@ export const api = {
   patchTemplate: (id, patch) => request('PATCH', `/v1/templates/${enc(id)}`, patch),
   archiveTemplate: (id) => request('DELETE', `/v1/templates/${enc(id)}`),
   useTemplate: (id, body) => request('POST', `/v1/templates/${enc(id)}/use`, body),
+  // v0.13 concepts
+  concepts: (query, sort, opts) => request('GET', `/v1/concepts${q({ q: query, sort })}`, undefined, opts),
+  concept: (slug) => request('GET', `/v1/concepts/${enc(slug)}`),
+  patchConcept: (slug, patch) => request('PATCH', `/v1/concepts/${enc(slug)}`, patch),
+  mergeConcepts: (from, into) => request('POST', '/v1/concepts/merge', { from, into }),
+  summarizeConcept: (slug) => request('POST', `/v1/concepts/${enc(slug)}/summarize`),
   attachmentUrl: (id) => `/v1/attachments/${enc(id)}`,
   /** Raw-body upload with progress. Resolves { attachment }; rejects with err.status (404/405 = hub too old). */
   uploadAttachment(file, { onProgress, signal } = {}) {

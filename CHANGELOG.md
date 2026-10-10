@@ -4,6 +4,12 @@ All notable changes to Helm are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/). Shapes and endpoints are defined in `CONTRACT.md`.
 
+## [0.18.0] - 2026-10-10
+
+### Added
+
+- Concepts (`CONTRACT.md` v0.13, Learn++): recap tags become first-class concepts (`Concept` rows with aliases, task links, related concepts, pin, an optional Haiku-written page). Hub: `hub/concepts.mjs`, `GET /v1/concepts`, `GET/PATCH /v1/concepts/:slug`, `POST /v1/concepts/merge`, `POST /v1/concepts/:slug/summarize` (job kind `concept_summary`), `concepts` in `/v1/state`, SSE entity `concept`, FTS kind `concept`, back-fill from existing recaps. Web: Learn is now Feed | Concepts, a concept page at `#/learn/c/:slug` (header, page, "Where you learned it" timeline, related), concept chips link to it everywhere, Spotlight finds concepts, Code mode renders the page as a doc comment.
+
 ## [0.17.0] - 2026-10-10
 
 ### Added

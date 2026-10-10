@@ -316,6 +316,18 @@ export function replyLines(src, style) {
   return out.length ? out : [cline(style, [''])];
 }
 
+/** A concept page as one big doc comment (Code mode): `/** @concept name … *\/` over `export function name() {}`. */
+export function docBlock(src, style, name, slug) {
+  const st = styleOf(style);
+  const py = st.id === 'py';
+  const ident = String(slug || name || 'concept').replace(/[^A-Za-z0-9]+/g, '_').replace(/^(\d)/, '_$1').replace(/^_+|_+$/g, '') || 'concept';
+  const head = line([h('span', { class: 'cm-c' }, py ? '# ' : '/** '), h('span', { class: 'cm-tag' }, '@concept'), ' ', h('span', { class: 'cm-t' }, name)], 'cm-doc');
+  const decl = line(py
+    ? [h('span', { class: 'cm-k' }, 'def'), ' ', h('span', { class: 'cm-f' }, ident), h('span', { class: 'cm-p' }, '(): '), h('span', { class: 'cm-k' }, 'pass')]
+    : [h('span', { class: 'cm-k' }, 'export function'), ' ', h('span', { class: 'cm-f' }, ident), h('span', { class: 'cm-p' }, '() {}')]);
+  return h('div', { class: 'cm-block cm-docblock' }, head, ...replyLines(src, style), py ? null : line([' */'], 'cm-doc'), decl);
+}
+
 /** The reply block: header, short-first body with a folded `/* … N more lines *\/` region, closing line. */
 function createReplyBlock() {
   let open = false;

@@ -19,6 +19,7 @@ import { codeEditor, blockView } from '../code.js';
 import { createAttachTray, bindAttachInput, attsOf } from '../attachments.js';
 import { createGitPanel } from '../gitpanel.js';
 import * as R from '../review.js';
+import { conceptTag } from '../concepts.js';
 
 const SHORTCUTS = [
   ['J  /  ↓', 'Next task in the queue'],
@@ -562,7 +563,7 @@ export function mount(container, route0) {
         else {
           const row = (label, text) => h('div', { class: 'rv-recap-row' }, h('div', { class: 'recap-label' }, label), h('p', { class: 'rv-recap-text' }, text || '—'));
           c.recapBody.append(row('What', r.what), row('How', r.how), row('Learned', r.learned),
-            r.concepts && r.concepts.length ? h('div', { class: 'tags rv-tags' }, r.concepts.map((cn) => h('button', { class: 'tag', type: 'button', title: 'See this concept in Learn', onclick: () => navigate('learn', [], { concept: cn }) }, icon('tag', 12), cn))) : null);
+            r.concepts && r.concepts.length ? h('div', { class: 'tags rv-tags' }, r.concepts.map((cn) => conceptTag(cn))) : null);
         }
       }
 

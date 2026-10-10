@@ -146,6 +146,12 @@ route('POST', '/v1/templates/:id/use', async ({ hub, params, json, remote, remot
   if (remoteListener && r.note) remote.trackNote(r.note.id);
   return created(r);
 });
+// v0.13 concepts (static paths first: /merge must not be read as a slug)
+route('GET', '/v1/concepts', ({ hub, query }) => hub.concepts({ q: query.get('q') || undefined, sort: query.get('sort') || undefined }));
+route('POST', '/v1/concepts/merge', async ({ hub, json }) => hub.mergeConcepts(await json()));
+route('GET', '/v1/concepts/:slug', ({ hub, params }) => hub.conceptDetail(params.slug));
+route('PATCH', '/v1/concepts/:slug', async ({ hub, params, json }) => hub.updateConcept(params.slug, await json()));
+route('POST', '/v1/concepts/:slug/summarize', ({ hub, params }) => hub.summarizeConcept(params.slug));
 route('GET', '/v1/conflicts', ({ hub }) => ({ conflicts: hub.conflicts() }));
 route('GET', '/v1/questions', ({ hub, query }) => ({ questions: hub.questions({ state: query.get('state') || undefined }) }));
 route('POST', '/v1/questions/:id/dismiss', ({ hub, params }) => hub.dismissQuestion(params.id));

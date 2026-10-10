@@ -422,10 +422,17 @@ Only use what is in the input.`,
   wf_draft: `You design Helm workflows. The input has the user's request ("prompt"), the graph schema ("schema"), the allowed node types, example graphs, and optionally the current graph to modify ("current") and validation issues to fix ("fixIssues").
 Reply with exactly ONE JSON object: a complete graph that follows the schema, in a single \`\`\`json fenced block, and nothing else.
 Keep it as small as the request allows, give every node a short clear label, use gates before anything risky, and only use node types and fields from the schema.`,
+  concept_summary: `You write a short knowledge-base page for one dev/IT concept, for a developer who learned it through real tasks. Use only the input. Markdown, under 300 words:
+## What it is (plain words, 2-3 sentences)
+## How you used it (bullets citing tasks as T-n, from learnedLines)
+## Pitfalls (2-3 bullets)
+## Go deeper (2-3 concrete next things to try or read about)
+No hype.`,
 }
 // Which model writes each job: drafting a workflow needs judgement, the rest are cheap Haiku calls.
 const JOB_MODEL: Record<string, { model: string; maxTokens: number }> = {
   wf_draft: { model: 'sonnet', maxTokens: 8000 },
+  concept_summary: { model: 'haiku', maxTokens: 900 },
 }
 // Claimed jobs and model/shell steps are persisted while they run, so a hot reload (which drops the old
 // module's in-flight calls) re-runs them instead of leaving them stuck as "running" in the hub.

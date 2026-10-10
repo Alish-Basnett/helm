@@ -407,6 +407,45 @@ export async function generateDigest({ projectId, date } = {}) {
   }
 }
 
+/* ---------- v0.13: concepts ---------- */
+/** Ask a live session to write the concept's page. Resolves the job, or null (409 'no live session' arrives as a toast). */
+export async function summarizeConcept(slug) {
+  try {
+    const { job } = await api.summarizeConcept(slug);
+    if (job) upsert('job', job);
+    return job || null;
+  } catch (e) {
+    toastError(e, 'Could not start the page');
+    return null;
+  }
+}
+/** Pin / unpin / rename / aliases. Optimistic for the store copy; resolves the concept or null. */
+export async function patchConcept(slug, patch, errLabel = 'Could not update concept') {
+  const before = state.concepts.get(slug);
+  if (before) upsert('concept', { ...before, ...patch });
+  try {
+    const { concept } = await api.patchConcept(slug, patch);
+    if (concept) upsert('concept', { ...concept, summary: null });
+    return concept || null;
+  } catch (e) {
+    if (before) upsert('concept', before);
+    toastError(e, errLabel);
+    return null;
+  }
+}
+export async function mergeConcepts(from, into) {
+  try {
+    const { concept } = await api.mergeConcepts(from, into);
+    remove('concept', from);
+    if (concept) upsert('concept', { ...concept, summary: null });
+    toast(`Merged into ${concept ? concept.name : into}`, { kind: 'success', duration: 2500 });
+    return concept || null;
+  } catch (e) {
+    toastError(e, 'Could not merge');
+    return null;
+  }
+}
+
 /* ---------- v0.9: workflow runs ---------- */
 /** Run row from a response goes straight into the store (the SSE change that follows is identical). */
 function takeRun(res) {

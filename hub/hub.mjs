@@ -12,6 +12,9 @@ import { search as ftsSearch, learn as ftsLearn } from './search.mjs';
 import { WfEngine } from './wfengine.mjs';
 import * as gf from './gitflow.mjs';
 import { GitSync } from './gitsync.mjs';
+import {
+  toConcept, getConcept, resolveConcept, conceptKey, backfillConcepts, STATE_CONCEPTS, MAX_ALIASES,
+} from './concepts.mjs';
 import { toTemplate, getTemplate, renderTemplate, agentOfSubagent, TEMPLATE_AGENTS, MAX_CHECKS, MAX_TAGS } from './templates.mjs';
 
 import { HttpError } from './errors.mjs';
@@ -24,7 +27,7 @@ const isObj = (v) => v && typeof v === 'object' && !Array.isArray(v);
 const TABLES = [
   'projects', 'sessions', 'agents', 'tasks', 'notes', 'activity', 'late_completions',
   'agent_files', 'conflicts', 'questions', 'jobs', 'digests', 'attachments', 'usage', 'task_diffs',
-  'workflows', 'workflow_versions', 'runs', 'run_nodes', 'steps', 'templates',
+  'workflows', 'workflow_versions', 'runs', 'run_nodes', 'steps', 'templates', 'concepts', 'concept_tasks', 'concept_keys',
 ];
 const START_FROM = ['backlog', 'next', 'later', 'blocked'];
 const DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
@@ -39,6 +42,7 @@ export class Hub {
     this.p = new Projector(this.db, { log, attachDir: cfg.attachDir, clock: () => this.clock() });
     this.subs = new Set();
     this.startedAt = clock();
+    this.backfillConcepts();        // v0.13: a database from before concepts gets them from its existing recaps, once
     this.lastPushed = this.seqNow();
     this.trimmedTo = 0;
     this.autoSnapshot = true;       // snapshot a task's diff when its agent completes (the seed switches this off)
@@ -50,6 +54,15 @@ export class Hub {
     this.gitBusy = new Set();       // v0.12: task ids with a git operation in flight (one at a time per task)
     this.gitSync = new GitSync(this, { fetchImpl }); // v0.12: PR + CI polling for pushed branches (the timer lives in server.mjs)
     this.wf = new WfEngine(this);   // v0.9 workflows: decisions + commands (the reducer lives in workflows.mjs)
+  }
+  /** One-time (meta flag) projection of the recaps already in the tasks table into concepts. */
+  backfillConcepts() {
+    if (this.db.get("SELECT 1 AS x FROM meta WHERE key = 'concepts_backfilled'")) return 0;
+    return this.db.transaction(() => {
+      const n = backfillConcepts(this.p);
+      this.db.run("INSERT OR REPLACE INTO meta(key, value) VALUES ('concepts_backfilled', '1')");
+      return n;
+    });
   }
   now() { return this.clock(); }
   setClock(fn) { this.clock = fn; }
@@ -390,7 +403,10 @@ export class Hub {
   // ------------------------------------------------------------ rebuild / dump
   dump() {
     const out = {};
-    const orderBy = { activity: 'id', late_completions: 'session_id, agent_id', agent_files: 'agent_id, path', conflicts: 'path' };
+    const orderBy = {
+      activity: 'id', late_completions: 'session_id, agent_id', agent_files: 'agent_id, path', conflicts: 'path',
+      concept_tasks: 'slug, task_id', concept_keys: 'key',
+    };
     for (const t of TABLES) {
       out[t] = this.db.all(`SELECT * FROM ${t} ORDER BY ${orderBy[t] || 'rowid'}`);
     }
@@ -554,7 +570,7 @@ export class Hub {
         projectId, projectId, projectId);
       const qScope = `session_id IN (SELECT id FROM sessions WHERE project_id = ?)`;
       questions = q(qSql(qScope), projectId, projectId);
-      jobs = q(jSql('project_id = ?'), projectId, projectId);
+      jobs = q(jSql(`(project_id = ? OR kind = 'concept_summary')`), projectId, projectId); // concept pages are global
       digests = q('SELECT * FROM digests WHERE project_id = ? ORDER BY date DESC, created_at DESC, rowid DESC LIMIT 14', projectId);
     } else {
       sessions = q('SELECT * FROM sessions ORDER BY rowid');
@@ -569,8 +585,9 @@ export class Hub {
     const templates = this.db.all(
       projectId ? 'SELECT * FROM templates WHERE project_id IS NULL OR project_id = ? ORDER BY rowid' : 'SELECT * FROM templates ORDER BY rowid',
       ...(projectId ? [projectId] : [])).map(toTemplate);
+    const concepts = this.db.all('SELECT * FROM concepts ORDER BY last_seen_at DESC, slug LIMIT ?', STATE_CONCEPTS).map((r) => toConcept(r));
     return {
-      projects, templates, sessions: sessions.map(toSession), agents: agents.map(toAgent),
+      projects, templates, concepts, sessions: sessions.map(toSession), agents: agents.map(toAgent),
       tasks: tasks.map(toTask), notes: notes.map(toNote), questions: questions.map(toQuestion),
       jobs: jobs.map(toJob), digests: digests.map(toDigest), workflows, runs,
       usageToday: usageToday(this.db, this.now()), seq: this.seqNow(),
@@ -630,6 +647,104 @@ export class Hub {
   usageBreakdown(days = 7) { return usageBreakdown(this.db, this.now(), days); }
   search(q, limit) { return ftsSearch(this.db, q, limit, this.log); }
   learn(projectId) { return ftsLearn(this.db, projectId); }
+
+  // ------------------------------------------------------- concepts (v0.13)
+  /** Concepts for the Concepts tab: `q` matches name, slug and aliases (case-insensitive substring); sort recent|count|name. No summaries. */
+  concepts({ q, sort = 'recent', limit = 1000 } = {}) {
+    if (!['recent', 'count', 'name'].includes(sort)) throw bad('sort must be recent, count or name');
+    const order = { recent: 'last_seen_at DESC, slug', count: 'count DESC, last_seen_at DESC, slug', name: 'name COLLATE NOCASE, slug' }[sort];
+    let rows = this.db.all(`SELECT * FROM concepts ORDER BY ${order}`).map((r) => toConcept(r));
+    const needle = isStr(q) ? q.trim().toLowerCase() : '';
+    if (needle) {
+      const flat = needle.replace(/[^a-z0-9]+/g, '');
+      rows = rows.filter((c) => [c.name, c.slug, ...c.aliases].some((v) => {
+        const l = v.toLowerCase();
+        return l.includes(needle) || (flat && l.replace(/[^a-z0-9]+/g, '').includes(flat));
+      }));
+    }
+    return { concepts: rows.slice(0, limit) };
+  }
+  conceptRow(slug) {
+    const c = resolveConcept(this.db, slug);
+    if (!c) throw notFound('concept not found');
+    return c;
+  }
+  /** One concept with its summary and the tasks that taught it (newest first). */
+  conceptDetail(slug) {
+    const c = this.conceptRow(slug);
+    const tasks = this.db.all(
+      `SELECT t.*, ct.at AS c_at FROM concept_tasks ct JOIN tasks t ON t.id = ct.task_id WHERE ct.slug = ? ORDER BY ct.at DESC, ct.rowid DESC`, c.slug)
+      .map((r) => {
+        const t = toTask(r);
+        return {
+          id: t.id, title: t.title, projectId: t.projectId, status: t.status,
+          what: t.recap?.what ?? '', how: t.recap?.how ?? '', learned: t.recap?.learned ?? '',
+          doneAt: t.doneAt, at: r.c_at,
+        };
+      });
+    return { concept: toConcept(c, { summary: true }), tasks };
+  }
+  updateConcept(slug, body, at = this.now()) {
+    if (!isObj(body)) throw bad('body must be an object');
+    const c = this.conceptRow(slug);
+    const patch = {};
+    if (body.name !== undefined) {
+      if (!isStr(body.name) || !body.name.trim() || body.name.trim().length > 60) throw bad('name must be 1-60 characters');
+      patch.name = body.name.trim();
+    }
+    if (body.pinned !== undefined) {
+      if (typeof body.pinned !== 'boolean') throw bad('pinned must be a boolean');
+      patch.pinned = body.pinned;
+    }
+    if (body.summary !== undefined) {
+      if (body.summary !== null && !isStr(body.summary)) throw bad('summary must be a string or null');
+      patch.summary = body.summary === null || !body.summary.trim() ? null : body.summary;
+    }
+    if (body.aliases !== undefined) {
+      if (!Array.isArray(body.aliases) || body.aliases.length > MAX_ALIASES || body.aliases.some((a) => !isStr(a))) {
+        throw bad(`aliases must be an array of at most ${MAX_ALIASES} strings`);
+      }
+      const clean = [...new Set(body.aliases.map((a) => a.trim().toLowerCase()).filter(Boolean))];
+      for (const a of clean) {
+        const k = conceptKey(a);
+        if (!k) throw bad(`alias "${a}" has no letters or digits`);
+        const owner = this.db.get('SELECT slug FROM concept_keys WHERE key = ?', k.key)?.slug;
+        if (owner && owner !== c.slug && getConcept(this.db, owner)) throw new HttpError(409, `"${a}" already belongs to the concept "${owner}": merge them instead`);
+      }
+      patch.aliases = clean;
+    }
+    if (!Object.keys(patch).length) throw bad('nothing to change');
+    return this.tx(() => ({ concept: this.command('hub.concept.update', { slug: c.slug, patch }, at) }));
+  }
+  mergeConcepts(body, at = this.now()) {
+    if (!isObj(body) || !isStr(body.from) || !isStr(body.into)) throw bad('body must be { from, into }');
+    const from = this.conceptRow(body.from), into = this.conceptRow(body.into);
+    if (from.slug === into.slug) throw bad('cannot merge a concept into itself');
+    return this.tx(() => ({ concept: this.command('hub.concept.merge', { from: from.slug, into: into.slug }, at) }));
+  }
+  /** Ask a live session (Haiku, via the mod) to write the concept's page. One open job per concept. */
+  summarizeConcept(slug, at = this.now()) {
+    const c = this.conceptRow(slug);
+    const open = this.db.get(
+      `SELECT * FROM jobs WHERE kind = 'concept_summary' AND state IN ('queued','running') AND json_extract(input, '$.concept.slug') = ? ORDER BY rowid DESC LIMIT 1`, c.slug);
+    if (open) return { job: toJob(open) };
+    const sessionId = this.pickJobSession(null, null);
+    const concept = toConcept(c);
+    const learnedLines = this.db.all(
+      `SELECT t.id, t.title, t.recap FROM concept_tasks ct JOIN tasks t ON t.id = ct.task_id WHERE ct.slug = ? ORDER BY ct.at DESC, ct.rowid DESC LIMIT 20`, c.slug)
+      .map((r) => {
+        const rc = JSON.parse(r.recap || '{}');
+        return { taskId: r.id, title: cut(r.title, 200), learned: cut(rc.learned || '', 600), how: cut(rc.how || '', 600) };
+      });
+    const related = concept.related.map((s) => getConcept(this.db, s)?.name).filter(Boolean);
+    const input = {
+      concept: { slug: concept.slug, name: concept.name, aliases: concept.aliases, count: concept.count },
+      learnedLines, related,
+    };
+    return this.tx(() => ({
+      job: this.command('hub.job.create', { kind: 'concept_summary', sessionId, taskId: null, projectId: null, input }, at),
+    }));
+  }
 
   // ------------------------------------------------------- templates (v0.11)
   /** Templates visible to a project (its own plus the global ones), or all of them. Archived ones only on request. */

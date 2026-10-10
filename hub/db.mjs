@@ -184,6 +184,22 @@ CREATE TABLE IF NOT EXISTS templates (
 );
 CREATE INDEX IF NOT EXISTS templates_project ON templates(project_id);
 
+-- v0.13: concepts, a knowledge base projected from recap tags (see hub/concepts.mjs). concept_tasks = which recap taught which
+-- concept; concept_keys = normalised spelling -> slug (variants and merged names land on the same concept).
+CREATE TABLE IF NOT EXISTS concepts (
+  slug TEXT PRIMARY KEY, name TEXT NOT NULL, aliases TEXT NOT NULL DEFAULT '[]', summary TEXT, summary_at INTEGER,
+  task_ids TEXT NOT NULL DEFAULT '[]', task_ats TEXT NOT NULL DEFAULT '[]', first_seen_at INTEGER NOT NULL DEFAULT 0,
+  last_seen_at INTEGER NOT NULL DEFAULT 0, count INTEGER NOT NULL DEFAULT 0, related TEXT NOT NULL DEFAULT '[]',
+  pinned INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS concepts_seen ON concepts(last_seen_at);
+CREATE TABLE IF NOT EXISTS concept_tasks (
+  slug TEXT NOT NULL, task_id TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (slug, task_id)
+);
+CREATE INDEX IF NOT EXISTS concept_tasks_task ON concept_tasks(task_id);
+CREATE TABLE IF NOT EXISTS concept_keys (key TEXT PRIMARY KEY, slug TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS concept_keys_slug ON concept_keys(slug);
+
 CREATE TABLE IF NOT EXISTS changes (
   seq INTEGER PRIMARY KEY AUTOINCREMENT, entity TEXT NOT NULL, op TEXT NOT NULL, row TEXT NOT NULL
 );
