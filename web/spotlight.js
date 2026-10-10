@@ -65,6 +65,7 @@ export function createSpotlight(root) {
       { title: 'Go to Projects', icon: 'folder', run: () => navigate('projects') },
       { title: 'Go to Office', icon: 'office', run: () => navigate('office') },
       { title: 'Go to Threads', icon: 'threads', run: () => navigate('threads') },
+      { title: 'Today\'s timeline', sub: 'Gantt of everything that ran today, across sessions', icon: 'calendar', run: () => navigate('today') },
       { title: 'Go to Workflows', sub: 'Draw and run a flow of agents, checks and gates', icon: 'workflow', run: () => navigate('workflows') },
       { title: 'Go to Inbox', sub: 'Questions waiting for you', icon: 'inbox', run: () => navigate('inbox') },
       { title: 'Review queue', sub: 'Diff, recap and Approve / Request changes for every task in Review', icon: 'review', run: () => navigate('review') },

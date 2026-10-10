@@ -19,6 +19,7 @@ import * as board from './views/board.js';
 import * as projects from './views/projects.js';
 import * as office from './views/office.js';
 import * as threads from './views/threads.js';
+import * as today from './views/today.js';
 import * as workflows from './views/workflows.js';
 import { createRunPanel } from './wf/runpanel.js';
 import * as learn from './views/learn.js';
@@ -28,12 +29,13 @@ import * as review from './views/review.js';
 import * as settings from './views/settings.js';
 import { getPref, applyPrefs, cycleTheme, onPrefs } from './prefs.js';
 
-const VIEW_MODS = { board, projects, office, threads, workflows, inbox, review, learn, templates, settings };
+const VIEW_MODS = { board, projects, office, threads, today, workflows, inbox, review, learn, templates, settings };
 const VIEW_META = {
   board: { label: 'Board', icon: 'board' },
   projects: { label: 'Projects', icon: 'folder' },
   office: { label: 'Office', icon: 'office' },
   threads: { label: 'Threads', icon: 'threads' },
+  today: { label: 'Today', icon: 'calendar' },
   workflows: { label: 'Workflows', icon: 'workflow' },
   inbox: { label: 'Inbox', icon: 'inbox' },
   review: { label: 'Review', icon: 'review' },

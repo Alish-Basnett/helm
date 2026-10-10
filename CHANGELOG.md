@@ -4,11 +4,19 @@ All notable changes to Helm are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/). Shapes and endpoints are defined in `CONTRACT.md`.
 
+## [0.16.0] - 2026-10-10
+
+### Added
+
+- Today (`#/today`): one Gantt-style timeline for every session's agents and workflow runs, with task markers, a summary strip (agent time, peak concurrency, tasks done, cost), range selection and a day picker.
+
 ## [0.15.0] - 2026-10-10
 
 ### Added
 
 - Review queue (`#/review[/T-n]`, sidebar item with a count badge under Inbox, Spotlight "Review queue"): every task in Review in one two-pane workspace. Queue (oldest first or newest) with `+a −d`, recap line, time in review and run chip; per task the final report, recap, the diff (shared renderer, file tabs, unified/split, source badge), workflow shell checks plus the description's `Checks:` list as a local checklist, and Approve (A) / Request changes (R, a `!` task note) / Later (L) / J K skip / Enter opens the Diff panel / ? help. "Reviewed today: N". Web only, no hub change.
+
+- Today (`#/today[/YYYY-MM-DD]`, sidebar item after Threads, Spotlight "Today's timeline"): a day Gantt across sessions. One lane group per session (agent bars coloured by status, model badge, task chip, main-session busy band), a Workflows group with node-step ticks, task-event diamonds (done / review / blocked / auto-start), a summary strip (agents by model, agent time, peak concurrency, tasks done, Helm overhead, longest task), zoom/pan/Fit/Day/Now, drag-to-select range summary, day picker, 1 fps live growth, virtualised rows. Web only, no hub change; the time-axis code now lives in `axis.js`, shared with the Threads timeline.
 
 ### Changed
 

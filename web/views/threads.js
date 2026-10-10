@@ -10,6 +10,8 @@ import { api } from '../api.js';
 import { fmtElapsed, fmtTokens, fmtUsd, fmtTime, fmtAgo, fmtDay, cwdTail, agentLabel, truncate, modelInfo } from '../format.js';
 import { avatar, updateAvatar, modelBadge, updateModelBadge, nowDoingLine, emptyState } from '../ui.js';
 import { createTimeline } from '../timeline.js';
+import { HOUR, pad2, MIN_SPAN, MAX_SPAN, TICK_STEPS, fmtDur, fmtDurExact, fmtClockSec, tickStep, makeTicks, toScale, pctOf as axisPct, zoomedRange, paddedFit, paintTicks, attachPanZoom } from '../axis.js';
+export { TICK_STEPS, fmtDur, fmtDurExact, tickStep, makeTicks };
 import { createNotesPanel } from '../notes.js';
 import { createTalk } from './talk.js';
 import { taskChip } from '../tasklinks.js';
@@ -20,7 +22,6 @@ const AGENT_STATUS = { running: 'Running', done: 'Done', failed: 'Failed', stall
 const FILTER_STATUSES = [['running', 'Running'], ['waiting', 'Waiting'], ['stalled', 'Stalled'], ['done', 'Done'], ['failed', 'Failed']];
 const LIVE = new Set(['running', 'waiting', 'stalled']);
 const isLive = (a) => LIVE.has(a.status);
-const HOUR = 3600e3;
 const MAX_DEPTH = 6;          // deeper nesting keeps the last indent
 const BUF = 480;              // px of rows rendered above/below the viewport
 const AXIS_H = 32;            // timeline axis height
@@ -43,18 +44,9 @@ const X = (j) => 12 + 20 * j;
 /* ---------- pure helpers ---------- */
 const startOfHour = (t) => { const d = new Date(t); d.setMinutes(0, 0, 0); return d.getTime(); };
 const startOfDay = (t) => { const d = new Date(t); d.setHours(0, 0, 0, 0); return d.getTime(); };
-const pad2 = (n) => String(n).padStart(2, '0');
 const hourLabel = (t) => `${pad2(new Date(t).getHours())}:00`;
 const endOf = (a, now) => (isLive(a) ? now : (a.endedAt || a.lastActivityAt || a.startedAt));
 const plural = (n, one) => `${n} ${one}${n === 1 ? '' : 's'}`;
-
-export function fmtDur(ms) {
-  const s = Math.max(0, Math.floor(ms / 1000));
-  if (s < 60) return `${s}s`;
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m${pad2(s % 60)}s`;
-  return `${Math.floor(m / 60)}h${pad2(m % 60)}m`;
-}
 
 function agentTitle(a) {
   const t = a.taskId ? state.tasks.get(a.taskId) : null;
@@ -119,29 +111,7 @@ export function niceStep(span, want) {
   const raw = span / Math.max(1, want);
   return STEPS.find((s) => s >= raw) || STEPS[STEPS.length - 1];
 }
-// Tick steps the zoomable axis snaps to: 10s / 30s / 1m / 5m / 15m / 1h / 3h / 1d.
-export const TICK_STEPS = [10e3, 30e3, 60e3, 300e3, 900e3, HOUR, 3 * HOUR, 86400e3];
-const MIN_SPAN = 30e3, MAX_SPAN = 7 * 86400e3, FIT_MIN = 120e3, FIT_PAD = 0.05, MIN_BAR_PX = 3;
-export function tickStep(span, want) {
-  const raw = span / Math.max(1, want);
-  return TICK_STEPS.find((s) => s >= raw) || TICK_STEPS[TICK_STEPS.length - 1];
-}
-/** Exact duration for tooltips: millisecond precision under a minute. */
-export function fmtDurExact(ms) {
-  ms = Math.max(0, Math.round(ms));
-  if (ms < 1000) return `${ms} ms`;
-  if (ms < 60e3) return `${(ms / 1000).toFixed(ms % 1000 ? 1 : 0)} s (${ms.toLocaleString('en-US')} ms)`;
-  return fmtDur(ms);
-}
-export function makeTicks(t0, t1, want) {
-  const step = tickStep(t1 - t0, want);
-  const off = new Date(t0).getTimezoneOffset() * 60000; // align to local clock
-  const out = [];
-  for (let t = Math.ceil((t0 - off) / step) * step + off; t <= t1 && out.length < 60; t += step) out.push(t);
-  const fmt = (t1 - t0) < 120e3 ? (t) => { const d = new Date(t); return `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`; }
-    : step < 86400e3 ? (t) => fmtTime(t) : (t) => fmtDay(t);
-  return out.map((t) => ({ t, label: fmt(t) }));
-}
+const MIN_BAR_PX = 3;
 
 function loadPrefs() {
   const p = { view: 'tree', density: 'compact', status: [], model: 'all', scopeAll: false, zoom: 'auto' };
@@ -411,7 +381,6 @@ export function mount(container) {
   }
 
   /* ---------- axis range: auto-fit + manual zoom ---------- */
-  const toScale = (r) => ({ t0: r.t0, t1: r.t1, span: r.t1 - r.t0 });
   const plotRect = () => { const el = axis.querySelector('.th-axis-plot'); return el ? el.getBoundingClientRect() : { left: 0, width: 0 }; };
   /** Earliest start .. latest end (now for live) of the rows in view, padded 5% a side, at least 2 minutes. */
   function fitRange(now) {
@@ -435,14 +404,7 @@ export function mount(container) {
     take(vis);
     if (!Number.isFinite(t0)) take(items); // nothing agent-shaped in view: fall back to everything shown
     if (!Number.isFinite(t0)) { t0 = now - HOUR; t1 = now; }
-    const pad = (t1 - t0) * FIT_PAD;
-    let r0 = t0 - pad, r1 = t1 + pad;
-    if (live && hasLive) { r1 = now; r0 = t0 - Math.max(pad, 0); } // live: the right edge IS now
-    if (r1 - r0 < FIT_MIN) {
-      if (live && hasLive) r0 = r1 - FIT_MIN;
-      else { const mid = (r0 + r1) / 2; r0 = mid - FIT_MIN / 2; r1 = mid + FIT_MIN / 2; }
-    }
-    return { t0: r0, t1: r1 };
+    return paddedFit(t0, t1, now, live && hasLive); // live: the right edge IS now
   }
   function applyScale(r) {
     scale = toScale(r);
@@ -486,32 +448,13 @@ export function mount(container) {
   }
   /** Zoom by `factor` (>1 zooms out) keeping the time under `frac` (0..1 across the plot) fixed. */
   function zoomBy(factor, frac) {
-    const f = Number.isFinite(frac) ? Math.min(1, Math.max(0, frac)) : 0.5;
-    const span = Math.min(MAX_SPAN, Math.max(MIN_SPAN, scale.span * factor));
-    const anchor = scale.t0 + f * scale.span;
-    setManual(anchor - f * span, span);
+    const z = zoomedRange(scale, factor, frac);
+    setManual(z.t0, z.span);
   }
-  function panBy(dt) { setManual(scale.t0 + dt, scale.span); }
-  const fracAt = (clientX) => { const r = plotRect(); return r.width > 0 ? (clientX - r.left) / r.width : 0.5; };
-  scroller.addEventListener('wheel', (e) => {
-    if (prefs.view !== 'timeline') return;
-    const dx = e.deltaX, dy = e.deltaY;
-    if (e.ctrlKey || e.metaKey) { e.preventDefault(); zoomBy(Math.exp(Math.max(-200, Math.min(200, dy)) * 0.004), fracAt(e.clientX)); return; }
-    const w = plotRect().width || 600;
-    if (e.shiftKey) { e.preventDefault(); panBy(((dx || dy) / w) * scale.span); return; }
-    if (Math.abs(dx) > Math.abs(dy) && dx) { e.preventDefault(); panBy((dx / w) * scale.span); }
-  }, { passive: false });
-  // drag the axis to pan
-  let drag = null;
-  axis.addEventListener('mousedown', (e) => {
-    if (e.button !== 0 || prefs.view !== 'timeline') return;
-    drag = { x: e.clientX, t0: scale.t0, w: plotRect().width || 600 };
-    e.preventDefault();
+  const detachPanZoom = attachPanZoom({
+    scroller, axisEl: axis,
+    api: { getScale: () => scale, setManual, zoomBy, plotRect, enabled: () => prefs.view === 'timeline' },
   });
-  const onDragMove = (e) => { if (drag) setManual(drag.t0 - ((e.clientX - drag.x) / drag.w) * scale.span, scale.span); };
-  const onDragEnd = () => { drag = null; };
-  document.addEventListener('mousemove', onDragMove);
-  document.addEventListener('mouseup', onDragEnd);
 
   function paintControls(counts, models, agentsShown, laneN, liveShown) {
     root.dataset.view = prefs.view;
@@ -563,17 +506,8 @@ export function mount(container) {
     setHidden(grid, !tl);
     if (!tl) return;
     const w = Math.max(300, (scroller.clientWidth || 900) - 260);
-    const ticks = makeTicks(scale.t0, scale.t1, Math.max(3, Math.floor(w / 110)));
-    const pct = (t) => `${(((t - scale.t0) / scale.span) * 100).toFixed(3)}%`;
-    reconcile(axisTicks, ticks, (t) => `t${t.t}`, (t) => h('span', { class: 'th-axis-tick' }, t.label), (el, t) => { el.style.left = pct(t.t); if (el.textContent !== t.label) el.textContent = t.label; });
-    // grid lines live in `grid`, after the now line
-    const lines = ticks.map((t) => ({ k: `g${t.t}`, t: t.t }));
-    for (const el of Array.from(grid.children)) if (el !== nowLine && !lines.some((l) => l.k === el.__k)) el.remove();
-    for (const l of lines) {
-      let el = Array.from(grid.children).find((c) => c.__k === l.k);
-      if (!el) { el = h('i', { class: 'th-gridline' }); el.__k = l.k; grid.insertBefore(el, nowLine); }
-      el.style.left = pct(l.t);
-    }
+    paintTicks({ ticksEl: axisTicks, gridEl: grid, beforeEl: nowLine, scale, width: w, tickClass: 'th-axis-tick', gridClass: 'th-gridline' });
+    const pct = (t) => `${axisPct(scale, t).toFixed(3)}%`;
     const nowT = Date.now();
     const nowIn = hasLive && nowT >= scale.t0 && nowT <= scale.t1;
     nowLine.style.left = pct(nowT);
@@ -884,7 +818,6 @@ export function mount(container) {
   };
   vp.addEventListener('mousemove', showTip);
   vp.addEventListener('mouseleave', () => { tip.hidden = true; });
-  function fmtClockSec(t) { const d = new Date(t); return `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`; }
 
   // keyboard: Up/Down move, Enter opens, Left/Right fold
   const navItems = () => items.filter((it) => it.kind === 'agent' || it.kind === 'group' || it.kind === 'lane' || (it.kind === 'section' && it.toggle));
@@ -1236,7 +1169,7 @@ export function mount(container) {
     update: onStore,
     setRoute(r) { lastRoute = r; applyRoute(r); },
     destroy() {
-      offActivity(); clearInterval(clock); document.removeEventListener('keydown', onDocKey); document.removeEventListener('mousemove', onDragMove); document.removeEventListener('mouseup', onDragEnd); clearTimeout(fitTimer);
+      offActivity(); clearInterval(clock); document.removeEventListener('keydown', onDocKey); detachPanZoom(); clearTimeout(fitTimer);
       window.removeEventListener('resize', onResize); if (ro) ro.disconnect();
       if (insp) insp.destroy(); root.remove();
     },
