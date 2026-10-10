@@ -1,6 +1,6 @@
 {
   "name": "helm",
-  "version": "0.19.1",
+  "version": "0.19.2",
   "description": "Mission control for Claude Code: live kanban, Office, Threads, recaps, executable notes and spotlight across sessions.",
   "author": {
     "name": "Alish Basnet"

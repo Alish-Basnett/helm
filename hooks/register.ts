@@ -378,6 +378,7 @@ async function tick($: any) {
     await pollInbox($)
     await pollJobs($)
     await pollSteps($)
+    await runCompacts($)
     await captureGitBases($)
     if (hubUp && !outbox.length) await flushChoices($)
     if (hubUp && !outbox.length) {
@@ -775,9 +776,42 @@ async function setInflight($: any, noteId: string, on: boolean) {
   await $.store.set(key, next).catch(() => {})
 }
 
+// ---------- "/compact" from a Helm note: run the engine's compaction once the session is idle ----------
+let mainBusy = false
+const pendingCompacts: { noteId: string; instructions?: string; tries: number }[] = []
+
+async function runCompacts($: any) {
+  if (mainBusy || !pendingCompacts.length) return
+  const job = pendingCompacts[0]!
+  try {
+    const r: any = await $.session.compact(job.instructions ? { instructions: job.instructions } : {})
+    pendingCompacts.shift()
+    if (r?.skip) {
+      emit('note.result', { noteId: job.noteId, ok: false, via: 'compact', error: `compaction skipped: ${clip(r.skip, 200)}` })
+    } else {
+      emit('note.result', { noteId: job.noteId, ok: true, via: 'compact' })
+      emit('note.reply', { noteId: job.noteId, text: `Compacted. The conversation now holds ${(r?.messages ?? []).length} messages.` })
+    }
+  } catch (err) {
+    // rejects while a turn runs: try again on a later tick
+    if (++job.tries > 2400) { // about an hour of 1.5 s ticks
+      pendingCompacts.shift()
+      emit('note.result', { noteId: job.noteId, ok: false, via: 'compact', error: clip(String(err), 200) })
+    }
+  }
+  void flush($)
+}
+
 async function deliver($: any, note: any) {
   await setInflight($, note.id, true)
   try {
+    const compact = note.target.kind === 'session' ? String(note.text).trim().match(/^\/compact(?:\s+([\s\S]+))?$/) : null
+    if (compact) {
+      // Slash commands in a note would arrive as plain text; run the compaction itself instead.
+      pendingCompacts.push({ noteId: note.id, instructions: compact[1]?.trim() || undefined, tries: 0 })
+      await setInflight($, note.id, false)
+      return
+    }
     if (note.target.kind === 'session') {
       const r = await $.prompt.submit({ text: withAttachments(`Helm note (${note.id}):\n${note.text}`, note), asUser: true })
       if (r?.drop) throw new Error(`dropped: ${r.drop}`)
@@ -1044,6 +1078,7 @@ export const register: Register = (on, options) => {
   }).catch(($, e, next) => next(e))
 
   on('turn.start', async ($, e, next) => {
+    mainBusy = true
     emit('turn.started', {})
     try {
       // Only the main loop raises turn.start; a prompt carrying "Helm note (N-x)" will answer those notes.
@@ -1066,6 +1101,7 @@ export const register: Register = (on, options) => {
         const tokens = a.usage ? Number(a.usage.input_tokens ?? 0) + Number(a.usage.output_tokens ?? 0) : undefined
         completeAgent(a.agentId, ok, ok ? String(a.answer ?? '') : a.reason === 'refusal' ? a.refusal?.explanation ?? 'refused' : `ended: ${a.reason}`, tokens, String(a.answer ?? ''))
       } else {
+        mainBusy = false
         emit('turn.completed', { ok: a.reason === 'answer', error: a.reason === 'answer' ? undefined : a.reason })
         const ids = replyTurns.get(a.turnId)
         if (ids) {

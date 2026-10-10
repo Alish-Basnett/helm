@@ -156,7 +156,7 @@ export const toDigest = (r) => ({
 export const USAGE_KINDS = ['recap', 'answer', 'explain', 'digest', 'note_turn', 'wf_step', 'wf_review', 'wf_draft', 'concept_summary'];
 /** Kinds that count as work the user asked for (the rest is Helm's own overhead). */
 export const REQUESTED_KINDS = ['note_turn', 'wf_step'];
-export const NOTE_VIAS = ['prompt', 'send_message', 'followup_spawn', 'answer', 'start'];
+export const NOTE_VIAS = ['prompt', 'send_message', 'followup_spawn', 'answer', 'start', 'compact'];
 export const MAX_NOTE_ATTACHMENTS = 10;
 const pad2 = (n) => String(n).padStart(2, '0');
 /** Local calendar date (YYYY-MM-DD) of an epoch-ms time. */

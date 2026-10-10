@@ -4,6 +4,13 @@ All notable changes to Helm are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/). Shapes and endpoints are defined in `CONTRACT.md`.
 
+## [0.19.2] - 2026-10-10
+
+### Added
+
+- `/compact [instructions]` as a Helm note to a session runs the engine's compaction once the session is idle,
+  then replies "Compacted" under the note (slash commands in notes would otherwise arrive as plain text).
+
 ## [0.19.1] - 2026-10-10
 
 ### Fixed
