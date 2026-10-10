@@ -83,6 +83,8 @@ type World = {
   modelCalls: any[]
   toolCalls: any[]
   toolRegistered: any[]
+  storeSets: { key: string; value: any }[]
+  storeSeed: Record<string, any>
   agentList: { value: any[] }
   engine: { submitResult: any; sendResult: any; modelResult: any; spawnResult: any; toolResult: (e: any) => any }
 }
@@ -94,7 +96,6 @@ async function boot($: any, on: any, opts: HubOpts & { start?: boolean } = {}): 
   const n = ++counter
   const sessionId = `sess-${String(n).padStart(4, '0')}-abcdef`
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
-  mock.store(on)
   mock.env(on, { HELM_HOME: '/tmp/helm-test-home', HOME: '/home/test' })
   const hub = fakeHub(sessionId, opts)
   const w: World = {
@@ -106,6 +107,8 @@ async function boot($: any, on: any, opts: HubOpts & { start?: boolean } = {}): 
     modelCalls: [],
     toolCalls: [],
     toolRegistered: [],
+    storeSets: [],
+    storeSeed: {},
     agentList: { value: [] },
     engine: {
       submitResult: {},
@@ -118,6 +121,9 @@ async function boot($: any, on: any, opts: HubOpts & { start?: boolean } = {}): 
 
   // Op events ($.session.id(), $.http.fetch(), ...) are answered as { value }; engine events as their result object.
   const v = (value: unknown) => ({ value })
+  // A small in-memory store (replaces mock.store so sets can be recorded): storeSeed holds the data, as after a reload.
+  on('store.set', (_$: any, e: any) => (w.storeSets.push({ key: e.key, value: e.value }), w.storeSeed[e.key] = e.value, v(undefined)))
+  on('store.get', (_$: any, e: any) => v(w.storeSeed[e.key]))
   on('http.fetch', (_$: any, e: any) => v(hub.handle(e.url, e.init)))
   on('session.id', () => v(sessionId))
   on('session.cwd', () => v('/work/proj'))
@@ -646,5 +652,124 @@ describe('outbox delivery', () => {
     await w.clock.advance(20000)
     await w.clock.settle()
     expect(asEvent('tool.called', w).filter(e => e.data.toolUseId === 'tu-down')).toHaveLength(1)
+  })
+})
+
+describe('note replies', () => {
+  const turn = (extra: Record<string, unknown>) => ({ turnId: 't', durationMs: 5, isAborted: false, answer: '', reason: 'answer', ...extra })
+  const replies = (w: World) => asEvent('note.reply', w)
+  const taskDetail = (agentId: string) => ({
+    'T-5': { task: { id: 'T-5', title: 'Fix login', description: 'brief', recap: null, filesChanged: [] }, agent: { id: agentId } },
+  })
+
+  test('a delivered session note is answered by the main turn that carries it, newlines kept', async ($, on) => {
+    const w = await boot($, on)
+    w.hub.inbox.push({ id: 'N-7', target: { kind: 'session', id: w.sessionId }, text: 'status?' })
+    await tick(w)
+    expect(w.submitted[0].text).toContain('Helm note (N-7)')
+    await $.turn.start({ text: w.submitted[0].text, turnId: 'rt-1' } as any)
+    await $.turn.complete(turn({ turnId: 'rt-1', answer: 'Line one\n\nLine two\n- item' }) as any)
+    await tick(w)
+    expect(replies(w)).toHaveLength(1)
+    expect(replies(w)[0]!.data).toEqual({ noteId: 'N-7', text: 'Line one\n\nLine two\n- item' })
+  })
+
+  test('two notes in one turn each get the reply, once', async ($, on) => {
+    const w = await boot($, on)
+    await $.turn.start({ text: 'Helm note (N-20):\nfirst\nHelm note (N-21):\nsecond\nagain Helm note (N-20)', turnId: 'rt-2' } as any)
+    await $.turn.complete(turn({ turnId: 'rt-2', answer: 'both done' }) as any)
+    await tick(w)
+    expect(replies(w).map(e => e.data).sort((a, b) => a.noteId.localeCompare(b.noteId))).toEqual([
+      { noteId: 'N-20', text: 'both done' },
+      { noteId: 'N-21', text: 'both done' },
+    ])
+  })
+
+  test('an aborted or errored main turn replies with the reason', async ($, on) => {
+    const w = await boot($, on)
+    await $.turn.start({ text: 'Helm note (N-30):\nx', turnId: 'rt-3' } as any)
+    await $.turn.complete(turn({ turnId: 'rt-3', reason: 'aborted', isAborted: true }) as any)
+    await $.turn.start({ text: 'Helm note (N-31):\ny', turnId: 'rt-4' } as any)
+    await $.turn.complete(turn({ turnId: 'rt-4', reason: 'error' }) as any)
+    await tick(w)
+    const byId = (id: string) => replies(w).filter(e => e.data.noteId === id).map(e => e.data.text)
+    expect(byId('N-30')).toEqual(['(the turn ended: aborted)'])
+    expect(byId('N-31')).toEqual(['(the turn ended: error)'])
+  })
+
+  test('an empty answer is replied as a placeholder', async ($, on) => {
+    const w = await boot($, on)
+    await $.turn.start({ text: 'Helm note (N-32):\nx', turnId: 'rt-5' } as any)
+    await $.turn.complete(turn({ turnId: 'rt-5', answer: '   ' }) as any)
+    await tick(w)
+    expect(replies(w).map(e => e.data)).toEqual([{ noteId: 'N-32', text: '(no answer text)' }])
+  })
+
+  test('a task note sent to a live agent is answered by that agent completing, exactly once', async ($, on) => {
+    const w = await boot($, on, { taskDetail: taskDetail('ag-rep-live') as any })
+    w.agentList.value = [{ id: 'ag-rep-live', status: 'running' }]
+    w.hub.inbox.push({ id: 'N-40', target: { kind: 'task', id: 'T-5' }, text: 'also add a test' })
+    await tick(w)
+    expect(w.sent).toHaveLength(1)
+    expect(replies(w)).toHaveLength(0)
+    await $.turn.complete(turn({ agentId: 'ag-rep-live', answer: 'DONE: added\nFILES: a.ts' }) as any)
+    await $.turn.complete(turn({ agentId: 'ag-rep-live', answer: 'DONE: added\nFILES: a.ts' }) as any)
+    await tick(w)
+    expect(replies(w)).toHaveLength(1)
+    expect(replies(w)[0]!.data).toEqual({ noteId: 'N-40', text: 'DONE: added\nFILES: a.ts' })
+  })
+
+  test('a follow-up spawn cannot be answered: the kit floor returns no agentId from a plugin\'s $.agent.spawn', async ($, on) => {
+    // Even when the engine floor answers { agentId }, $.agent.spawn hands the plugin only { model, ... } (the agentId is
+    // dropped), so register.ts\'s `if (r?.agentId) awaitAgentReply(...)` never fires and a follow-up spawn gets no reply.
+    const w = await boot($, on, { taskDetail: taskDetail('ag-rep-old') as any })
+    w.agentList.value = [{ id: 'ag-rep-old', status: 'completed' }]
+    w.engine.spawnResult = { model: 'sonnet', agentId: 'ag-rep-new' }
+    w.hub.inbox.push({ id: 'N-50', target: { kind: 'task', id: 'T-5' }, text: 'and logout' })
+    await tick(w)
+    expect(w.spawned).toHaveLength(1)
+    const result = asEvent('note.result', w).find(e => e.data.noteId === 'N-50')!.data
+    expect(result).toMatchObject({ ok: true, via: 'followup_spawn' })
+    expect(result.agentId).toBeUndefined()
+    await $.turn.complete(turn({ agentId: 'ag-rep-new', answer: 'DONE: logout' }) as any)
+    await tick(w)
+    expect(replies(w)).toHaveLength(0)
+  })
+
+  test('a turn with no Helm note emits no note.reply', async ($, on) => {
+    const w = await boot($, on)
+    await $.turn.start({ text: 'just a normal prompt', turnId: 'rt-6' } as any)
+    await $.turn.complete(turn({ turnId: 'rt-6', answer: 'hi' }) as any)
+    await $.turn.complete(turn({ agentId: 'ag-rep-plain', answer: 'DONE' }) as any)
+    await tick(w)
+    expect(replies(w)).toHaveLength(0)
+  })
+
+  test('reply maps are saved under replies:<sessionId> by the 2 s timer', async ($, on) => {
+    const w = await boot($, on, { taskDetail: taskDetail('ag-rep-save') as any })
+    w.agentList.value = [{ id: 'ag-rep-save', status: 'running' }]
+    w.hub.inbox.push({ id: 'N-60', target: { kind: 'task', id: 'T-5' }, text: 'hi' })
+    await tick(w)
+    await $.turn.start({ text: 'Helm note (N-61):\nx', turnId: 'rt-save' } as any)
+    expect(w.storeSets.filter(s => s.key === `replies:${w.sessionId}`)).toHaveLength(0)
+    await w.clock.advance(2100)
+    await w.clock.settle()
+    const saved = w.storeSets.filter(s => s.key === `replies:${w.sessionId}`).at(-1)!.value
+    expect(saved.turns).toContainEqual(['rt-save', ['N-61']])
+    expect(saved.agents).toContainEqual(['ag-rep-save', ['N-60']])
+  })
+
+  test('saved reply maps are restored on session.start, so a reload still answers the note', async ($, on) => {
+    const w = await boot($, on, { start: false })
+    w.storeSeed[`replies:${w.sessionId}`] = { turns: [['rt-restored', ['N-70']]], agents: [['ag-restored', ['N-71']]] }
+    await $.session.start({ cwd: '/work/proj', surface: null, isInteractive: true })
+    await w.clock.settle()
+    await $.turn.complete(turn({ turnId: 'rt-restored', answer: 'back again' }) as any)
+    await $.turn.complete(turn({ agentId: 'ag-restored', answer: 'agent back' }) as any)
+    await tick(w)
+    expect(replies(w).map(e => e.data).sort((x, y) => x.noteId.localeCompare(y.noteId))).toEqual([
+      { noteId: 'N-70', text: 'back again' },
+      { noteId: 'N-71', text: 'agent back' },
+    ])
   })
 })

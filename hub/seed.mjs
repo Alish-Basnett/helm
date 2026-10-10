@@ -494,6 +494,15 @@ export function seed(hub, log) {
   note('nDraft1', 3.6, taskT('limiter'), 'Cover the /v1/export route in the limiter tests too; it has the heaviest payloads.');
   note('nDraft2', 1.2, sessA, 'After the limiter lands, draft the OpenAPI schema for /v1/tokens.');
 
+  // v0.3: replies, and a task started from the dashboard (Start -> session note -> ran -> reply)
+  const reply = (key, minAgo, sid, text) => atMin(minAgo, () => emit(sid, 'note.reply', { noteId: ids[key], text }));
+  reply('nRanA', 31.5, SESS_A, 'Understood. I will reuse the existing redis client in `src/lib/redis.ts` and add no new dependency.');
+  reply('nRanB', 22, SESS_A, 'Added a `refresh_token_reuse_total` counter, incremented on every replayed-token revocation.\n\n- metric lives in `src/auth/metrics.ts`\n- covered by the revoke tests');
+  atMin(9, () => { ids.startAudit = hub.startTask(ids.authdocs, clock).note.id; });
+  claim(8.5, SESS_A);
+  atMin(8, () => emit(SESS_A, 'note.result', { noteId: ids.startAudit, ok: true, via: 'prompt' }));
+  atMin(7.8, () => emit(SESS_A, 'note.reply', { noteId: ids.startAudit, text: 'Started the auth docs task in the background with helm:builder.' }));
+
   // ------------------------------------------------------------------------- run
   actions.sort((a, b) => a.t - b.t);
   for (const a of actions) {

@@ -18,6 +18,7 @@ const TABLES = [
   'projects', 'sessions', 'agents', 'tasks', 'notes', 'activity', 'late_completions',
   'agent_files', 'conflicts', 'questions', 'jobs', 'digests',
 ];
+const START_FROM = ['backlog', 'next', 'later', 'blocked'];
 const DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
 const pad2 = (n) => String(n).padStart(2, '0');
 /** Local calendar date (YYYY-MM-DD) of an epoch-ms time. */
@@ -360,9 +361,33 @@ export class Hub {
       if (!isStr(body.sessionId)) throw bad('sessionId must be a string');
       sessionId = body.sessionId;
     }
-    return this.tx(() => ({
-      task: this.command('hub.task.create', { projectId: body.projectId, title, description, status, dependsOn, sessionId }, at),
-    }));
+    const start = body.start === true;
+    return this.tx(() => {
+      const task = this.command('hub.task.create', { projectId: body.projectId, title, description, status, dependsOn, sessionId }, at);
+      if (!start) return { task };
+      let plan;
+      try { plan = this.startPlan(this.p.getTask(task.id)); } catch (e) {
+        if (e instanceof HttpError) return { task, error: e.message }; // the task is still created
+        throw e;
+      }
+      return this.command('hub.task.start', { id: task.id, ...plan }, at);
+    });
+  }
+  /** Validate a Start and build its note: { sessionId, text }. Throws 409 when not allowed / no live session. */
+  startPlan(t) {
+    if (!START_FROM.includes(t.status)) throw new HttpError(409, `cannot start a task that is ${t.status}`);
+    const sessionId = this.pickJobSession(t.session_id, t.project_id);
+    const text = `Start Helm task ${t.id} \u201c${t.title}\u201d.\n\nBrief:\n${t.description}\n\n`
+      + `Create nothing new: delegate this existing task now with the Agent tool (description starting with [helm:${t.id}]), `
+      + 'choosing helm:builder for code changes or helm:scout for read-only work, run it in the background, '
+      + 'then reply in one line with what you started.';
+    return { sessionId, text };
+  }
+  startTask(id, at = this.now()) {
+    const t = this.p.getTask(id);
+    if (!t) throw notFound('task not found');
+    const plan = this.startPlan(t);
+    return this.tx(() => this.command('hub.task.start', { id, ...plan }, at));
   }
   updateTask(id, body, at = this.now()) {
     const t = this.p.getTask(id);
@@ -432,7 +457,14 @@ export class Hub {
     if (!['session', 'task'].includes(kind) || !isStr(id)) throw bad('target must be { kind: "session"|"task", id }');
     const text = cleanText(body.text, 'text', 10000, false);
     const sessionId = this.resolveNoteSession({ kind, id });
-    return this.tx(() => ({ note: this.command('hub.note.create', { target: { kind, id }, text, sessionId }, at) }));
+    const execute = body.execute === true;
+    if (execute && !sessionId) throw new HttpError(409, 'no session available to deliver this note to');
+    return this.tx(() => {
+      const note = this.command('hub.note.create', { target: { kind, id }, text, sessionId }, at);
+      if (!execute) return { note };
+      const [queued] = this.command('hub.note.execute', { ids: [note.id], sessions: { [note.id]: sessionId } }, at);
+      return { note: queued };
+    });
   }
   updateNote(id, body, at = this.now()) {
     const n = this.p.getNote(id);

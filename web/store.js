@@ -56,8 +56,21 @@ export function subscribe(fn) { listeners.add(fn); return () => listeners.delete
 export function onActivity(fn) { activityListeners.add(fn); return () => activityListeners.delete(fn); }
 
 /* ---------- mutation ---------- */
+/** v0.3 fields default to null so the UI works against a hub that predates them. */
+export function normalizeRow(entity, row) {
+  if (!row) return row;
+  if (entity === 'note') {
+    if (row.reply === undefined) row.reply = null;
+    if (row.repliedAt === undefined) row.repliedAt = null;
+  } else if (entity === 'task') {
+    if (row.startNoteId === undefined) row.startNoteId = null;
+  }
+  return row;
+}
+
 export function upsert(entity, row) {
   if (!row || row.id == null) return;
+  normalizeRow(entity, row);
   if (entity === 'activity') { ingestActivity([row], true); return; }
   const map = state[KEYS[entity]];
   if (!map) return;
@@ -103,7 +116,7 @@ function replaceAll(s) {
   for (const k in KEYS) {
     const map = state[KEYS[k]];
     map.clear();
-    for (const row of s[KEYS[k]] || []) map.set(row.id, row);
+    for (const row of s[KEYS[k]] || []) map.set(row.id, normalizeRow(k, row));
     mark(k);
   }
   state.seq = s.seq || 0;
@@ -240,6 +253,12 @@ export const sel = {
     let list = projectId && projectId !== 'all' ? all.filter((d) => d.projectId === projectId) : all.filter((d) => !d.projectId);
     if (!list.length && (!projectId || projectId === 'all')) list = all;
     return list.sort((a, b) => String(b.date).localeCompare(String(a.date)) || (b.createdAt || 0) - (a.createdAt || 0));
+  },
+  /* ----- v0.3: Talk ----- */
+  /** Sessions you can talk to: active and idle, in the current project scope, most recently seen first. */
+  talkSessions() {
+    return sel.scopedSessions().filter((x) => x.status === 'active' || x.status === 'idle')
+      .sort((a, b) => (b.lastSeenAt || 0) - (a.lastSeenAt || 0));
   },
   telemetry() {
     const sessions = sel.sessions();

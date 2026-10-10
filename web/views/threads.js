@@ -7,6 +7,7 @@ import { fmtElapsed, fmtTokens, fmtUsd, fmtTime, cwdTail, agentLabel, truncate, 
 import { avatar, updateAvatar, modelBadge, updateModelBadge, nowDoingLine, emptyState } from '../ui.js';
 import { createTimeline } from '../timeline.js';
 import { createNotesPanel } from '../notes.js';
+import { createTalk } from './talk.js';
 import { navigate, setArgs, openTask } from '../router.js';
 
 const W = 580, NODE_W = 236, NODE_H = 62, GAP = 14, PAD = 20, MAIN_X = 16, AGENT_X = W - NODE_W - 16, MAX_AGENTS = 40;
@@ -225,13 +226,13 @@ export function mount(container) {
     r.stats = h('div', { class: 'stat-grid' });
     r.nd = nowDoingLine();
     const tl = createTimeline({ getRows: () => sel.activityForSession(id), empty: 'No activity yet for this session' });
-    const notes = createNotesPanel({ target: { kind: 'session', id }, title: 'Session notes' });
+    const talk = createTalk({ sessionId: id, inline: true });
     const el = h('div', { class: 'insp-inner' },
       h('header', { class: 'insp-head' }, h('div', { class: 'insp-kicker mono' }, icon('cpu', 13), 'Main agent'),
         h('div', { class: 'insp-title-row' }, r.pulse, r.title), r.cwd, h('div', { class: 'badge-row' }, r.model, r.state)),
       r.nd, r.stats,
       h('section', { class: 'sheet-section' }, h('h3', { class: 'section-title' }, icon('terminal', 14), 'Session timeline'), tl.el),
-      notes.el);
+      h('section', { class: 'sheet-section talk-section' }, h('h3', { class: 'section-title' }, icon('chat', 14), 'Talk to this session'), talk.el));
     return {
       el,
       update() {
@@ -253,7 +254,7 @@ export function mount(container) {
         ]);
         tl.refresh();
       },
-      destroy() { notes.destroy(); },
+      destroy() { talk.destroy(); },
     };
   }
 

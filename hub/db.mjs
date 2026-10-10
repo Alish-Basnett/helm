@@ -60,7 +60,8 @@ CREATE TABLE IF NOT EXISTS tasks (
   created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, done_at INTEGER,
   conflicts TEXT NOT NULL DEFAULT '[]',   -- v0.2: derived from agent_files (see Projector.recomputeConflicts)
   explainer TEXT,                         -- v0.2: markdown from an explain job
-  explain_job TEXT                        -- v0.2: JSON { id, state } of the latest explain job
+  explain_job TEXT,                       -- v0.2: JSON { id, state } of the latest explain job
+  start_note_id TEXT                      -- v0.3: the latest Start note
 );
 CREATE INDEX IF NOT EXISTS tasks_project ON tasks(project_id, status);
 CREATE INDEX IF NOT EXISTS tasks_session ON tasks(session_id);
@@ -68,7 +69,9 @@ CREATE TABLE IF NOT EXISTS notes (
   id TEXT PRIMARY KEY, target_kind TEXT NOT NULL, target_id TEXT NOT NULL,
   session_id TEXT NOT NULL DEFAULT '', text TEXT NOT NULL, state TEXT NOT NULL,
   created_at INTEGER NOT NULL, queued_at INTEGER, ran_at INTEGER, via TEXT, error TEXT,
-  sending_at INTEGER -- when the mod claimed it (queued -> sending); drives the sending timeout
+  sending_at INTEGER, -- when the mod claimed it (queued -> sending); drives the sending timeout
+  reply TEXT,         -- v0.3: the agent's answer (markdown)
+  replied_at INTEGER  -- v0.3
 );
 CREATE INDEX IF NOT EXISTS notes_session ON notes(session_id, state);
 CREATE INDEX IF NOT EXISTS notes_target ON notes(target_kind, target_id);
@@ -168,6 +171,10 @@ export class Db {
     if (!has('tasks', 'conflicts')) this.raw.exec("ALTER TABLE tasks ADD COLUMN conflicts TEXT NOT NULL DEFAULT '[]'");
     if (!has('tasks', 'explainer')) this.raw.exec('ALTER TABLE tasks ADD COLUMN explainer TEXT');
     if (!has('tasks', 'explain_job')) this.raw.exec('ALTER TABLE tasks ADD COLUMN explain_job TEXT');
+    // v0.3: note replies and the task's Start note (run `helmd --rebuild` to back-fill from old events).
+    if (!has('notes', 'reply')) this.raw.exec('ALTER TABLE notes ADD COLUMN reply TEXT');
+    if (!has('notes', 'replied_at')) this.raw.exec('ALTER TABLE notes ADD COLUMN replied_at INTEGER');
+    if (!has('tasks', 'start_note_id')) this.raw.exec('ALTER TABLE tasks ADD COLUMN start_note_id TEXT');
   }
   prep(sql) {
     let s = this.cache.get(sql);

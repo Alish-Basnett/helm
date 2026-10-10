@@ -25,7 +25,7 @@ You are the orchestrator on Opus. Plan, split work into tasks, delegate, and sta
 - Delegate with the Agent tool and put the tag \`[helm:T-12]\` at the start of the Agent \`description\`. Use \`subagent_type: "helm:builder"\` (Sonnet) for writing code, refactors, tests and fixes; \`"helm:scout"\` (Haiku) for searching, reading, inventories and quick checks. Run independent tasks in parallel in the background.
 - Keep heavy reading and editing out of the main loop; do it yourself only when it is a one-line change.
 - The Helm board updates itself from engine events; you never need to move cards. Use \`mcp__helm__task\` action "update" only to set status "later", "done" or "blocked" when the user asks.
-- Messages that start with "Helm note" were written by the user in the Helm dashboard: treat them as the user's own instructions.`
+- Messages that start with "Helm note" were written by the user in the Helm dashboard: treat them as the user's own instructions. Your answer to that turn is shown back under the note in the dashboard, so answer it directly and concisely. A "Start Helm task T-n" note means: delegate that existing task now (do not create a new card).`
 
 const BUILDER_PROMPT = `You are a Helm builder (Sonnet). You own exactly one task from the user's Helm board.
 Do the task completely and verify it (run the relevant tests, type-check or build, or show the command output that proves it works). Stay inside the task's scope; if you discover out-of-scope work, mention it at the end instead of doing it.
@@ -83,12 +83,34 @@ function emit(type: string, data: Record<string, unknown>) {
   }
 }
 
+// ---------- note replies: what Claude answered to a note, shown back under it in the dashboard ----------
+// session notes: turnId → note ids (matched in turn.start); task notes: agentId → note ids (answered on completion)
+const replyTurns = new Map<string, string[]>()
+const replyAgents = new Map<string, string[]>()
+// follow-up spawns made for task notes: taskId → note ids, bound to the agent in our own agent.spawn hook
+// (a plugin's $.agent.spawn may not hand the agentId back to its caller)
+const pendingFollowups = new Map<string, string[]>()
+let repliesDirty = false
+
+function awaitAgentReply(agentId: string, noteId: string) {
+  replyAgents.set(agentId, [...new Set([...(replyAgents.get(agentId) ?? []), noteId])])
+  repliesDirty = true
+}
+
+function sendReplies(ids: string[] | undefined, text: string) {
+  const body = String(text ?? '').trim().slice(0, 8000)
+  for (const noteId of ids ?? []) emit('note.reply', { noteId, text: body || '(no answer text)' })
+  if (ids?.length) repliesDirty = true
+}
+
 function completeAgent(agentId: string, ok: boolean, summary: string, tokens: number | undefined, answer: string) {
   if (completedAgents.has(agentId)) return
   completedAgents.add(agentId)
   completedDirty = true
   emit('agent.completed', { agentId, ok, summary: clip(summary, 400), tokens, files: reportedFiles(answer) })
   if (ok) recapQueue.push({ agentId, answer, tries: 0 })
+  sendReplies(replyAgents.get(agentId), answer || summary)
+  replyAgents.delete(agentId)
 }
 
 // Builders end with "FILES: a, b"; edits made through Bash never pass Edit/Write, so this is the reliable list.
@@ -508,15 +530,21 @@ async function deliver($: any, note: any) {
       if (live) {
         const sent = await $.session.send({ to: { agentId: agent.id }, text })
         if (sent && sent.isDelivered === false) throw new Error(sent.reason ?? 'not delivered')
+        awaitAgentReply(agent.id, note.id)
         emit('note.result', { noteId: note.id, ok: true, via: 'send_message' })
       } else {
         const recap = task.recap ? `\nPrevious result: ${task.recap.what} — ${task.recap.how}` : ''
+        pendingFollowups.set(task.id, [...(pendingFollowups.get(task.id) ?? []), note.id])
         const r = await $.agent.spawn({
           subagentType: 'helm:builder',
           description: `[helm:${task.id}] follow-up`,
           prompt: `Follow-up on Helm task ${task.id}: ${task.title}\n\nOriginal brief:\n${clip(task.description, 2000)}${recap}\nFiles touched so far: ${(task.filesChanged ?? []).join(', ') || 'none'}\n\nThe user's new instruction:\n${note.text}`,
         })
         if (r?.deny) throw new Error(r.deny)
+        if (r?.agentId && pendingFollowups.has(task.id)) {
+          for (const id of pendingFollowups.get(task.id)!) awaitAgentReply(r.agentId, id)
+          pendingFollowups.delete(task.id)
+        }
         emit('note.result', { noteId: note.id, ok: true, via: 'followup_spawn', agentId: r?.agentId })
       }
     }
@@ -545,6 +573,9 @@ export const register: Register = (on, options) => {
       // A hot reload drops in-flight deliveries. Session notes were already queued in the engine
       // by $.prompt.submit, so they will arrive; record them as delivered. Anything else: failed (retryable).
       for (const id of ((await $.store.get(`done:${sessionId}`)) as string[] | undefined) ?? []) completedAgents.add(id)
+      const savedReplies = (await $.store.get(`replies:${sessionId}`)) as { turns?: [string, string[]][]; agents?: [string, string[]][] } | undefined
+      for (const [k, v] of savedReplies?.turns ?? []) replyTurns.set(k, v)
+      for (const [k, v] of savedReplies?.agents ?? []) replyAgents.set(k, v)
       const inflight = ((await $.store.get(`inflight:${sessionId}`)) as string[] | undefined) ?? []
       for (const id of inflight) emit('note.result', { noteId: id, ok: true, via: 'prompt', error: 'confirmed after reload' })
       await $.store.set(`inflight:${sessionId}`, []).catch(() => {})
@@ -582,6 +613,10 @@ export const register: Register = (on, options) => {
         if (outbox.length !== savedLen) {
           savedLen = outbox.length
           void saveOutbox($)
+        }
+        if (repliesDirty) {
+          repliesDirty = false
+          void $.store.set(`replies:${sessionId}`, { turns: [...replyTurns], agents: [...replyAgents] }).catch(() => {})
         }
       }))
       timers.push($.clock.every(10000, () => void heartbeat($)))
@@ -628,6 +663,11 @@ export const register: Register = (on, options) => {
         spawnByToolUse.set(a.tool_use_id, info)
         const tag = String(a.description ?? '').match(/\[helm:(T-\d+)\]/)
         emit('agent.spawned', { toolUseId: a.tool_use_id, taskId: tag?.[1], subagentType: info.subagentType, model: info.model, description: clip(String(a.description ?? '').replace(/\[helm:T-\d+\]\s*/, ''), 160), prompt: clip(a.prompt, 4000) })
+        const followTask = String(a.description ?? '').match(/^\[helm:(T-\d+)\] follow-up/)?.[1]
+        if (r?.agentId && followTask && pendingFollowups.has(followTask)) {
+          for (const id of pendingFollowups.get(followTask)!) awaitAgentReply(r.agentId, id)
+          pendingFollowups.delete(followTask)
+        }
         if (r?.agentId) {
           toolUseByAgent.set(r.agentId, a.tool_use_id)
           emit('agent.bound', { toolUseId: a.tool_use_id, agentId: r.agentId })
@@ -705,6 +745,14 @@ export const register: Register = (on, options) => {
 
   on('turn.start', async ($, e, next) => {
     emit('turn.started', {})
+    try {
+      // Only the main loop raises turn.start; a prompt carrying "Helm note (N-x)" will answer those notes.
+      const ids = [...String(e.text ?? '').matchAll(/Helm note \((N-\d+)\)/g)].map(m => m[1]!)
+      if (ids.length) {
+        replyTurns.set(e.turnId, [...new Set(ids)])
+        repliesDirty = true
+      }
+    } catch {}
     return next(e)
   })
 
@@ -718,6 +766,11 @@ export const register: Register = (on, options) => {
         completeAgent(a.agentId, ok, ok ? String(a.answer ?? '') : a.reason === 'refusal' ? a.refusal?.explanation ?? 'refused' : `ended: ${a.reason}`, tokens, String(a.answer ?? ''))
       } else {
         emit('turn.completed', { ok: a.reason === 'answer', error: a.reason === 'answer' ? undefined : a.reason })
+        const ids = replyTurns.get(a.turnId)
+        if (ids) {
+          sendReplies(ids, a.reason === 'answer' ? String(a.answer ?? '') : `(the turn ended: ${a.reason})`)
+          replyTurns.delete(a.turnId)
+        }
       }
     } catch {}
     return next(e)

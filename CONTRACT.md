@@ -244,3 +244,30 @@ FTS also indexes questions (text), explainer text (as part of the task doc) and 
 ### Migration
 Opening a v0.1 database adds the new tables/columns in place. Old events are not replayed automatically; run
 `node hub/helmd.mjs --rebuild` (daemon stopped) to back-fill questions/conflicts from history.
+
+## v0.3 additions — drive everything from Helm (replies, Start, Talk)
+
+### Note replies
+- `Note` gains `reply: string | null` (markdown, ≤ 8000 chars) and `repliedAt: number | null`.
+- Event `note.reply` `{ noteId, text }` → sets reply/repliedAt (a later reply replaces an earlier one), pushes a
+  note upsert, adds Activity kind `note` ("Reply to N-x"), and is indexed in FTS with the note.
+- Who sends it (mod): a **session** note → the main agent's answer for the turn that the note started
+  (the mod matches `Helm note (N-x)` in `turn.start` text); a **task** note delivered by `send_message`
+  or `followup_spawn` → that agent's final answer when it completes.
+
+### Start a task from the dashboard
+- `POST /v1/tasks/:id/start` → `{ note, task }`. Creates a **session** note on the task's live session
+  (same session rule as jobs: task's session if not ended → project's most recent active/idle → 409
+  `{ error: 'no live session' }`), already `queued`, with text:
+  `Start Helm task T-n “<title>”.\n\nBrief:\n<description>\n\nCreate nothing new: delegate this existing task now with the Agent tool (description starting with [helm:T-n]), choosing helm:builder for code changes or helm:scout for read-only work, run it in the background, then reply in one line with what you started.`
+  Allowed when status is `backlog`, `next`, `later` or `blocked`; otherwise 409. Sets task status `next`
+  and `startNoteId`.
+- `Task` gains `startNoteId: string | null` (the latest start note; the UI reads its state/reply).
+- `POST /v1/tasks` accepts `start: true` → creates the task, then starts it as above; returns `{ task, note? }`
+  (task is still created if no live session; the response then carries `error`).
+
+### Talk
+- No new endpoints: Talk is the session's notes (target kind `session`) shown as a thread with replies.
+  `POST /v1/notes` with `{ target, text, execute: true }` creates and queues in one call → `{ note }`.
+
+(Clarified, v0.3: `POST /v1/tasks/:id/start` answers 200; `POST /v1/tasks` with `start: true` answers 201 and, when the start is refused (no live session, or a status Start does not allow), still creates the task and returns `{ task, error }` with no `note`; `POST /v1/notes` with `execute: true` answers 201 with the queued note and creates nothing on 409 `no session available…`; restarting a `next` task is allowed and replaces `startNoteId`; the start note's `target` is the chosen session. Pre-v0.3 databases are migrated in place; run `--rebuild` to back-fill replies from history.)

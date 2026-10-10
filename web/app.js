@@ -6,6 +6,7 @@ import { fmtTokens, fmtUsd, fmtClock, plural } from './format.js';
 import { openMenu, emptyState } from './ui.js';
 import { route, onRoute, navigate, VIEWS } from './router.js';
 import { createSheet } from './views/sheet.js';
+import { createTalkSheet } from './views/talk.js';
 import { createSpotlight } from './spotlight.js';
 import * as board from './views/board.js';
 import * as projects from './views/projects.js';
@@ -63,6 +64,8 @@ bus.on('toggle-sidebar', toggleSidebar);
 /* ---------- sidebar ---------- */
 const spotlight = createSpotlight($('#spotlight-root'));
 const sheet = createSheet($('#sheet-root'));
+const talk = createTalkSheet($('#sheet-root'));
+bus.on('open-talk', (sessionId) => talk.open(typeof sessionId === 'string' ? sessionId : undefined));
 
 const psName = h('span', { class: 'ps-name' }, 'All projects');
 const psSub = h('span', { class: 'ps-sub mono' }, '');
@@ -119,8 +122,10 @@ const telemetry = h('div', { class: 'telemetry mono', 'aria-label': 'Telemetry' 
   h('span', { class: 'tele' }, tTok, h('span', { class: 'tele-k' }, 'tokens today')),
   h('span', { class: 'tele tele-cost' }, tCost, h('span', { class: 'tele-k' }, 'today')),
   h('span', { class: 'tele' }, tClock));
+const talkBtn = h('button', { class: 'btn btn-quiet talk-btn', type: 'button', title: 'Talk to a session (T)', 'aria-label': 'Talk to a session', onclick: () => talk.toggle() },
+  icon('chat', 16), h('span', { class: 'sb-label-narrow' }, 'Talk'), h('kbd', { class: 'kbd sb-label-narrow' }, 'T'));
 const newTaskBtn = h('button', { class: 'btn btn-primary', type: 'button', onclick: () => newTask() }, icon('plus', 16), h('span', { class: 'sb-label-narrow' }, 'New task'));
-topbar.append(h('div', { class: 'tb-left' }, titleEl, scopeEl), h('span', { class: 'spacer' }), telemetry, newTaskBtn);
+topbar.append(h('div', { class: 'tb-left' }, titleEl, scopeEl), h('span', { class: 'spacer' }), telemetry, talkBtn, newTaskBtn);
 
 function newTask() {
   if (route().view !== 'board') navigate('board');
@@ -209,6 +214,7 @@ document.addEventListener('keydown', (e) => {
   if (typing || e.metaKey || e.ctrlKey || e.altKey || spotlight.isOpen) return;
   if (e.key === '/') { e.preventDefault(); spotlight.open(); }
   else if (e.key === 'n') { e.preventDefault(); newTask(); }
+  else if (e.key === 't') { e.preventDefault(); talk.toggle(); }
   else if (e.key === '>') { e.preventDefault(); spotlight.open('>'); }
 });
 

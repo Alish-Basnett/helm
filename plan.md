@@ -193,3 +193,10 @@ via a follow-up spawn that continues from the task's context.
   Fix found live: a hub without `/jobs` made the mod stop asking until reload → now re-checks every 60 s.
   Known gaps: T-1's file list was lost in the early freeze (pre-fix); `/helm join` typed in a session
   is unit-path only (the same hub join is proven via the dashboard API).
+- 2026-10-10 — **v0.3: drive everything from Helm.** Note replies (session note → the main turn's
+  answer; task note → the agent's final report; maps persisted across reloads), Start on cards and in
+  the sheet, Create & start, and a Talk sheet (header `t`, also in Threads) that is a chat with the
+  session. Hub T-9 (85 tests), web T-10, reply tests T-11 (mod 59 tests). Proven live: Create & start
+  T-12 → note N-3 delivered as a prompt → delegated to a builder → card to Review with files → my reply
+  captured under N-3 and shown in Talk. Fix from T-11: follow-up spawns bind their reply through our
+  own `agent.spawn` hook (a plugin's `$.agent.spawn` may not return the agentId).

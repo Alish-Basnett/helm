@@ -3,7 +3,8 @@ import { h, setText, setAttr, setClass, setHidden, reconcile, startTicker } from
 import { icon } from '../icons.js';
 import { state, sel, subscribe, upsert, ingestActivity, setUI } from '../store.js';
 import { api } from '../api.js';
-import { patchTask, quickActions, runQuickAction } from '../actions.js';
+import { patchTask, quickActions, runQuickAction, startTask, canStart } from '../actions.js';
+import { createStartStatus } from '../replies.js';
 import { fmtTokens, fmtElapsed, fmtAgo, STATUS_META, ALL_STATUSES, agentLabel, truncate, cwdTail } from '../format.js';
 import { toast, toastError, avatar, updateAvatar, modelBadge, updateModelBadge, nowDoingLine, statusDot } from '../ui.js';
 import { createTimeline } from '../timeline.js';
@@ -46,6 +47,8 @@ export function createSheet(root) {
       },
     });
     c.blocked = h('div', { class: 'banner banner-red', role: 'status', hidden: true }, icon('blocked', 16), h('span', {}));
+    c.startBtn = h('button', { class: 'btn btn-primary btn-sm sheet-start', type: 'button', hidden: true, title: 'Start this task in a live session', onclick: () => startTask(id) }, icon('play', 13), 'Start');
+    c.startStatus = createStartStatus({ full: true });
     // status control
     c.select = h('select', { class: 'select', 'aria-label': 'Status', onchange: () => patchTask(id, { status: c.select.value }, 'Could not change status') },
       ALL_STATUSES.map((s) => h('option', { value: s }, STATUS_META[s].label)));
@@ -103,10 +106,10 @@ export function createSheet(root) {
     c.notes = createNotesPanel({ target: { kind: 'task', id } });
 
     const head = h('header', { class: 'sheet-head' },
-      h('div', { class: 'sheet-head-top' }, c.id, c.pill, h('span', { class: 'spacer' }), c.close),
+      h('div', { class: 'sheet-head-top' }, c.id, c.pill, h('span', { class: 'spacer' }), c.startBtn, c.close),
       c.title);
     const body = h('div', { class: 'sheet-body' },
-      c.blocked,
+      c.blocked, c.startStatus.el,
       h('section', { class: 'sheet-section status-row' }, h('label', { class: 'field-label' }, 'Status', c.select), c.quick),
       c.agentWrap, c.conflictsWrap, c.descWrap, c.recapWrap, c.filesWrap, c.depsWrap, c.tlWrap, c.notes.el);
     sheet.append(head, body);
@@ -172,6 +175,9 @@ export function createSheet(root) {
     setHidden(c.blocked, !(t.status === 'blocked' && t.blockedReason));
     setText(c.blocked.lastChild, t.blockedReason || '');
     if (document.activeElement !== c.select && c.select.value !== t.status) c.select.value = t.status;
+
+    setHidden(c.startBtn, !canStart(t));
+    c.startStatus.update(t);
 
     // quick actions
     const acts = quickActions(t);
@@ -311,6 +317,7 @@ export function createSheet(root) {
 
   function onKey(e) {
     if (!taskId) return;
+    if (document.querySelector('.talk-sheet.open')) return; // the Talk sheet is on top and owns Esc / Tab
     if (e.key === 'Escape' && !e.defaultPrevented && !document.querySelector('.menu, .spotlight-scrim.open')) {
       e.preventDefault();
       closeTask();

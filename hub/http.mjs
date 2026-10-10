@@ -66,6 +66,7 @@ route('GET', '/v1/sessions/:id/activity', ({ hub, params, query }) => {
   return { activity: hub.sessionActivity(params.id, intParam(query.get('limit'), 200, 1, 2000)) };
 });
 route('POST', '/v1/sessions/:id/join', async ({ hub, params, json }) => hub.joinSession(params.id, await json()));
+route('POST', '/v1/tasks/:id/start', ({ hub, params }) => hub.startTask(params.id));
 route('POST', '/v1/tasks/:id/explain', ({ hub, params }) => hub.explainTask(params.id));
 route('POST', '/v1/digest', async ({ hub, json }) => hub.requestDigest(await json()));
 route('GET', '/v1/digests', ({ hub, query }) => ({

@@ -352,3 +352,114 @@ ul.md-list li::marker { color: var(--accent); }
 /* spotlight icon tints for the new kinds */
 .spot-icon.k-question { color: var(--indigo); background: color-mix(in srgb, var(--indigo) 14%, transparent); }
 .spot-icon.k-digest { color: var(--accent); background: var(--accent-soft); }
+
+/* ================= v0.3: replies, Start, Talk ================= */
+
+/* ---------- reply bubble (under a note) ---------- */
+.reply-bubble {
+  margin: 6px 0 2px 14px; padding: 8px 10px 8px 12px; border-radius: 10px; position: relative;
+  background: var(--bg-3); box-shadow: inset 2px 0 0 var(--accent-line), inset 0 0 0 .5px var(--separator);
+}
+.reply-head { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; font-size: 11px; color: var(--label-3); }
+.reply-head .icon { color: var(--accent); }
+.reply-who { font-weight: 650; color: var(--accent); letter-spacing: .02em; }
+.reply-model, .reply-when { color: var(--label-3); }
+.reply-model::before { content: "·"; margin-right: 6px; }
+.reply-when { margin-left: auto; }
+.reply-bubble .md { font-size: 13px; }
+.reply-bubble.clamped .reply-body { max-height: 12.4em; overflow: hidden; -webkit-mask-image: linear-gradient(#000 70%, transparent); mask-image: linear-gradient(#000 70%, transparent); }
+.reply-toggle { margin-top: 4px; font-size: 12px; }
+
+/* ---------- "waiting for reply…" shimmer ---------- */
+.reply-wait { display: flex; align-items: center; gap: 8px; margin: 4px 0 0 14px; min-height: 20px; font-size: 12px; }
+.reply-wait[hidden] { display: none; }
+.reply-wait-text {
+  color: var(--accent);
+  background-image: linear-gradient(100deg, var(--accent) 0%, var(--accent) 42%, var(--accent-hi) 50%, var(--accent) 58%, var(--accent) 100%);
+  background-size: 260% 100%; -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;
+  animation: shimmer 2.1s linear infinite;
+}
+.typing-dots { display: inline-flex; gap: 3px; align-items: center; }
+.typing-dots i { width: 5px; height: 5px; border-radius: 50%; background: var(--accent); opacity: .35; animation: typing 1.2s ease-in-out infinite; }
+.typing-dots i:nth-child(2) { animation-delay: .15s; } .typing-dots i:nth-child(3) { animation-delay: .3s; }
+@keyframes typing { 0%, 60%, 100% { opacity: .3; transform: translateY(0); } 30% { opacity: 1; transform: translateY(-2px); } }
+@media (prefers-reduced-motion: reduce) {
+  .reply-wait-text { animation: none !important; background: none; -webkit-text-fill-color: var(--accent); }
+  .typing-dots i { animation: none !important; opacity: .7; }
+}
+
+/* ---------- Start (card + sheet) ---------- */
+.qa-start { width: auto; padding: 0 10px 0 8px; gap: 5px; grid-auto-flow: column; background: var(--accent); color: var(--on-accent); font-size: 12.5px; font-weight: 650; }
+.qa-start:hover { background: color-mix(in srgb, var(--accent) 88%, white); color: var(--on-accent); }
+.qa-label { line-height: 1; }
+.sheet-start { margin-right: 2px; }
+.start-status { display: flex; flex-direction: column; gap: 4px; font-size: 12.5px; }
+.start-status[hidden] { display: none; }
+.card .start-status { padding: 6px 8px; border-radius: 8px; background: var(--accent-softer); }
+.sheet .start-status { padding: 10px 12px; border-radius: var(--r); background: var(--accent-softer); box-shadow: inset 0 0 0 .5px var(--accent-line); }
+.ss-line { display: flex; align-items: center; gap: 6px; font-weight: 600; color: var(--accent); }
+.ss-icon { display: inline-flex; }
+.ss-starting .ss-text {
+  background-image: linear-gradient(100deg, var(--accent) 0%, var(--accent) 42%, var(--accent-hi) 50%, var(--accent) 58%, var(--accent) 100%);
+  background-size: 260% 100%; -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;
+  animation: shimmer 2.1s linear infinite;
+}
+.ss-sent .ss-line { color: var(--green); }
+.ss-failed .ss-line { color: var(--red); }
+.ss-failed .ss-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.ss-reply { color: var(--label-2); font-size: 12px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.ss-reply .md { font-size: 12px; gap: 2px; color: inherit; }
+.start-status .reply-bubble { margin-left: 0; }
+.start-status .reply-wait { margin-left: 0; }
+@media (prefers-reduced-motion: reduce) { .ss-starting .ss-text { animation: none !important; background: none; -webkit-text-fill-color: var(--accent); } }
+
+/* split create action in the board composer */
+.composer-row { flex-wrap: wrap; }
+.composer-start .kbd { margin-left: 2px; opacity: .8; }
+
+/* ---------- Talk ---------- */
+.talk-btn { gap: 6px; }
+.talk-btn .kbd { margin-left: 2px; }
+.talk-scrim { z-index: 62; }
+.talk-sheet { z-index: 63; }
+.talk-head { display: flex; flex-direction: column; gap: 8px; }
+.talk-head .sheet-head-top { margin-bottom: 0; }
+.talk-title { display: inline-flex; align-items: center; gap: 8px; font-size: 18px; font-weight: 700; letter-spacing: -0.02em; }
+.talk-picker { width: 100%; }
+.talk-sub { font-size: 11.5px; color: var(--label-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.talk-body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.talk-body .empty { margin: auto; }
+.talk { display: flex; flex-direction: column; min-height: 0; flex: 1; }
+.talk-thread { flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 14px; padding: 14px 16px; margin: 0; list-style: none; }
+.talk-thread[hidden] { display: none; }
+.talk-empty { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; padding: 24px; text-align: center; color: var(--label-3); font-size: 13px; }
+.talk-empty[hidden] { display: none; }
+.talk-empty p { margin: 0; max-width: 280px; }
+.talk-composer { flex: none; padding: 10px 16px 12px; border-top: .5px solid var(--separator); }
+.talk-hint { display: flex; justify-content: space-between; align-items: center; }
+.talk-draft { font-size: 11.5px; }
+.talk.inline { flex: none; border-radius: var(--r); background: var(--bg-2); box-shadow: var(--shadow-1); }
+.talk.inline .talk-thread { flex: none; max-height: 380px; min-height: 96px; padding: 12px; }
+.talk.inline .talk-empty { padding: 20px 12px; }
+.talk.inline .talk-composer { padding: 8px 12px 10px; }
+.tk-turn { display: flex; flex-direction: column; gap: 6px; animation: tl-in 260ms var(--ease); }
+.tk-turn.pending { opacity: .75; }
+.tk-me { display: flex; justify-content: flex-end; }
+.tk-bubble { max-width: 86%; padding: 8px 12px; border-radius: 16px 16px 4px 16px; background: var(--fill-2); box-shadow: inset 0 0 0 .5px var(--separator); }
+.tk-text { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13.5px; line-height: 1.45; }
+.tk-meta { display: flex; flex-wrap: wrap; gap: 4px 8px; justify-content: flex-end; align-items: baseline; margin-top: 3px; font-size: 11px; }
+.tk-meta .note-err { max-width: 200px; }
+/* colour of my bubble = note state (same language as the notes list) */
+.tk-turn.state-draft .tk-bubble { background: var(--fill-3); border: 1px dashed var(--separator-strong); }
+.tk-turn.state-draft .tk-text, .tk-turn.state-draft .tk-meta { color: var(--label-2); }
+.tk-turn.state-queued .tk-bubble, .tk-turn.state-sending .tk-bubble { background: var(--accent-soft); box-shadow: inset 0 0 0 .5px var(--accent-line); }
+.tk-turn.state-queued .tk-text, .tk-turn.state-sending .tk-text, .tk-turn.state-queued .tk-meta, .tk-turn.state-sending .tk-meta { color: var(--accent); }
+.tk-turn.state-ran .tk-bubble { background: color-mix(in srgb, var(--green) 12%, transparent); box-shadow: inset 0 0 0 .5px color-mix(in srgb, var(--green) 35%, transparent); }
+.tk-turn.state-ran .tk-text, .tk-turn.state-ran .tk-meta { color: var(--green); }
+.tk-turn.state-failed .tk-bubble { background: color-mix(in srgb, var(--red) 11%, transparent); box-shadow: inset 0 0 0 .5px color-mix(in srgb, var(--red) 35%, transparent); }
+.tk-turn.state-failed .tk-text, .tk-turn.state-failed .tk-meta { color: var(--red); }
+.tk-claude { display: flex; flex-direction: column; align-items: flex-start; max-width: 92%; }
+.tk-claude[hidden] { display: none; }
+.tk-claude .reply-bubble { margin: 0; border-radius: 16px 16px 16px 4px; box-shadow: inset 0 0 0 .5px var(--separator); background: var(--bg-3); }
+.tk-claude .reply-wait { margin: 0; padding: 8px 12px; border-radius: 16px 16px 16px 4px; background: var(--bg-3); box-shadow: inset 0 0 0 .5px var(--separator); }
+.tk-claude .reply-wait[hidden] { display: none; }

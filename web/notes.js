@@ -2,6 +2,7 @@
 import { h, reconcile, setText, setClass, setHidden, startTicker } from './dom.js';
 import { icon } from './icons.js';
 import { state, sel, subscribe } from './store.js';
+import { createReply, createWaitLine } from './replies.js';
 import { addNote, editNote, deleteNote, executeNotes, retryNote } from './actions.js';
 
 const STATE_LABEL = { draft: 'Draft', queued: 'Queued', sending: 'Sending…', failed: 'Failed' };
@@ -64,12 +65,14 @@ export function createNotesPanel(opts) {
   function makeRow(n) {
     const text = h('div', { class: 'note-text' });
     const meta = h('div', { class: 'note-meta mono' });
-    const body = h('div', { class: 'note-body' }, text, meta);
+    const reply = createReply();
+    const wait = createWaitLine();
+    const body = h('div', { class: 'note-body' }, text, meta, reply.el, wait.el);
     const edit = h('button', { class: 'icon-btn sm', type: 'button', 'aria-label': 'Edit note', title: 'Edit', onclick: () => beginEdit(row) }, icon('pencil', 14));
     const del = h('button', { class: 'icon-btn sm', type: 'button', 'aria-label': 'Delete note', title: 'Delete', onclick: () => deleteNote(row.__id) }, icon('trash', 14));
     const actions = h('div', { class: 'note-actions' }, edit, del);
     const row = h('li', { class: 'note' }, body, actions);
-    row.__text = text; row.__meta = meta; row.__actions = actions; row.__id = n.id; row.__editing = false;
+    row.__text = text; row.__meta = meta; row.__reply = reply; row.__wait = wait; row.__actions = actions; row.__id = n.id; row.__editing = false;
     text.addEventListener('click', () => { if (row.__note.state === 'draft' && !getSelection().toString()) beginEdit(row); });
     return row;
   }
@@ -124,6 +127,8 @@ export function createNotesPanel(opts) {
       }
     }
     setHidden(row.__actions, n.state !== 'draft' || !!n.__pending);
+    row.__reply.update(n);
+    row.__wait.update(n);
   }
 
   function render() {

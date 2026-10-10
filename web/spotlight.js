@@ -3,9 +3,9 @@ import { h, bus, debounce, renderSnippet } from './dom.js';
 import { icon } from './icons.js';
 import { state, sel, setUI } from './store.js';
 import { api } from './api.js';
-import { setStatus } from './actions.js';
+import { setStatus, startTask, canStart } from './actions.js';
 import { navigate, openTask } from './router.js';
-import { fmtAgo, truncate } from './format.js';
+import { fmtAgo, truncate, STATUS_META } from './format.js';
 
 const KIND = {
   task: { label: 'Tasks', icon: 'board' },
@@ -47,8 +47,10 @@ export function createSpotlight(root) {
   root.appendChild(scrim);
 
   /* ---------- commands ---------- */
-  function commands() {
+  function commands(needle = '') {
     const cmds = [
+      { title: 'Talk to session', sub: 'Chat with a live session of this project', icon: 'chat', run: () => bus.emit('open-talk') },
+      { title: 'Start task…', sub: 'Pick a task to start in a live session', icon: 'play', stay: true, run: () => { input.value = '>start '; onInput(); input.focus(); } },
       { title: 'New task', sub: 'Open the composer on the Board', icon: 'plus', run: () => { navigate('board'); setTimeout(() => bus.emit('new-task'), 60); } },
       { title: 'Go to Board', icon: 'board', run: () => navigate('board') },
       { title: 'Go to Projects', icon: 'folder', run: () => navigate('projects') },
@@ -67,6 +69,13 @@ export function createSpotlight(root) {
     } else {
       cmds.push({ title: 'Move selected task to Done', sub: 'Select a task first', icon: 'check', disabled: true });
       cmds.push({ title: 'Move selected task to Saved for later', sub: 'Select a task first', icon: 'bookmark', disabled: true });
+    }
+    if (t && canStart(t)) cmds.push({ title: 'Start selected task', sub: `${t.id} · ${truncate(t.title, 40)}`, icon: 'play', run: () => startTask(t.id) });
+    if (/^start\b/.test(needle)) {
+      const startable = Array.from(state.tasks.values()).filter((x) => canStart(x) && sel.inScope(x) && !String(x.id).startsWith('tmp-'))
+        .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+      for (const x of startable) cmds.push({ taskCmd: true, hay: `${x.id} ${x.title}`.toLowerCase(), title: `Start ${x.id} · ${truncate(x.title, 56)}`, sub: `${STATUS_META[x.status].label} · ${sel.projectName(x.projectId)}`, icon: 'play', run: () => startTask(x.id) });
+      if (!startable.length) cmds.push({ title: 'Nothing to start', sub: 'Backlog, Up next, Saved for later and Blocked tasks can be started', icon: 'play', disabled: true });
     }
     cmds.push({ title: 'Toggle theme', sub: 'System · Light · Dark', icon: 'sun', run: () => bus.emit('toggle-theme') });
     cmds.push({ title: 'Toggle sidebar', icon: 'sidebar', run: () => bus.emit('toggle-sidebar') });
@@ -133,6 +142,7 @@ export function createSpotlight(root) {
   function run(i) {
     const it = items[i];
     if (!it || it.disabled) return;
+    if (it.stay) { it.run(); return; }
     close(false);
     if (it.kind === 'command') it.run();
     else openResult(it);
@@ -156,7 +166,8 @@ export function createSpotlight(root) {
     search.cancel();
     if (cmdMode) {
       const needle = raw.slice(1).trim().toLowerCase();
-      items = commands().filter((c) => !needle || c.title.toLowerCase().includes(needle) || (c.sub || '').toLowerCase().includes(needle)).map((c) => ({ ...c, group: 'command' }));
+      const rest = (/^start\s+(.*)$/.exec(needle) || [])[1];
+      items = commands(needle).filter((c) => (c.taskCmd ? !rest || c.hay.includes(rest) : !needle || c.title.toLowerCase().includes(needle) || (c.sub || '').toLowerCase().includes(needle))).map((c) => ({ ...c, group: 'command' }));
       loading = false;
       render();
       return;

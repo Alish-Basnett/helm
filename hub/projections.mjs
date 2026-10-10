@@ -46,11 +46,12 @@ export const toTask = (r) => ({
   filesChanged: parse(r.files_changed, []), tokens: r.tokens, recap: parse(r.recap, null),
   createdAt: r.created_at, updatedAt: r.updated_at, doneAt: r.done_at ?? null,
   conflicts: parse(r.conflicts, []), explainer: r.explainer ?? null, explainJob: parse(r.explain_job, null),
+  startNoteId: r.start_note_id ?? null,
 });
 export const toNote = (r) => ({
   id: r.id, target: { kind: r.target_kind, id: r.target_id }, sessionId: r.session_id, text: r.text,
   state: r.state, createdAt: r.created_at, queuedAt: r.queued_at ?? null, ranAt: r.ran_at ?? null,
-  via: r.via ?? null, error: r.error ?? null,
+  via: r.via ?? null, error: r.error ?? null, reply: r.reply ?? null, repliedAt: r.replied_at ?? null,
 });
 export const toActivity = (r) => ({
   id: r.id, sessionId: r.session_id, agentId: r.agent_id ?? null, taskId: r.task_id ?? null,
@@ -157,7 +158,8 @@ export class Projector {
     let label = '';
     if (n.target_kind === 'task') label = this.getTask(n.target_id)?.title || '';
     else label = this.getSession(n.target_id)?.title || '';
-    this.setDoc('note', n.id, `Note for ${label || n.target_id}`, n.text, {
+    const body = n.reply ? `${cut(n.text, 3000)}\n${n.reply}` : n.text;
+    this.setDoc('note', n.id, `Note for ${label || n.target_id}`, body, {
       sessionId: n.session_id || null, taskId: n.target_kind === 'task' ? n.target_id : null,
       at: n.ran_at ?? n.queued_at ?? n.created_at,
     });
@@ -407,6 +409,7 @@ export class Projector {
       case 'agent.completed': return this.onAgentCompleted(ev);
       case 'recap.generated': return this.onRecap(ev);
       case 'note.result': return this.onNoteResult(ev);
+      case 'note.reply': return this.onNoteReply(ev);
       case 'reconcile': return this.onReconcile(ev);
       case 'job.result': return this.onJobResult(ev);
       case 'hub.project.create': return this.hProjectCreate(ev);
@@ -420,6 +423,7 @@ export class Projector {
       case 'hub.note.execute': return this.hNoteExecute(ev);
       case 'hub.note.retry': return this.hNoteRetry(ev);
       case 'hub.note.claim': return this.hNoteClaim(ev);
+      case 'hub.task.start': return this.hTaskStart(ev);
       case 'hub.question.dismiss': return this.hQuestionDismiss(ev);
       case 'hub.job.create': return this.hJobCreate(ev);
       case 'hub.job.claim': return this.hJobClaim(ev);
@@ -678,6 +682,20 @@ export class Projector {
       summary: ok ? `Note ${n.id} delivered${via ? ' via ' + via : ''}: ${cut(n.text, 160)}`
         : `Note ${n.id} failed: ${cut(str(d.error) || 'delivery failed', 160)}`,
       ok, at,
+    });
+  }
+  onNoteReply(ev) {
+    const d = ev.data;
+    const n = this.getNote(str(d.noteId));
+    if (!n) { this.log?.warn(`note.reply for unknown note ${d.noteId}`); return; }
+    const text = cut(str(d.text).trim(), 8000);
+    if (!text) return;
+    this.upd('notes', n.id, { reply: text, replied_at: ev.at });
+    this.indexNote(this.getNote(n.id));
+    this.pushNote(n.id);
+    this.addActivity({
+      sessionId: n.session_id || ev.sessionId, taskId: n.target_kind === 'task' ? n.target_id : null, kind: 'note',
+      summary: `Reply to ${n.id}: ${cut(text, 160)}`, at: ev.at,
     });
   }
   onReconcile(ev) {
@@ -998,6 +1016,27 @@ export class Projector {
       summary: `Note ${n.id} re-queued`, at: ev.at,
     });
     return toNote(nn);
+  }
+  /** Start a task from the dashboard: a queued session note carrying the delegation prompt, task -> next. */
+  hTaskStart(ev) {
+    const { id, sessionId, text } = ev.data;
+    const t = this.getTask(id);
+    if (!t) throw new Error('task not found');
+    const nid = this.nextId('N');
+    this.db.run(
+      `INSERT INTO notes(id, target_kind, target_id, session_id, text, state, created_at, queued_at, ran_at, via, error, sending_at)
+       VALUES (?, 'session', ?, ?, ?, 'queued', ?, ?, NULL, NULL, NULL, NULL)`,
+      nid, sessionId, sessionId, text, ev.at, ev.at);
+    this.indexNote(this.getNote(nid));
+    this.pushNote(nid);
+    this.addActivity({
+      sessionId, taskId: id, kind: 'note', summary: `Note ${nid} queued: ${cut(text, 200)}`, at: ev.at,
+    });
+    this.setTaskStatus(t, 'next', ev.at, null);
+    this.upd('tasks', id, { start_note_id: nid });
+    this.indexTask(this.getTask(id));
+    this.pushTask(id);
+    return { note: toNote(this.getNote(nid)), task: toTask(this.getTask(id)) };
   }
   hNoteClaim(ev) {
     const out = [];

@@ -189,6 +189,10 @@ export function startTicker() {
       const t = Number(el.getAttribute('data-ago'));
       if (t) setText(el, (el.getAttribute('data-ago-prefix') || '') + fmtAgo(t, now));
     }
+    // elements that stop being true after a deadline (e.g. "waiting for reply…" after 15 min)
+    for (const el of document.querySelectorAll('[data-expire]')) {
+      if (now > Number(el.getAttribute('data-expire'))) { el.hidden = true; el.removeAttribute('data-expire'); }
+    }
   };
   setInterval(tick, 1000);
   tick();

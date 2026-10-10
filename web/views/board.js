@@ -2,7 +2,8 @@
 import { h, reconcile, setText, setClass, setHidden, setAttr, bus, startTicker } from '../dom.js';
 import { icon } from '../icons.js';
 import { state, sel, lsGet, lsSet, setUI } from '../store.js';
-import { patchTask, createTask, quickActions, runQuickAction } from '../actions.js';
+import { patchTask, createTask, quickActions, runQuickAction, startTask, canStart } from '../actions.js';
+import { createStartStatus } from '../replies.js';
 import { fmtElapsed, fmtTokens, truncate, agentLabel, STATUS_META, MAIN_COLUMNS, LANES, plural } from '../format.js';
 import { avatar, updateAvatar, modelBadge, updateModelBadge, nowDoingLine, statusDot, toast } from '../ui.js';
 import { openTask, navigate } from '../router.js';
@@ -65,10 +66,12 @@ export function mount(container) {
   function buildComposer(status) {
     const input = h('input', { class: 'composer-input', type: 'text', placeholder: 'New task title…', 'aria-label': `New task title for ${STATUS_META[status].label}`, autocomplete: 'off' });
     const proj = h('select', { class: 'select select-sm', 'aria-label': 'Project' });
-    const add = h('button', { class: 'btn btn-primary btn-sm', type: 'submit' }, 'Add');
+    const add = h('button', { class: 'btn btn-primary btn-sm', type: 'submit', title: 'Create (↵)' }, 'Create');
+    const canGo = status === 'backlog' || status === 'next';
+    const go = h('button', { class: 'btn btn-accent btn-sm composer-start', type: 'button', hidden: !canGo, title: 'Create and start now (⌘↵)', onclick: () => submit(true) },
+      icon('play', 13), 'Create & start', h('kbd', { class: 'kbd' }, '⌘↵'));
     const cancel = h('button', { class: 'btn btn-quiet btn-sm', type: 'button', onclick: () => closeComposer() }, 'Done');
-    const el = h('form', { class: 'composer', hidden: true, onsubmit: async (e) => {
-      e.preventDefault();
+    async function submit(start) {
       const title = input.value.trim();
       if (!title) return;
       const projectId = proj.hidden ? defaultProject() : proj.value;
@@ -76,9 +79,14 @@ export function mount(container) {
       if (!proj.hidden) lsSet('helm.composer.project', projectId);
       input.value = '';
       input.focus();
-      await createTask({ projectId, title, status });
-    } }, input, h('div', { class: 'composer-row' }, proj, h('span', { class: 'spacer' }), cancel, add));
-    input.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeComposer(); } });
+      await createTask({ projectId, title, status, start: start && canGo });
+    }
+    const el = h('form', { class: 'composer', hidden: true, onsubmit: (e) => { e.preventDefault(); submit(false); } },
+      input, h('div', { class: 'composer-row' }, proj, h('span', { class: 'spacer' }), cancel, add, go));
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeComposer(); }
+      else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && !e.isComposing) { e.preventDefault(); if (canGo) submit(true); }
+    });
     return { el, input, proj };
   }
 
@@ -139,9 +147,10 @@ export function mount(container) {
     r.files = h('span', { class: 'meta-item' }, icon('file', 13), h('span', { class: 'mono' }));
     r.dep = h('span', { class: 'dep-badge mono' }, icon('link', 12), h('span', {}));
     r.meta = h('div', { class: 'card-meta' }, r.elapsed, r.tokens, r.files, r.dep);
+    r.start = createStartStatus();
     r.actions = h('div', { class: 'card-actions' });
     const el = h('article', { class: 'card', tabindex: '0', draggable: 'true', 'data-id': t.id, role: 'group' },
-      r.actions, r.title, h('div', { class: 'card-sub' }, r.id, r.proj, r.conflict), r.agent, r.blocked, r.meta);
+      r.actions, r.title, h('div', { class: 'card-sub' }, r.id, r.proj, r.conflict), r.agent, r.blocked, r.start.el, r.meta);
     el.__r = r;
     el.addEventListener('click', (e) => { if (!e.target.closest('.card-actions') && !el.__task.__pending) openTask(el.__task.id); });
     el.addEventListener('focus', () => { if (state.ui.selectedTaskId !== el.__task.id) setUI({ selectedTaskId: el.__task.id }); });
@@ -221,10 +230,13 @@ export function mount(container) {
     }
     setHidden(r.meta, r.elapsed.hidden && r.tokens.hidden && r.files.hidden && r.dep.hidden);
     // quick actions
-    const acts = t.__pending ? [] : quickActions(t);
+    r.start.update(t);
+    const acts = t.__pending ? [] : [...(canStart(t) ? [{ key: 'start', label: 'Start', icon: 'play' }] : []), ...quickActions(t)];
     reconcile(r.actions, acts, (a) => a.key, (a) => {
-      const b = h('button', { class: `qa qa-${a.key}`, type: 'button', title: a.label, 'aria-label': `${a.label} ${t.id}`,
-        onclick: (e) => { e.stopPropagation(); runQuickAction(el.__task, b.__a); } }, icon(a.icon, 15));
+      const isStart = a.key === 'start';
+      const b = h('button', { class: `qa qa-${a.key}`, type: 'button', title: isStart ? 'Start (S)' : a.label, 'aria-label': `${a.label} ${t.id}`,
+        onclick: (e) => { e.stopPropagation(); if (isStart) startTask(el.__task.id); else runQuickAction(el.__task, b.__a); } },
+      icon(a.icon, isStart ? 13 : 15), isStart ? h('span', { class: 'qa-label' }, 'Start') : null);
       return b;
     }, (b, a) => { b.__a = a; });
   }
@@ -233,6 +245,10 @@ export function mount(container) {
     const t = el.__task;
     if (e.target !== el) return;
     if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openTask(t.id); return; }
+    if ((e.key === 's' || e.key === 'S') && !e.altKey && !e.metaKey && !e.ctrlKey) {
+      if (canStart(t)) { e.preventDefault(); startTask(t.id); }
+      return;
+    }
     if (!e.altKey) return;
     const idx = MAIN_COLUMNS.indexOf(t.status);
     if ((e.key === 'ArrowLeft' || e.key === 'ArrowRight') && idx >= 0) {
@@ -379,7 +395,7 @@ export function mount(container) {
   if (state.ui.pendingNewTask) { setUI({ pendingNewTask: false }); openComposer('backlog'); }
 
   return {
-    watch: ['task', 'agent', 'project', 'session', 'ui', 'ready', 'question'],
+    watch: ['task', 'agent', 'project', 'session', 'ui', 'ready', 'question', 'note'],
     update: render,
     setRoute() {},
     destroy() { offNew(); root.remove(); },

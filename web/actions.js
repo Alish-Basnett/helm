@@ -34,15 +34,15 @@ export function setStatus(id, status, label) {
   return patchTask(id, { status }, label || 'Could not move task');
 }
 
-export async function createTask({ projectId, title, description, status = 'backlog', dependsOn, sessionId }) {
+export async function createTask({ projectId, title, description, status = 'backlog', dependsOn, sessionId, start = false }) {
   title = (title || '').trim();
   if (!title) return null;
   const col = sel.scopedTasks().filter((t) => t.status === status && t.projectId === projectId);
   const order = col.reduce((m, t) => Math.max(m, t.order || 0), 0) + 1;
   const tmp = {
-    id: tmpId('T'), projectId, sessionId: sessionId || null, title, description: description || '', status,
+    id: tmpId('T'), projectId, sessionId: sessionId || null, title, description: description || '', status: start ? 'next' : status,
     agentId: null, order, blockedReason: null, dependsOn: dependsOn || [], filesChanged: [], tokens: 0, recap: null,
-    createdAt: Date.now(), updatedAt: Date.now(), doneAt: null, __pending: true,
+    createdAt: Date.now(), updatedAt: Date.now(), doneAt: null, startNoteId: start ? tmpId('N') : null, __pending: true,
   };
   upsert('task', tmp);
   try {
@@ -50,10 +50,13 @@ export async function createTask({ projectId, title, description, status = 'back
     if (description) body.description = description;
     if (dependsOn && dependsOn.length) body.dependsOn = dependsOn;
     if (sessionId) body.sessionId = sessionId;
-    const { task } = await api.createTask(body);
+    if (start) body.start = true;
+    const res = await api.createTask(body);
     remove('task', tmp.id);
-    if (task) upsert('task', task);
-    return task;
+    if (res.note) upsert('note', res.note);
+    if (res.task) upsert('task', res.task);
+    if (start && res.error) toast(startErrorMessage({ status: 409, message: res.error }), { kind: 'error' });
+    return res.task;
   } catch (e) {
     remove('task', tmp.id);
     toastError(e, 'Could not create task');
@@ -142,7 +145,7 @@ export async function addNote(target, text, { execute = false } = {}) {
   upsert('note', tmp);
   let created = null;
   try {
-    const { note } = await api.createNote({ kind: target.kind, id: target.id }, text);
+    const { note } = await api.createNote({ kind: target.kind, id: target.id }, text, execute);
     created = note;
     remove('note', tmp.id);
     if (note) upsert('note', note);
@@ -151,7 +154,8 @@ export async function addNote(target, text, { execute = false } = {}) {
     toastError(e, 'Could not add note');
     return null;
   }
-  if (execute) await executeNotes(target);
+  // a hub without one-call execute answers with a draft: run it the long way
+  if (execute && created && created.state === 'draft') await executeNotes(target);
   return created;
 }
 
@@ -212,6 +216,43 @@ export async function retryNote(id) {
   } catch (e) {
     if (state.notes.get(id) === optimistic) upsert('note', before);
     toastError(e, 'Could not retry note');
+  }
+}
+
+/* ---------- v0.3: Start a task from the dashboard ---------- */
+export const STARTABLE = new Set(['backlog', 'next', 'later', 'blocked']);
+/** A start request is in flight: optimistic placeholder, or its note is still queued / being delivered. */
+export function isStarting(t) {
+  if (!t || !t.startNoteId) return false;
+  const id = String(t.startNoteId);
+  if (id.startsWith('tmp-')) return true;
+  const n = state.notes.get(id);
+  return !!n && (n.state === 'queued' || n.state === 'sending');
+}
+export const canStart = (t) => !!t && !t.__pending && STARTABLE.has(t.status) && !isStarting(t);
+export const NO_SESSION_MSG = 'No live session for this project — open a Claude Code session in it';
+
+export function startErrorMessage(e) {
+  const msg = String((e && e.message) || '');
+  if (e && e.status === 409) return /no live session/i.test(msg) ? NO_SESSION_MSG : 'Already running';
+  return `Could not start task: ${msg || 'unknown error'}`;
+}
+
+/** Ask the task's live session to delegate it. Optimistic: card shows "Starting…" until the start note settles. */
+export async function startTask(id) {
+  const before = state.tasks.get(id);
+  if (!before || !canStart(before)) return null;
+  const optimistic = { ...before, status: 'next', startNoteId: tmpId('N') };
+  upsert('task', optimistic);
+  try {
+    const res = await api.startTask(id);
+    if (res && res.note) upsert('note', res.note);
+    if (res && res.task) upsert('task', res.task);
+    return res;
+  } catch (e) {
+    if (state.tasks.get(id) === optimistic) upsert('task', before);
+    toast(startErrorMessage(e), { kind: 'error' });
+    return null;
   }
 }
 
