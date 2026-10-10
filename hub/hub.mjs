@@ -10,6 +10,7 @@ import {
 import { computeDiff, diffStat } from './diff.mjs';
 import { search as ftsSearch, learn as ftsLearn } from './search.mjs';
 import { WfEngine } from './wfengine.mjs';
+import { toTemplate, getTemplate, renderTemplate, agentOfSubagent, TEMPLATE_AGENTS, MAX_CHECKS, MAX_TAGS } from './templates.mjs';
 
 import { HttpError } from './errors.mjs';
 export { HttpError };
@@ -21,7 +22,7 @@ const isObj = (v) => v && typeof v === 'object' && !Array.isArray(v);
 const TABLES = [
   'projects', 'sessions', 'agents', 'tasks', 'notes', 'activity', 'late_completions',
   'agent_files', 'conflicts', 'questions', 'jobs', 'digests', 'attachments', 'usage', 'task_diffs',
-  'workflows', 'workflow_versions', 'runs', 'run_nodes', 'steps',
+  'workflows', 'workflow_versions', 'runs', 'run_nodes', 'steps', 'templates',
 ];
 const START_FROM = ['backlog', 'next', 'later', 'blocked'];
 const DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
@@ -408,8 +409,11 @@ export class Hub {
       digests = q('SELECT * FROM digests ORDER BY date DESC, created_at DESC, rowid DESC LIMIT 14');
     }
     const { workflows, runs } = this.wf.stateSlice(projectId);
+    const templates = this.db.all(
+      projectId ? 'SELECT * FROM templates WHERE project_id IS NULL OR project_id = ? ORDER BY rowid' : 'SELECT * FROM templates ORDER BY rowid',
+      ...(projectId ? [projectId] : [])).map(toTemplate);
     return {
-      projects, sessions: sessions.map(toSession), agents: agents.map(toAgent),
+      projects, templates, sessions: sessions.map(toSession), agents: agents.map(toAgent),
       tasks: tasks.map(toTask), notes: notes.map(toNote), questions: questions.map(toQuestion),
       jobs: jobs.map(toJob), digests: digests.map(toDigest), workflows, runs,
       usageToday: usageToday(this.db, this.now()), seq: this.seqNow(),
@@ -469,6 +473,101 @@ export class Hub {
   usageBreakdown(days = 7) { return usageBreakdown(this.db, this.now(), days); }
   search(q, limit) { return ftsSearch(this.db, q, limit, this.log); }
   learn(projectId) { return ftsLearn(this.db, projectId); }
+
+  // ------------------------------------------------------- templates (v0.11)
+  /** Templates visible to a project (its own plus the global ones), or all of them. Archived ones only on request. */
+  templates({ projectId, includeArchived = false } = {}) {
+    if (projectId && !this.p.getProject(projectId)) throw notFound('project not found');
+    const where = [], p = [];
+    if (projectId) { where.push('(project_id IS NULL OR project_id = ?)'); p.push(projectId); }
+    if (!includeArchived) where.push('archived = 0');
+    return this.db.all(`SELECT * FROM templates ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY rowid`, ...p).map(toTemplate);
+  }
+  /** Validate the optional template fields of a body; only the keys present are returned. */
+  cleanTemplateFields(b) {
+    const o = {};
+    if (b.name !== undefined) o.name = cleanName(b.name);
+    if (b.title !== undefined) o.title = cleanTitle(b.title);
+    if (b.description !== undefined) o.description = cleanText(b.description, 'description', 20000, true);
+    if (b.agent !== undefined) {
+      if (!TEMPLATE_AGENTS.includes(b.agent)) throw bad('agent must be builder, scout or auto');
+      o.agent = b.agent;
+    }
+    if (b.checks !== undefined) {
+      if (!Array.isArray(b.checks) || b.checks.some((c) => !isStr(c))) throw bad('checks must be an array of strings');
+      const list = b.checks.map((c) => c.trim().slice(0, 300)).filter(Boolean);
+      if (list.length > MAX_CHECKS) throw bad(`at most ${MAX_CHECKS} checks`);
+      o.checks = list;
+    }
+    if (b.tags !== undefined) {
+      if (!Array.isArray(b.tags) || b.tags.some((c) => !isStr(c))) throw bad('tags must be an array of strings');
+      o.tags = [...new Set(b.tags.map((c) => c.trim().toLowerCase().slice(0, 40)).filter(Boolean))].slice(0, MAX_TAGS);
+    }
+    if (b.projectId !== undefined) {
+      if (b.projectId !== null && (!isStr(b.projectId) || !this.p.getProject(b.projectId))) throw notFound('project not found');
+      o.projectId = b.projectId;
+    }
+    return o;
+  }
+  createTemplate(body, at = this.now()) {
+    if (!isObj(body)) throw bad('body must be an object');
+    const f = this.cleanTemplateFields(body);
+    let data;
+    if (body.fromTaskId !== undefined) {
+      if (!isStr(body.fromTaskId)) throw bad('fromTaskId must be a task id');
+      const t = this.p.getTask(body.fromTaskId);
+      if (!t) throw notFound('task not found');
+      const agent = t.agent_id ? this.p.getAgent(t.agent_id) : null;
+      data = {
+        projectId: t.project_id, name: t.title.slice(0, 200), title: t.title, description: t.description,
+        agent: agent ? agentOfSubagent(agent.subagent_type) : 'auto', checks: [], tags: [], ...f,
+      };
+    } else {
+      if (f.name === undefined) throw bad('name must be a non-empty string');
+      if (f.title === undefined) throw bad('title must be a non-empty string');
+      data = { projectId: null, description: '', agent: 'auto', checks: [], tags: [], ...f };
+    }
+    return this.tx(() => ({ template: this.command('hub.template.create', data, at) }));
+  }
+  updateTemplate(id, body, at = this.now()) {
+    if (!getTemplate(this.db, id)) throw notFound('template not found');
+    if (!isObj(body)) throw bad('body must be an object');
+    const patch = this.cleanTemplateFields(body);
+    if (body.archived !== undefined) {
+      if (typeof body.archived !== 'boolean') throw bad('archived must be a boolean');
+      patch.archived = body.archived;
+    }
+    return this.tx(() => ({ template: this.command('hub.template.update', { id, patch }, at) }));
+  }
+  archiveTemplate(id, at = this.now()) { return this.updateTemplate(id, { archived: true }, at); }
+  /**
+   * Make a task from a template: `{{var}}` filled from `vars`, Checks / Preferred agent lines appended. With `start` the task
+   * is started by the same rule as /start; if that is refused (409) nothing is created and the usage count does not move.
+   */
+  useTemplate(id, body, at = this.now()) {
+    const tpl = getTemplate(this.db, id);
+    if (!tpl) throw notFound('template not found');
+    if (tpl.archived) throw new HttpError(409, 'this template is archived');
+    const b = body ?? {};
+    if (!isObj(b)) throw bad('body must be an object');
+    const projectId = b.projectId ?? tpl.project_id;
+    if (!isStr(projectId) || !this.p.getProject(projectId)) throw notFound('project not found');
+    if (tpl.project_id && tpl.project_id !== projectId) throw bad('this template belongs to another project');
+    const vars = b.vars ?? {};
+    if (!isObj(vars) || Object.values(vars).some((v) => !isStr(v))) throw bad('vars must be an object of strings');
+    if (b.start !== undefined && typeof b.start !== 'boolean') throw bad('start must be a boolean');
+    const { title, description } = renderTemplate(toTemplate(tpl), vars);
+    return this.tx(() => {
+      const task = this.command('hub.task.create', { projectId, title, description, status: 'backlog', dependsOn: [], sessionId: null }, at);
+      let out = { task };
+      if (b.start === true) {
+        const plan = this.startPlan(this.p.getTask(task.id)); // 409 (no live session) rolls the whole command back
+        out = this.command('hub.task.start', { id: task.id, ...plan }, at);
+      }
+      const template = this.command('hub.template.used', { id }, at);
+      return { ...out, template };
+    });
+  }
 
   // ------------------------------------------------------------- commands
   // `at` is only overridden by the seeder (virtual clock); HTTP callers never pass it.

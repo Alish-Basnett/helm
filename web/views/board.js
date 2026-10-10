@@ -7,6 +7,7 @@ import { createStartStatus } from '../replies.js';
 import { fmtElapsed, fmtTokens, truncate, agentLabel, STATUS_META, MAIN_COLUMNS, LANES, plural } from '../format.js';
 import { avatar, updateAvatar, modelBadge, updateModelBadge, nowDoingLine, statusDot, toast, openMenu } from '../ui.js';
 import { openTask, navigate } from '../router.js';
+import { openTemplatePopover } from '../templates.js';
 
 const DONE_LIMIT = 30;
 const cmp = (a, b) => (a.order - b.order) || (a.createdAt - b.createdAt) || String(a.id).localeCompare(String(b.id));
@@ -136,6 +137,8 @@ export function mount(container) {
     const go = h('button', { class: 'btn btn-accent btn-sm composer-start', type: 'button', hidden: !canGo, title: 'Create and start now (⌘↵)', onclick: () => submit(true) },
       icon('play', 13), 'Create & start', h('kbd', { class: 'kbd' }, '⌘↵'));
     const cancel = h('button', { class: 'btn btn-quiet btn-sm', type: 'button', onclick: () => closeComposer() }, 'Done');
+    const tpl = h('button', { class: 'btn btn-quiet btn-sm composer-tpl', type: 'button', 'aria-haspopup': 'dialog', 'aria-expanded': 'false', title: 'Start from a saved template',
+      onclick: () => openTemplatePopover(tpl, { getProject: () => (proj.hidden ? defaultProject() : proj.value) }) }, icon('templates', 14), 'Templates');
     async function submit(start) {
       const title = input.value.trim();
       if (!title) return;
@@ -147,7 +150,7 @@ export function mount(container) {
       await createTask({ projectId, title, status, start: start && canGo });
     }
     const el = h('form', { class: 'composer', hidden: true, onsubmit: (e) => { e.preventDefault(); submit(false); } },
-      input, h('div', { class: 'composer-row' }, proj, h('span', { class: 'spacer' }), cancel, add, go));
+      input, h('div', { class: 'composer-row' }, proj, tpl, h('span', { class: 'spacer' }), cancel, add, go));
     input.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeComposer(); }
       else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && !e.isComposing) { e.preventDefault(); if (canGo) submit(true); }

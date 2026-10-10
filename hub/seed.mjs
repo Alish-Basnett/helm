@@ -578,6 +578,23 @@ export function seed(hub, log) {
   // v0.9: one workflow from the built-in template, so the Workflows screen has something to open (no run: that needs a live mod)
   if (ids.P1) hub.wf.createWorkflow({ projectId: ids.P1, template: 'build-test-review' }, clock);
 
+  // v0.11: three starter templates (global), so the Templates screen and the composer popover have something to show
+  hub.createTemplate({
+    name: 'Fix a bug', title: 'Fix a bug in {{area}}', agent: 'builder', tags: ['bug'],
+    description: 'Reproduce the bug in {{area}}, find the root cause, fix it, and add a regression test.\n\nSymptom: {{symptom}}',
+    checks: ['The bug no longer reproduces', 'A regression test fails without the fix', 'npm test passes'],
+  }, clock);
+  hub.createTemplate({
+    name: 'Add tests', title: 'Add tests for {{module}}', agent: 'builder', tags: ['testing'],
+    description: 'Cover the public behaviour of {{module}}, including edge cases and error paths. Do not change production code unless a test exposes a real bug.',
+    checks: ['npm test passes', 'New tests fail when the behaviour breaks'],
+  }, clock);
+  hub.createTemplate({
+    name: 'Polish UI', title: 'Polish UI of {{screen}}', agent: 'builder', tags: ['ui'],
+    description: 'Review {{screen}} for spacing, alignment, contrast and keyboard access in light and dark themes, and fix what is off.',
+    checks: ['No console errors', 'Works in dark and light themes', 'Keyboard accessible'],
+  }, clock);
+
   // A real git repo for the JWT task so the demo shows real diffs (skipped quietly when git is unavailable).
   let gitTaskId = null;
   try {

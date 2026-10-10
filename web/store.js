@@ -14,6 +14,7 @@ const KEYS = {
   project: 'projects', session: 'sessions', agent: 'agents', task: 'tasks', note: 'notes',
   question: 'questions', job: 'jobs', digest: 'digests', // v0.2 (missing keys from an older hub are treated as empty)
   workflow: 'workflows', run: 'runs', // v0.9
+  template: 'templates', // v0.11
 };
 
 export const state = {
@@ -27,6 +28,7 @@ export const state = {
   digests: new Map(),
   workflows: new Map(),
   runs: new Map(), // Run rows with `nodes` inlined
+  templates: new Map(), // v0.11 task templates (archived ones included; selectors filter)
   activity: new Map(), // id -> Activity (bounded)
   usageToday: { overheadUsd: 0, requestedUsd: 0 }, // v0.4 Helm overhead meter
   seq: 0,
@@ -39,7 +41,7 @@ export const state = {
   },
 };
 
-const ver = { project: 0, session: 0, agent: 0, task: 0, note: 0, question: 0, job: 0, digest: 0, workflow: 0, run: 0, activity: 0, usage: 0 };
+const ver = { project: 0, session: 0, agent: 0, task: 0, note: 0, question: 0, job: 0, digest: 0, workflow: 0, run: 0, template: 0, activity: 0, usage: 0 };
 
 /* ---------- subscriptions ---------- */
 const listeners = new Set();
@@ -77,6 +79,14 @@ export function normalizeRow(entity, row) {
   } else if (entity === 'run') {
     if (!Array.isArray(row.nodes)) row.nodes = []; // v0.9
   } else if (entity === 'workflow') {
+    if (row.archived === undefined) row.archived = false;
+  } else if (entity === 'template') {
+    if (!Array.isArray(row.checks)) row.checks = []; // v0.11
+    if (!Array.isArray(row.tags)) row.tags = [];
+    if (!row.agent) row.agent = 'auto';
+    if (row.projectId === undefined) row.projectId = null;
+    if (!row.usage) row.usage = 0;
+    if (row.lastUsedAt === undefined) row.lastUsedAt = null;
     if (row.archived === undefined) row.archived = false;
   }
   if (entity === 'task') {
@@ -317,6 +327,16 @@ export const sel = {
     return node ? { run, node } : null;
   },
   sessionWaiting(sid) { return sel.agentsOfSession(sid).some((a) => a.status === 'waiting'); },
+
+  /* ----- v0.11: task templates ----- */
+  /** Live templates visible in the current scope (global ones plus the selected project's), most used first, then most recent. */
+  templates({ scoped = true, includeArchived = false } = {}) {
+    const pid = state.ui.projectId;
+    return Array.from(state.templates.values())
+      .filter((t) => (includeArchived || !t.archived) && (!scoped || pid === 'all' || t.projectId == null || t.projectId === pid))
+      .sort((a, b) => (b.usage || 0) - (a.usage || 0) || (b.lastUsedAt || b.updatedAt || 0) - (a.lastUsedAt || a.updatedAt || 0)
+        || String(a.id).localeCompare(String(b.id), undefined, { numeric: true }));
+  },
 
   /* ----- v0.2: jobs + digests ----- */
   /** Freshest known view of a task's explain job: the jobs map beats the (possibly older) task.explainJob stub. */

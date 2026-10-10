@@ -7,6 +7,7 @@
 //     recorded and are carried in the event data
 import path from 'node:path';
 import { applyWf, bookRunUsage } from './workflows.mjs';
+import { applyTemplate } from './templates.mjs';
 
 export const STALL_REASON = 'no activity for 10 min';
 export const SENDING_TIMEOUT_ERROR = 'delivery unconfirmed — retry';
@@ -555,6 +556,7 @@ export class Projector {
       case 'hub.task.diffstat': return this.hTaskDiffStat(ev);
       case 'task.choices': return this.onTaskChoices(ev);
       case 'hub.task.choices': return this.hTaskChoices(ev);
+      case 'hub.template.create': case 'hub.template.update': case 'hub.template.used': return applyTemplate(this, ev);
       default:
         if (ev.type.startsWith('wf.')) return applyWf(this, ev);
         this.log?.warn(`unknown event type ignored: ${ev.type}`);

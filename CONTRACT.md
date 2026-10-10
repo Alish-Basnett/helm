@@ -648,3 +648,43 @@ The reply is stored on the job (still `running`), then judged right after the co
 - **invalid, attempt 1**: a follow-up `wf_draft` job (same session if live) with `attempt: 2`, `fixIssues`, `previousText`; the first job ends `done` with `result = '{"retryJobId","issues"}'`.
 - **invalid, attempt 2**: `Job.state = 'failed'`, `Job.error` = first issue (+N more), `Job.result = '{"issues":[...]}'`. No third attempt.
 New event type `hub.job.finish { jobId, state, result?, error? }` (hub only). `job.result` for a `wf_draft` job no longer completes the job by itself. `helmd --rebuild` replays all of it without deciding again.
+
+## v0.11 additions — task templates
+
+Save a task (brief, preferred agent, checks) once and start it in one click. The hub still never calls a model.
+
+```ts
+type TaskTemplate = {
+  id: string;                         // 'TT-n' (counter TT)
+  projectId: string | null;           // null = available in every project
+  name: string; title: string; description: string;   // title/description may contain {{var}} placeholders
+  agent: 'builder' | 'scout' | 'auto';
+  checks: string[];                   // short acceptance / verification items (max 20, 300 chars each)
+  tags: string[];                     // lower-case, max 10
+  usage: number; lastUsedAt: number | null;
+  createdAt: number; updatedAt: number; archived: boolean;
+}
+```
+
+### Endpoints
+- `GET /v1/templates?projectId=&includeArchived=1` → `{ templates }`. With `projectId`: that project's templates plus the global ones (404 unknown project). Archived ones only with `includeArchived`.
+- `POST /v1/templates` → 201 `{ template }`. Either fields `{ name, title, description?, agent?, checks?, tags?, projectId? }` (`projectId` omitted/null = global), or `{ fromTaskId }` which captures a task: `name` and `title` = the task title, `description`, `agent` from the subagent type of the task's last agent (`builder`/`scout` if it contains that word, else `auto`), `projectId` = the task's project (send `projectId: null` for global). Any field in the same body overrides the captured one. 400 invalid, 404 unknown task/project.
+- `PATCH /v1/templates/:id` → `{ template }`; any field above plus `archived: boolean` (un-archive restores it).
+- `DELETE /v1/templates/:id` → archives (200 `{ template }`); templates are never removed.
+- `POST /v1/templates/:id/use { projectId?, vars?, start? }` → 201 `{ task, template, note? }`. `projectId` defaults to the template's own project and is required for a global one (a project template used for another project is 400; archived is 409). `vars` is an object of strings.
+  - Title and description: every `{{var}}` (whitespace inside the braces allowed) is replaced by `vars[var]` (trimmed); a missing or blank value falls back to the variable's own name (`{{area}}` becomes `area`). The `checks` are filled the same way.
+  - The description then gets `\n\nChecks:\n- <check>…` (when there are checks) and `\n\nPreferred agent: helm:builder|scout` (unless the agent is `auto`).
+  - The task is created in `backlog`. With `start: true` it is started by the `/start` rule (same note text, drafts folded, same 409s). If the start is refused (no live session) the whole command is rolled back: **no task, no usage increment**, 409 `{ error: 'no live session' }`.
+  - `usage` += 1 and `lastUsedAt` = now on success.
+
+### State, events, search
+- `/v1/state` gains `templates` (all of them, archived included; scoped to global + that project with `?projectId=`). SSE entity `template` (`upsert` only; archive is an upsert with `archived: true`).
+- FTS: kind `template`, title = name, body = title + description + checks + tags; archived templates leave the index. Search results carry `projectId` (null for global).
+- Events (session `_hub`): `hub.template.create { projectId, name, title, description, agent, checks, tags }`, `hub.template.update { id, patch }`, `hub.template.used { id }`. A use is `hub.task.create` [+ `hub.task.start`] + `hub.template.used`, all in one transaction, with the rendered text carried in the events, so `helmd --rebuild` is exact.
+- Migration: the `templates` table (and its project index) is created on open by `CREATE TABLE/INDEX IF NOT EXISTS`, empty and safe on a live database. No old event mentions templates, so `--rebuild` back-fills nothing.
+- `--seed` adds three global templates: "Fix a bug in {{area}}", "Add tests for {{module}}", "Polish UI of {{screen}}".
+
+### Web
+- Task details: a bookmark button opens "Save as template" (name, title, brief with `{{var}}` highlighted, checks, preferred agent, scope This project / All projects). The brief uses the Code mode editor when Code mode is on.
+- Board composer: a Templates button opens a searchable popover (most used, then most recent); blanks are asked inline, then Create or Create & start (a template without blanks has both buttons on its row).
+- `#/templates` (sidebar, under Learn): list, edit, duplicate, archive/restore, usage counts. Spotlight: `>template` (command "Start from template…") and template names in normal search.

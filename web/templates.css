@@ -1,0 +1,113 @@
+/* templates.css — v0.11 task templates: editor dialog, use dialog, composer popover, Templates page.
+   Same tokens as the rest of Helm, so dark and light both follow the theme. */
+
+/* {{var}} highlight (used in titles, previews, the description overlay and chips) */
+.tpl-var { background: var(--accent-soft); color: var(--accent); border-radius: 4px; padding: 0 3px; font-family: var(--mono); font-size: .92em; box-shadow: inset 0 0 0 .5px var(--accent-line); }
+
+/* ---------- dialog ---------- */
+.tpl-scrim { position: fixed; inset: 0; z-index: 130; display: grid; place-items: center; padding: 16px; background: var(--scrim); opacity: 0; transition: opacity 160ms var(--ease); }
+.tpl-scrim.in { opacity: 1; }
+.tpl-dialog { width: min(460px, 100%); max-height: min(88vh, 760px); display: flex; flex-direction: column; border-radius: var(--r-lg); background: var(--elevated); color: var(--label); box-shadow: var(--shadow-3), inset 0 0 0 .5px var(--separator); transform: translateY(6px) scale(.985); transition: transform 200ms var(--ease); overflow: hidden; }
+.tpl-scrim.in .tpl-dialog { transform: none; }
+.tpl-dialog.wide { width: min(640px, 100%); }
+.tpl-dialog-head { display: flex; align-items: center; gap: 8px; padding: 14px 14px 10px 18px; flex: none; color: var(--label-2); }
+.tpl-dialog-title { margin: 0; font-size: 16px; font-weight: 650; color: var(--label); }
+.tpl-dialog-body { display: flex; flex-direction: column; gap: 14px; padding: 4px 18px 18px; overflow: auto; }
+.tpl-summary { margin: 0; color: var(--label-2); font-size: 13px; line-height: 1.45; }
+.tpl-field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.tpl-label { font-size: 12px; font-weight: 600; color: var(--label-2); letter-spacing: .01em; }
+.tpl-hint { margin: 0; font-size: 12px; color: var(--label-3); line-height: 1.4; }
+.tpl-hint code { font-family: var(--mono); color: var(--label-2); }
+.tpl-varsrow { min-height: 18px; }
+.tpl-varsrow .tpl-var { margin-right: 2px; }
+.tpl-mirror { margin: 0; padding: 0 2px; font-size: 12.5px; color: var(--label-2); overflow-wrap: anywhere; }
+.tpl-dialog-foot { display: flex; align-items: center; gap: 8px; padding-top: 4px; }
+.tpl-keyhint { display: inline; color: var(--label-3); font-size: 11px; }
+.tpl-row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.tpl-scope { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+@media (max-width: 560px) { .tpl-row2 { grid-template-columns: 1fr; } }
+
+/* segmented radio group (own classes: .seg is the task bar's) */
+.tpl-seg { display: inline-flex; padding: 2px; gap: 2px; border-radius: 10px; background: var(--fill-2); align-self: flex-start; }
+.tpl-seg-btn { border: 0; min-height: 30px; padding: 0 12px; border-radius: 8px; background: transparent; color: var(--label-2); font-size: 13px; font-weight: 500; transition: background var(--dur) var(--ease), color var(--dur) var(--ease); }
+.tpl-seg-btn:hover { color: var(--label); }
+.tpl-seg-btn.on { background: var(--bg-2); color: var(--label); font-weight: 600; box-shadow: var(--shadow-1), inset 0 0 0 .5px var(--separator); }
+.tpl-seg-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* description editor: plain textarea over a highlight layer; Code mode swaps in code.js's editor */
+.tpl-ed { position: relative; border-radius: 10px; }
+html:not([data-code="on"]) .tpl-ed { background: var(--fill-2); box-shadow: inset 0 0 0 .5px var(--separator); transition: box-shadow var(--dur) var(--ease), background var(--dur) var(--ease); }
+html:not([data-code="on"]) .tpl-ed:focus-within { background: var(--bg-2); box-shadow: inset 0 0 0 1.5px var(--accent), 0 0 0 4px var(--accent-soft); }
+.tpl-ed .cm-hl { display: none; }
+.tpl-hl, html:not([data-code="on"]) .tpl-ed textarea.tpl-ta {
+  display: block; width: 100%; margin: 0; padding: 9px 12px; border: 0; border-radius: 10px;
+  font: 13.5px/1.5 var(--font); letter-spacing: 0; white-space: pre-wrap; overflow-wrap: anywhere; word-break: normal; text-align: left; tab-size: 2;
+}
+.tpl-hl { position: absolute; inset: 0; overflow: hidden; pointer-events: none; color: var(--label); }
+.tpl-hl .tpl-var { font-family: inherit; font-size: inherit; padding: 0; box-shadow: none; background: color-mix(in srgb, var(--accent) 20%, transparent); }
+html:not([data-code="on"]) .tpl-ed textarea.tpl-ta, html:not([data-code="on"]) .tpl-ed textarea.tpl-ta:focus {
+  position: relative; background: transparent; box-shadow: none; color: transparent; -webkit-text-fill-color: transparent; caret-color: var(--label);
+  resize: none; min-height: 96px; max-height: 280px; scrollbar-width: none;
+}
+html:not([data-code="on"]) .tpl-ed textarea.tpl-ta::placeholder { color: var(--label-3); -webkit-text-fill-color: var(--label-3); }
+html:not([data-code="on"]) .tpl-ed textarea.tpl-ta::selection { background: color-mix(in srgb, var(--accent) 35%, transparent); -webkit-text-fill-color: transparent; }
+html[data-code="on"] .tpl-hl { display: none; }
+html[data-code="on"] .tpl-ed { min-width: 0; }
+
+/* checks */
+.tpl-checks { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.tpl-checks:empty { display: none; }
+.tpl-check { display: flex; align-items: center; gap: 6px; }
+.tpl-check-ic { flex: none; color: var(--green); }
+.tpl-check-add { display: flex; gap: 6px; align-items: center; }
+
+/* ---------- vars form ---------- */
+.tpl-form { display: flex; flex-direction: column; gap: 10px; }
+.tpl-vars-grid { display: grid; gap: 8px; }
+.tpl-var-row { display: grid; grid-template-columns: minmax(70px, 130px) 1fr; align-items: center; gap: 10px; }
+.tpl-var-name { color: var(--accent); font-size: 12px; overflow: hidden; text-overflow: ellipsis; }
+.tpl-preview { margin: 0; font-size: 12.5px; color: var(--label); overflow-wrap: anywhere; }
+.tpl-preview-k { color: var(--label-3); font-size: 11px; text-transform: uppercase; letter-spacing: .04em; margin-right: 4px; }
+
+/* ---------- composer popover ---------- */
+.composer-tpl { margin-left: 2px; }
+.tpl-pop { position: fixed; z-index: 110; width: min(380px, calc(100vw - 16px)); max-height: min(70vh, 520px); display: flex; flex-direction: column; border-radius: 14px; overflow: hidden;
+  background: var(--vibrancy-strong); backdrop-filter: blur(24px) saturate(180%); -webkit-backdrop-filter: blur(24px) saturate(180%);
+  box-shadow: var(--shadow-3), inset 0 0 0 .5px var(--separator); opacity: 0; transform: translateY(-4px) scale(.985); transform-origin: top left; transition: opacity 140ms var(--ease), transform 180ms var(--ease); }
+.tpl-pop.in { opacity: 1; transform: none; }
+.tpl-pop-body { display: flex; flex-direction: column; min-height: 0; padding: 8px; gap: 6px; overflow: auto; }
+.tpl-pop-top { position: sticky; top: 0; z-index: 1; }
+.tpl-pop-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.tpl-pop-empty { margin: 0; padding: 14px 8px; text-align: center; color: var(--label-3); font-size: 13px; }
+.tpl-pop-foot { display: flex; justify-content: flex-end; padding: 2px 4px 0; font-size: 12px; }
+.tpl-pop-head { display: flex; flex-direction: column; gap: 2px; padding: 4px 4px 2px; font-size: 13px; }
+.tpl-pop-sub { color: var(--label-2); font-size: 12px; }
+.tpl-pop .tpl-form { padding: 4px; }
+.tpl-row { display: flex; align-items: center; gap: 6px; border-radius: 9px; }
+.tpl-row:hover, .tpl-row:focus-within { background: var(--accent-softer); }
+.tpl-row-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; padding: 7px 10px; border: 0; background: none; text-align: left; color: var(--label); border-radius: 9px; }
+.tpl-row-main:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.tpl-row-name { font-weight: 600; font-size: 13.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tpl-row-sub { font-size: 12px; color: var(--label-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tpl-row-sub .tpl-var, .tpl-card-title .tpl-var, .tpl-pop-sub .tpl-var { padding: 0 2px; }
+.tpl-row-meta { font-size: 11px; color: var(--label-3); min-height: 14px; }
+.tpl-row-meta:empty { display: none; }
+.tpl-row-acts { display: flex; gap: 4px; padding-right: 6px; flex: none; }
+.tpl-row-vars { font-size: 11px; color: var(--label-3); padding-right: 4px; }
+.tpl-row-btn { min-height: 28px; padding: 0 9px; font-size: 12.5px; }
+
+/* ---------- Templates page ---------- */
+.tpl-page-search { width: 220px; }
+.tpl-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: var(--sp-4); align-items: start; }
+.tpl-card { gap: 8px; }
+.tpl-card-title { margin: 0; font-size: 13.5px; font-weight: 550; overflow-wrap: anywhere; }
+.tpl-card-desc { margin: 0; font-size: 12.5px; color: var(--label-2); line-height: 1.45; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.tpl-chips { display: flex; flex-wrap: wrap; gap: 5px; }
+.tpl-card-checks { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 3px; font-size: 12px; color: var(--label-2); }
+.tpl-card-checks li { display: flex; align-items: center; gap: 6px; }
+.tpl-card-checks svg { color: var(--green); flex: none; }
+.tpl-card-foot { display: flex; align-items: center; gap: 8px; margin-top: 2px; }
+.tpl-card-meta { display: flex; flex-wrap: wrap; gap: 4px 10px; font-size: 11.5px; color: var(--label-3); }
+.tpl-page-none { color: var(--label-3); font-size: 13.5px; text-align: center; padding: 28px 0; margin: 0; }
+
+@media (prefers-reduced-motion: reduce) { .tpl-scrim, .tpl-dialog, .tpl-pop { transition: none; } }

@@ -4,6 +4,12 @@ All notable changes to Helm are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/). Shapes and endpoints are defined in `CONTRACT.md`.
 
+## [0.14.0] - 2026-10-10
+
+### Added
+
+- Task templates: save a task (brief, agent, checks) and start it in one click from the Board composer, Spotlight or the new Templates page. `{{var}}` blanks, usage counts, `/v1/templates` (CONTRACT v0.11).
+
 ## [0.13.0] - 2026-10-10
 
 ### Added

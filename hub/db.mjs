@@ -174,6 +174,15 @@ CREATE TABLE IF NOT EXISTS steps (
 CREATE INDEX IF NOT EXISTS steps_session ON steps(session_id, state);
 CREATE INDEX IF NOT EXISTS steps_run ON steps(run_id, node_id, attempt);
 
+-- v0.11: task templates (projections of hub.template.* events; see hub/templates.mjs). project_id NULL = all projects.
+CREATE TABLE IF NOT EXISTS templates (
+  id TEXT PRIMARY KEY, project_id TEXT, name TEXT NOT NULL, title TEXT NOT NULL, description TEXT NOT NULL DEFAULT '',
+  agent TEXT NOT NULL DEFAULT 'auto', checks TEXT NOT NULL DEFAULT '[]', tags TEXT NOT NULL DEFAULT '[]',
+  usage INTEGER NOT NULL DEFAULT 0, last_used_at INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+  archived INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS templates_project ON templates(project_id);
+
 CREATE TABLE IF NOT EXISTS changes (
   seq INTEGER PRIMARY KEY AUTOINCREMENT, entity TEXT NOT NULL, op TEXT NOT NULL, row TEXT NOT NULL
 );
@@ -254,6 +263,9 @@ export class Db {
     if (!has('usage', 'run_id')) this.raw.exec('ALTER TABLE usage ADD COLUMN run_id TEXT');
     if (!has('usage', 'node_id')) this.raw.exec('ALTER TABLE usage ADD COLUMN node_id TEXT');
     this.raw.exec('CREATE INDEX IF NOT EXISTS usage_run ON usage(run_id)');
+    // v0.11: the templates table comes from SCHEMA (CREATE TABLE IF NOT EXISTS), so a live database gains it on open, empty.
+    // Back-filling is `helmd --rebuild` (no old events mention templates, so nothing is lost either way).
+    this.raw.exec('CREATE INDEX IF NOT EXISTS templates_project ON templates(project_id)');
   }
   prep(sql) {
     let s = this.cache.get(sql);

@@ -8,6 +8,7 @@ import { setStatus, startTask, canStart, setAutoStart, autoTarget } from './acti
 import { navigate, openTask, route, setDiff } from './router.js';
 import { diffEntry, ensureDiff, onDiff, taskHasFiles } from './diffs.js';
 import { fmtAgo, truncate, STATUS_META } from './format.js';
+import { templatesFor, openUseDialog, openTemplateEditor, agentLabel } from './templates.js';
 
 const KIND = {
   task: { label: 'Tasks', icon: 'board' },
@@ -21,8 +22,9 @@ const KIND = {
   question: { label: 'Questions', icon: 'question' },
   digest: { label: 'Digests', icon: 'calendar' },
   workflow: { label: 'Workflows', icon: 'workflow' },
+  template: { label: 'Templates', icon: 'templates' },
 };
-const KIND_ORDER = ['task', 'question', 'workflow', 'session', 'note', 'recap', 'digest', 'activity', 'project'];
+const KIND_ORDER = ['task', 'template', 'question', 'workflow', 'session', 'note', 'recap', 'digest', 'activity', 'project'];
 
 export function createSpotlight(root) {
   let isOpen = false;
@@ -55,6 +57,7 @@ export function createSpotlight(root) {
       { title: 'Talk to session', sub: 'Chat with a live session of this project', icon: 'chat', run: () => bus.emit('open-talk') },
       { title: 'Minimise / restore panels', sub: 'Tuck every open panel into the right-edge shelf, or bring them back (M)', icon: 'minimize', run: () => bus.emit('toggle-panels') },
       { title: 'Start task…', sub: 'Pick a task to start in a live session', icon: 'play', stay: true, run: () => { input.value = '>start '; onInput(); input.focus(); } },
+      { title: 'Start from template…', sub: 'Pick a saved template, fill in its blanks, create and start', icon: 'templates', stay: true, run: () => { input.value = '>template '; onInput(); input.focus(); } },
       { title: 'Open diff…', sub: 'Show a changed file of the open task in the Diff panel', icon: 'file', stay: true, run: () => { input.value = '>diff '; onInput(); input.focus(); } },
       { title: 'Review choices…', sub: 'Tick which suggestions to turn into tasks', icon: 'checklist', stay: true, run: () => { input.value = '>choices '; onInput(); input.focus(); } },
       { title: 'New task', sub: 'Open the composer on the Board', icon: 'plus', run: () => { navigate('board'); setTimeout(() => bus.emit('new-task'), 60); } },
@@ -65,6 +68,7 @@ export function createSpotlight(root) {
       { title: 'Go to Workflows', sub: 'Draw and run a flow of agents, checks and gates', icon: 'workflow', run: () => navigate('workflows') },
       { title: 'Go to Inbox', sub: 'Questions waiting for you', icon: 'inbox', run: () => navigate('inbox') },
       { title: 'Go to Learn', icon: 'learn', run: () => navigate('learn') },
+      { title: 'Go to Templates', sub: 'Saved tasks you start in one click', icon: 'templates', run: () => navigate('templates') },
       { title: 'Switch project: All projects', sub: state.ui.projectId === 'all' ? 'current' : '', icon: 'folder', run: () => setUI({ projectId: 'all' }) },
       ...sel.projects().map((p) => ({ title: `Switch project: ${p.name}`, sub: state.ui.projectId === p.id ? 'current' : '', icon: 'folder', run: () => setUI({ projectId: p.id }) })),
     ];
@@ -77,12 +81,21 @@ export function createSpotlight(root) {
       cmds.push({ title: 'Move selected task to Done', sub: 'Select a task first', icon: 'check', disabled: true });
       cmds.push({ title: 'Move selected task to Saved for later', sub: 'Select a task first', icon: 'bookmark', disabled: true });
     }
+    if (t) cmds.push({ title: 'Save selected task as template…', sub: `${t.id} · ${truncate(t.title, 40)}`, icon: 'bookmark', run: () => openTemplateEditor({ task: t }) });
     if (t && canStart(t)) cmds.push({ title: 'Start selected task', sub: `${t.id} · ${truncate(t.title, 40)}`, icon: 'play', run: () => startTask(t.id) });
     if (/^start\b/.test(needle)) {
       const startable = Array.from(state.tasks.values()).filter((x) => canStart(x) && sel.inScope(x) && !String(x.id).startsWith('tmp-'))
         .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
       for (const x of startable) cmds.push({ taskCmd: true, hay: `${x.id} ${x.title}`.toLowerCase(), title: `Start ${x.id} · ${truncate(x.title, 56)}`, sub: `${STATUS_META[x.status].label} · ${sel.projectName(x.projectId)}`, icon: 'play', run: () => startTask(x.id) });
       if (!startable.length) cmds.push({ title: 'Nothing to start', sub: 'Backlog, Up next, Saved for later and Blocked tasks can be started', icon: 'play', disabled: true });
+    }
+    if (/^templates?\b/.test(needle)) {
+      const pid = sel.scopeProject() ? sel.scopeProject().id : null;
+      const list = templatesFor(pid);
+      for (const x of list) {
+        cmds.push({ taskCmd: true, hay: `${x.name} ${x.title} ${(x.tags || []).join(' ')}`.toLowerCase(), title: `Use “${truncate(x.name, 48)}”`, sub: `${truncate(x.title, 60)} · ${agentLabel(x.agent)}${x.usage ? ` · used ${x.usage}×` : ''}`, icon: 'templates', run: () => openUseDialog(x) });
+      }
+      if (!list.length) cmds.push({ title: 'No templates yet', sub: 'Open a task and choose Save as template', icon: 'templates', disabled: true });
     }
     if (/^diff\b/.test(needle)) {
       const ot = route().task ? state.tasks.get(route().task) : null;
@@ -119,6 +132,7 @@ export function createSpotlight(root) {
       case 'question': return navigate('inbox', r.id ? [r.id] : []);
       case 'digest': return navigate('learn', [], r.id ? { digest: r.id } : {});
       case 'workflow': return navigate('workflows', [r.id]);
+      case 'template': { const tp = state.templates.get(r.id); if (tp) { setTimeout(() => openUseDialog(tp), 0); } return; }
       case 'project': setUI({ projectId: r.id }); return navigate('board');
       default:
     }
@@ -196,7 +210,7 @@ export function createSpotlight(root) {
     search.cancel();
     if (cmdMode) {
       const needle = raw.slice(1).trim().toLowerCase();
-      const rest = (/^(?:start|choices|review|diff)\s+(.*)$/.exec(needle) || [])[1];
+      const rest = (/^(?:start|choices|review|diff|templates?)\s+(.*)$/.exec(needle) || [])[1];
       items = commands(needle).filter((c) => (c.taskCmd ? !rest || c.hay.includes(rest) : !needle || c.title.toLowerCase().includes(needle) || (c.sub || '').toLowerCase().includes(needle))).map((c) => ({ ...c, group: 'command' }));
       loading = false;
       render();

@@ -19,6 +19,7 @@ import { createChoices } from '../choices.js';
 import { bindDraft, clearDraft, getDraft } from '../drafts.js';
 import { codeOn, getPref, onPrefs } from '../prefs.js';
 import { codeEditor, blockView, renderDescription } from '../code.js';
+import { openTemplateEditor } from '../templates.js';
 
 const AGENT_STATUS = { running: 'Running', done: 'Done', failed: 'Failed', stalled: 'Stalled', waiting: 'Waiting for you' };
 
@@ -49,6 +50,8 @@ export function createSheet(dock) {
     c.pill = h('span', { class: 'status-pill' }, statusDot('backlog'), h('span', {}, ''));
     c.close = panelClose(panel, 'Close');
     c.min = panelMinimise(panel, 'Minimise task');
+    c.tplBtn = h('button', { class: 'icon-btn sm sheet-tpl', type: 'button', 'aria-label': 'Save as template', title: 'Save as template: reuse this brief later in one click',
+      onclick: () => { const t = state.tasks.get(id); if (t) openTemplateEditor({ task: t }); } }, icon('bookmark', 16));
     c.chatDot = h('span', { class: 'chat-dot', hidden: true, 'aria-hidden': 'true' });
     c.chatBtn = h('button', { class: 'btn btn-quiet btn-sm sheet-chat', type: 'button', 'aria-pressed': 'false', title: 'Show or hide this task’s chat (C)', onclick: () => toggleChat() },
       icon('chat', 14), h('span', {}, 'Chat'), c.chatDot);
@@ -118,7 +121,7 @@ export function createSheet(dock) {
     c.tlWrap = h('section', { class: 'sheet-section' }, h('h3', { class: 'section-title' }, icon('terminal', 14), 'Activity', c.replayBtn), c.replay.el, c.timeline.el);
 
     const head = h('header', { class: 'sheet-head' },
-      h('div', { class: 'sheet-head-top' }, c.id, c.pill, h('span', { class: 'spacer' }), c.startBtn, c.chatBtn, c.min, c.close),
+      h('div', { class: 'sheet-head-top' }, c.id, c.pill, h('span', { class: 'spacer' }), c.startBtn, c.tplBtn, c.chatBtn, c.min, c.close),
       c.title);
     const body = h('div', { class: 'sheet-body' },
       c.choices.el, c.blocked, c.startStatus.el, c.prestart.el,

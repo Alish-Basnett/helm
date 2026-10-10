@@ -124,6 +124,18 @@ route('POST', '/v1/runs/:id/abort', ({ hub, params }) => hub.wf.abortRun(params.
 route('POST', '/v1/runs/:id/nodes/:nodeId/retry', ({ hub, params }) => hub.wf.retryNode(params.id, params.nodeId));
 route('POST', '/v1/runs/:id/nodes/:nodeId/skip', ({ hub, params }) => hub.wf.skipNode(params.id, params.nodeId));
 route('POST', '/v1/runs/:id/gates/:nodeId', async ({ hub, params, json }) => hub.wf.decideGate(params.id, params.nodeId, await json()));
+// v0.11 task templates
+route('GET', '/v1/templates', ({ hub, query }) => ({
+  templates: hub.templates({ projectId: query.get('projectId') || undefined, includeArchived: /^(1|true|yes)$/i.test(query.get('includeArchived') || '') }),
+}));
+route('POST', '/v1/templates', async ({ hub, json }) => created(hub.createTemplate(await json())));
+route('PATCH', '/v1/templates/:id', async ({ hub, params, json }) => hub.updateTemplate(params.id, await json()));
+route('DELETE', '/v1/templates/:id', ({ hub, params }) => hub.archiveTemplate(params.id));
+route('POST', '/v1/templates/:id/use', async ({ hub, params, json, remote, remoteListener }) => {
+  const r = hub.useTemplate(params.id, await json());
+  if (remoteListener && r.note) remote.trackNote(r.note.id);
+  return created(r);
+});
 route('GET', '/v1/conflicts', ({ hub }) => ({ conflicts: hub.conflicts() }));
 route('GET', '/v1/questions', ({ hub, query }) => ({ questions: hub.questions({ state: query.get('state') || undefined }) }));
 route('POST', '/v1/questions/:id/dismiss', ({ hub, params }) => hub.dismissQuestion(params.id));

@@ -85,6 +85,12 @@ export const api = {
   runControl: (id, action) => request('POST', `/v1/runs/${enc(id)}/${action}`),
   nodeControl: (id, nodeId, action) => request('POST', `/v1/runs/${enc(id)}/nodes/${enc(nodeId)}/${action}`),
   decideGate: (id, nodeId, decision, comment) => request('POST', `/v1/runs/${enc(id)}/gates/${enc(nodeId)}`, { decision, ...(comment ? { comment } : {}) }),
+  // v0.11 task templates
+  templates: (projectId) => request('GET', `/v1/templates${q({ projectId, includeArchived: 1 })}`),
+  createTemplate: (body) => request('POST', '/v1/templates', body),
+  patchTemplate: (id, patch) => request('PATCH', `/v1/templates/${enc(id)}`, patch),
+  archiveTemplate: (id) => request('DELETE', `/v1/templates/${enc(id)}`),
+  useTemplate: (id, body) => request('POST', `/v1/templates/${enc(id)}/use`, body),
   attachmentUrl: (id) => `/v1/attachments/${enc(id)}`,
   /** Raw-body upload with progress. Resolves { attachment }; rejects with err.status (404/405 = hub too old). */
   uploadAttachment(file, { onProgress, signal } = {}) {

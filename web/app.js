@@ -22,11 +22,12 @@ import * as threads from './views/threads.js';
 import * as workflows from './views/workflows.js';
 import { createRunPanel } from './wf/runpanel.js';
 import * as learn from './views/learn.js';
+import * as templates from './views/templates.js';
 import * as inbox from './views/inbox.js';
 import * as settings from './views/settings.js';
 import { getPref, applyPrefs, cycleTheme, onPrefs } from './prefs.js';
 
-const VIEW_MODS = { board, projects, office, threads, workflows, inbox, learn, settings };
+const VIEW_MODS = { board, projects, office, threads, workflows, inbox, learn, templates, settings };
 const VIEW_META = {
   board: { label: 'Board', icon: 'board' },
   projects: { label: 'Projects', icon: 'folder' },
@@ -35,6 +36,7 @@ const VIEW_META = {
   workflows: { label: 'Workflows', icon: 'workflow' },
   inbox: { label: 'Inbox', icon: 'inbox' },
   learn: { label: 'Learn', icon: 'learn' },
+  templates: { label: 'Templates', icon: 'templates' },
   settings: { label: 'Settings', icon: 'gear' },
 };
 
