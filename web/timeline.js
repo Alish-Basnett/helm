@@ -3,6 +3,7 @@ import { h, reconcile, setText, setClass, typeOn } from './dom.js';
 import { icon } from './icons.js';
 import { fmtClock } from './format.js';
 import { state } from './store.js';
+import { setLinked, taskLinkSig } from './tasklinks.js';
 
 const CLIP = 96; // summaries longer than this (or cut by the hub with …) collapse to one line and expand on click
 const NOTE_REF = /^(?:Reply to|Note) (N-\d+)/;
@@ -71,7 +72,7 @@ export function createTimeline(opts) {
     row.setAttribute('aria-expanded', String(row.__open));
     const t = row.__open ? fullText(a) : (a.summary || '');
     row.__text = t;
-    row.__sum.textContent = t;
+    setLinked(row.__sum, t);
   }
 
   function update(row, a, animateFresh) {
@@ -85,12 +86,16 @@ export function createTimeline(opts) {
     setClass(row, 'clip', clip);
     if (clip) { row.tabIndex = 0; row.setAttribute('role', 'button'); if (!row.hasAttribute('aria-expanded')) row.setAttribute('aria-expanded', 'false'); }
     else { row.removeAttribute('tabindex'); row.removeAttribute('role'); row.removeAttribute('aria-expanded'); row.__open = false; setClass(row, 'open', false); }
-    if (row.__open && clip) { const t = fullText(a); if (row.__sum.textContent !== t) row.__sum.textContent = t; row.__text = t; return; }
+    if (row.__open && clip) { const t = fullText(a); setLinked(row.__sum, t); row.__text = t; return; }
     const text = (a.summary || '');
-    if (row.__text !== text) {
+    const lsig = taskLinkSig(text); // a mentioned task may have arrived since this row was drawn
+    if (row.__text !== text || row.__lsig !== lsig) {
+      const first = row.__text !== text;
       row.__text = text;
-      if (animateFresh) typeOn(row.__sum, text, () => scrollToEnd());
-      else setText(row.__sum, text);
+      row.__lsig = lsig;
+      // rows that mention a known task render instantly so the chip is a real button, never half typed
+      if (animateFresh && first && !lsig) typeOn(row.__sum, text, () => scrollToEnd());
+      else setLinked(row.__sum, text);
     }
   }
 

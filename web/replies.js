@@ -4,6 +4,7 @@ import { h, setText, setHidden, setClass } from './dom.js';
 import { icon } from './icons.js';
 import { state, sel } from './store.js';
 import { setMarkdown } from './markdown.js';
+import { taskLinker } from './tasklinks.js';
 import { modelInfo, fmtAgo } from './format.js';
 import { startTask } from './actions.js';
 
@@ -115,8 +116,8 @@ export function createReply() {
     if (!has) return;
     const sa = shortAnswer(n.reply);
     more = sa.more && !!sa.short;
-    setMarkdown(short, sa.short);
-    setMarkdown(body, n.reply);
+    setMarkdown(short, sa.short, taskLinker);
+    setMarkdown(body, n.reply, taskLinker);
     const m = replyModel(n);
     setText(model, m ? modelInfo(m).label : '');
     setHidden(model, !m);
@@ -184,7 +185,7 @@ export function createStartStatus({ full = false } = {}) {
     else {
       const has = info.phase === 'sent' && !!(n && n.reply);
       setHidden(compact, !has);
-      if (has) setMarkdown(compact, shortAnswer(n.reply).short || n.reply);
+      if (has) setMarkdown(compact, shortAnswer(n.reply).short || n.reply, taskLinker);
     }
     wait.update(info.phase === 'sent' ? n : null);
   }

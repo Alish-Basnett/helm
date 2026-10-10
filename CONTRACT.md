@@ -305,3 +305,49 @@ Opening a v0.1 database adds the new tables/columns in place. Old events are not
 - `NoteVia` gains `'answer'`.
 
 (Clarified, v0.4: only raster images (png/jpeg/gif/webp/avif/bmp/ico) are served `inline`; svg, html and everything else are `attachment`, with `nosniff` and a sandbox CSP. A note's `attachments[]` entries carry `{ id, name, mime, size, path }` (no `createdAt`); `PATCH /v1/notes/:id` takes `text` and/or `attachments` (at least one; omitted fields are unchanged, `[]` clears), and note text must still be non-empty. Upload errors: empty body 400, over 20 MiB 413; unknown or >10 attachment ids on a note 400. Missing `x-filename` becomes `file`, a missing or invalid `content-type` becomes `application/octet-stream`. `GET /v1/usage?days=` clamps `days` to 1-90 (default 7), returns every local day including empty ones, oldest first, ending today; `byKind` covers today only; `helm.usage` events with an unknown `kind` or a negative/non-numeric `costUsd` are ignored. `Attachment` ids use counter `A`; the hub version is 0.4.0.)
+
+## v0.5 additions — git diffs per task, task chat panel, task links in Talk
+
+### Git base at spawn (mod)
+- After an `agent.spawn` succeeds, the mod resolves the agent's working dir (`e.cwd` or the session cwd)
+  and emits `agent.git { toolUseId, agentId?, cwd, root, base, head, at }` where `root` =
+  `git rev-parse --show-toplevel`, `head` = `git rev-parse HEAD`, `base` = `git stash create` output
+  (a commit object of index + working tree that touches nothing) or `head` when the tree is clean.
+  Not a git repo → no event. Never blocks the hook (runs from the tick).
+- Hub stores it on the agent and, when the agent has a task, on the task: `Task.git: { root, base, head, at } | null`
+  (first agent's base wins; a follow-up agent never moves an existing base).
+
+### Diffs (hub)
+- `GET /v1/tasks/:id/diff?refresh=1` → `{ source: 'snapshot' | 'live' | 'history' | 'none', root, base,
+  totals: { files, additions, deletions }, files: [{ path, rel, status: 'A'|'M'|'D'|'R'|'?', additions,
+  deletions, binary, patch, truncated }] , note? }`.
+  - `snapshot`: frozen diff recorded when the task's agent completed (see below); `refresh=1` recomputes live.
+  - `live`: computed now — for each path in `filesChanged` inside `root`: `git diff --numstat` /
+    `git diff --patch` from `base` to the working tree; untracked new files via
+    `git diff --no-index -- /dev/null <file>` (status `A`). Paths outside `root` resolve their own repo
+    and diff against its `HEAD`.
+  - `history` (task has no `git`): for each file, commits between task `createdAt` and `doneAt` (+10 min)
+    via `git log -p --since --until -- <file>` squashed into one patch, else `git diff HEAD -- <file>`;
+    response carries `note: 'approximate: no base recorded'`.
+  - `none`: no files or not a git repo (`note` says why).
+  - Caps: 120 KB patch per file (`truncated: true`), 600 KB total; git calls time out at 5 s; `execFile`
+    only (no shell); paths must resolve inside a repo root.
+- Snapshot: when an agent with a task completes, the hub computes the live diff (outside the ingest
+  transaction) and records it as a `hub.task.diff` event `{ taskId, diff }` so rebuild reproduces it.
+- `Task.diffStat: { files, additions, deletions } | null` from the latest snapshot (or live result when
+  a client asked for one); pushed as a task upsert.
+
+### Web
+- **Dock**: right-side panels laid side by side (right to left): Talk, Task details, Task chat. Opening a
+  task opens Task details + Task chat (chat toggle remembered). Narrow viewports collapse extra panels
+  into tabs. Esc closes the focused panel.
+- **Task chat panel**: the task's notes as a chat (your notes = bubbles coloured by state, replies under
+  them), composer with attachments, cheap-answer hint. The notes section moves out of Task details
+  (a "Chat" button there toggles the panel).
+- **Files changed**: section label shows `N files +A −D`; each file is a collapsed row (status badge,
+  path, `+a −d`); expanding shows the unified diff (hunks, line numbers, add/remove colouring); a
+  refresh button re-fetches live.
+- **Task links**: any `T-<n>` in Talk bubbles, replies, notes and activity renders as a small chip
+  `T-12 · <title>`; clicking opens that task's details + chat while Talk stays open.
+
+(Clarified, v0.5 hub: `hub.task.diff { taskId, diff }` freezes the snapshot; a live `?refresh=1` records `hub.task.diffstat { taskId, diffStat }` (stat only, the snapshot stays frozen). A completion snapshot is skipped when the result is `none`. `agent.git` needs absolute `root` and hex `base`/`head`, else it is ignored; relative `filesChanged` resolve against `Task.git.root`. Refused paths (outside any repo, `..`, symlink escapes) are dropped from `files` and named in `note`. With a recorded base that no longer exists the diff falls back to `history`. The hub version is 0.5.0.)

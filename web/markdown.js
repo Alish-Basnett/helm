@@ -2,22 +2,34 @@
 // ever parsed as markup: every character from the source ends up in a text node.
 // Supports: # headings, paragraphs, - / * bullet lists, 1. numbered lists, ``` code blocks,
 // `inline code`, **bold**, *italic* / _italic_, --- rules. No links, no images, no raw HTML.
+// Opt-in linkifier hook: renderMarkdown(src, { linkify(text) -> (string|Node)[] }) post-processes every plain
+// text run (never code spans) into text + DOM nodes, so callers can add chips without ever injecting HTML.
 import { h } from './dom.js';
 
 const INLINE = /`([^`\n]+)`|\*\*(?=\S)([\s\S]+?)\*\*|__(?=\S)([\s\S]+?)__|\*(?=[^\s*])([^*\n]+?)\*|(?<![A-Za-z0-9_])_(?=[^\s_])([^_\n]+?)_(?![A-Za-z0-9_])/;
 
+/** Plain text run → strings (and, with a linkifier, nodes). */
+function plain(text, opts) {
+  if (!text) return [];
+  if (opts && opts.linkify) {
+    const r = opts.linkify(text);
+    if (Array.isArray(r)) return r;
+  }
+  return [text];
+}
+
 /** Inline markdown → array of strings / elements. */
-function inline(text) {
+function inline(text, opts) {
   const out = [];
   let rest = String(text);
   let guard = 0;
   while (rest && guard++ < 500) {
     const m = INLINE.exec(rest);
-    if (!m) { out.push(rest); break; }
-    if (m.index > 0) out.push(rest.slice(0, m.index));
+    if (!m) { out.push(...plain(rest, opts)); break; }
+    if (m.index > 0) out.push(...plain(rest.slice(0, m.index), opts));
     if (m[1] !== undefined) out.push(h('code', { class: 'md-code' }, m[1]));
-    else if (m[2] !== undefined || m[3] !== undefined) out.push(h('strong', {}, inline(m[2] !== undefined ? m[2] : m[3])));
-    else out.push(h('em', {}, inline(m[4] !== undefined ? m[4] : m[5])));
+    else if (m[2] !== undefined || m[3] !== undefined) out.push(h('strong', {}, inline(m[2] !== undefined ? m[2] : m[3], opts)));
+    else out.push(h('em', {}, inline(m[4] !== undefined ? m[4] : m[5], opts)));
     rest = rest.slice(m.index + m[0].length);
   }
   return out;
@@ -30,12 +42,12 @@ const FENCE = /^\s*(```|~~~)/;
 const RULE = /^\s*([-*_])(\s*\1){2,}\s*$/;
 
 /** Render markdown source to a <div class="md"> element. */
-export function renderMarkdown(src) {
+export function renderMarkdown(src, opts) {
   const root = h('div', { class: 'md' });
   const lines = String(src == null ? '' : src).replace(/\r\n?/g, '\n').split('\n');
   let para = [];
   const flush = () => {
-    if (para.length) { root.append(h('p', { class: 'md-p' }, inline(para.join(' ')))); para = []; }
+    if (para.length) { root.append(h('p', { class: 'md-p' }, inline(para.join(' '), opts))); para = []; }
   };
   let i = 0;
   while (i < lines.length) {
@@ -55,7 +67,7 @@ export function renderMarkdown(src) {
     if (hd) {
       flush();
       const level = Math.min(hd[1].length, 4);
-      root.append(h(level <= 2 ? 'h4' : 'h5', { class: `md-h md-h${level}` }, inline(hd[2])));
+      root.append(h(level <= 2 ? 'h4' : 'h5', { class: `md-h md-h${level}` }, inline(hd[2], opts)));
       i++;
       continue;
     }
@@ -74,13 +86,13 @@ export function renderMarkdown(src) {
             const li = list.lastChild;
             li.__text += ' ' + lines[i].trim();
             li.textContent = '';
-            li.append(...inline(li.__text));
+            li.append(...inline(li.__text, opts));
             i++;
             continue;
           }
           break;
         }
-        const li = h('li', { class: m[1].length >= 2 ? 'md-l2' : null }, inline(m[2]));
+        const li = h('li', { class: m[1].length >= 2 ? 'md-l2' : null }, inline(m[2], opts));
         li.__text = m[2];
         list.append(li);
         i++;
@@ -95,11 +107,16 @@ export function renderMarkdown(src) {
   return root;
 }
 
-/** Replace `host`'s content with rendered markdown, skipping work when the source is unchanged. */
-export function setMarkdown(host, src) {
+/**
+ * Replace `host`'s content with rendered markdown, skipping work when the source is unchanged.
+ * `opts.linkify` is the optional linkifier hook; `opts.sig(text)` returns a string that must change whenever
+ * the linkifier would produce different output for the same text (e.g. a mentioned task appeared).
+ */
+export function setMarkdown(host, src, opts) {
   const text = src == null ? '' : String(src);
-  if (host.__md === text) return;
-  host.__md = text;
+  const key = opts && opts.sig ? text + '\u0000' + opts.sig(text) : text;
+  if (host.__md === key) return;
+  host.__md = key;
   host.textContent = '';
-  if (text.trim()) host.append(renderMarkdown(text));
+  if (text.trim()) host.append(renderMarkdown(text, opts));
 }

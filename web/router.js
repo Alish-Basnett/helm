@@ -1,4 +1,5 @@
-// router.js — hash router: #/<view>/<arg…>?task=T-1  (the sheet is a query param so it is linkable).
+// router.js — hash router: #/<view>/<arg…>?task=T-1&chat=1  (task details + chat are query params so they are linkable).
+import { lsGet, lsSet } from './store.js';
 export const VIEWS = ['board', 'projects', 'office', 'threads', 'inbox', 'learn'];
 
 export function parseHash(hash = location.hash) {
@@ -7,7 +8,8 @@ export function parseHash(hash = location.hash) {
   const segs = pathPart.split('/').filter(Boolean).map((x) => { try { return decodeURIComponent(x); } catch { return x; } });
   const view = VIEWS.includes(segs[0]) ? segs[0] : 'board';
   const query = new URLSearchParams(queryPart);
-  return { view, args: segs.slice(1), query, task: query.get('task') || null };
+  const task = query.get('task') || null;
+  return { view, args: segs.slice(1), query, task, chat: !!task && query.get('chat') === '1' };
 }
 
 export function buildHash({ view, args = [], query = {} }) {
@@ -42,15 +44,28 @@ function go(hash, replace) {
 }
 
 export function navigate(view, args = [], query = {}, opts = {}) { go(buildHash({ view, args, query }), !!opts.replace); }
+/** Whether opening a task should also open its chat (remembered, on by default). */
+export const chatPref = () => lsGet('helm.chat', '1') !== '0';
+/** Open a task's details, plus its chat when the remembered preference says so. */
 export function openTask(id) {
   const r = current;
   const query = {}; r.query.forEach((v, k) => { query[k] = v; });
   query.task = id;
+  if (chatPref()) query.chat = '1'; else delete query.chat;
   go(buildHash({ view: r.view, args: r.args, query }), false);
 }
 export function closeTask() {
   const r = current;
-  const query = {}; r.query.forEach((v, k) => { if (k !== 'task') query[k] = v; });
+  const query = {}; r.query.forEach((v, k) => { if (k !== 'task' && k !== 'chat') query[k] = v; });
+  go(buildHash({ view: r.view, args: r.args, query }), true);
+}
+/** Show/hide the open task's chat panel; remembers the choice for the next task. */
+export function setChat(on) {
+  const r = current;
+  lsSet('helm.chat', on ? '1' : '0');
+  if (!r.task) return;
+  const query = {}; r.query.forEach((v, k) => { if (k !== 'chat') query[k] = v; });
+  if (on) query.chat = '1';
   go(buildHash({ view: r.view, args: r.args, query }), true);
 }
 export function setArgs(args, opts = {}) {

@@ -19,6 +19,12 @@ const TOOL_EDIT_CAP = 50; // files per tool.called
 const UNASSIGNED = 'Unassigned';
 const TAG_RE = /\[helm:(T-\d+)\]/i;
 
+const GIT_REV_RE = /^[0-9a-f]{7,64}$/i;
+const statOf = (diff) => {
+  const t = (diff && diff.totals) || {};
+  const n = (v) => (isNum(v) && v >= 0 ? v : 0);
+  return { files: n(t.files), additions: n(t.additions), deletions: n(t.deletions) };
+};
 const parse = (s, d) => { try { return s == null ? d : JSON.parse(s); } catch { return d; } };
 export const cut = (s, n) => { s = s == null ? '' : String(s); return s.length > n ? s.slice(0, n - 1) + '…' : s; };
 const str = (v, d = '') => (typeof v === 'string' ? v : v == null ? d : String(v));
@@ -48,7 +54,7 @@ export const toTask = (r) => ({
   filesChanged: parse(r.files_changed, []), tokens: r.tokens, recap: parse(r.recap, null),
   createdAt: r.created_at, updatedAt: r.updated_at, doneAt: r.done_at ?? null,
   conflicts: parse(r.conflicts, []), explainer: r.explainer ?? null, explainJob: parse(r.explain_job, null),
-  startNoteId: r.start_note_id ?? null,
+  startNoteId: r.start_note_id ?? null, git: parse(r.git, null), diffStat: parse(r.diff_stat, null),
 });
 export const toNote = (r) => ({
   id: r.id, target: { kind: r.target_kind, id: r.target_id }, sessionId: r.session_id, text: r.text,
@@ -459,6 +465,7 @@ export class Projector {
       case 'turn.completed': return this.onTurn(ev, false);
       case 'agent.spawned': return this.onAgentSpawned(ev);
       case 'agent.bound': return this.onAgentBound(ev);
+      case 'agent.git': return this.onAgentGit(ev);
       case 'tool.called': return this.onToolCalled(ev);
       case 'tool.finished': return this.onToolFinished(ev);
       case 'agent.completed': return this.onAgentCompleted(ev);
@@ -485,6 +492,8 @@ export class Projector {
       case 'hub.job.create': return this.hJobCreate(ev);
       case 'hub.job.claim': return this.hJobClaim(ev);
       case 'hub.sweep': return this.hSweep(ev);
+      case 'hub.task.diff': return this.hTaskDiff(ev);
+      case 'hub.task.diffstat': return this.hTaskDiffStat(ev);
       default:
         this.log?.warn(`unknown event type ignored: ${ev.type}`);
         return null;
@@ -607,6 +616,45 @@ export class Projector {
     const a = this.db.get('SELECT * FROM agents WHERE tool_use_id = ? AND session_id = ?', toolUseId, sid);
     if (!a) { this.log?.warn(`agent.bound for unknown toolUseId ${toolUseId}`); return; }
     this.bindAgent(a, agentId, ev.at);
+  }
+  /** agent.git: the repo state when the agent was spawned. Matched by toolUseId (survives the pending -> bound rename), then agentId. */
+  onAgentGit(ev) {
+    const d = ev.data, sid = ev.sessionId;
+    const toolUseId = str(d.toolUseId), agentId = str(d.agentId);
+    const root = str(d.root), base = str(d.base), head = str(d.head);
+    if (!root || !path.isAbsolute(root)) { this.log?.warn('agent.git: root must be an absolute path'); return; }
+    if (!GIT_REV_RE.test(base) || !GIT_REV_RE.test(head)) { this.log?.warn('agent.git: base/head must be commit ids'); return; }
+    let a = toolUseId ? this.db.get('SELECT * FROM agents WHERE tool_use_id = ? AND session_id = ?', toolUseId, sid) : undefined;
+    if (!a && agentId) a = this.getAgent(agentId);
+    if (!a) { this.log?.warn(`agent.git for unknown agent (toolUseId ${toolUseId || '-'}, agentId ${agentId || '-'})`); return; }
+    const at = isNum(d.at) ? d.at : ev.at;
+    const git = { root, base, head, at };
+    this.upd('agents', a.id, { git: JSON.stringify({ cwd: str(d.cwd), ...git }) });
+    this.pushAgent(a.id);
+    const t = this.getTask(a.task_id);
+    if (t && !t.git) { // the first base wins; a follow-up agent never moves it
+      this.upd('tasks', t.id, { git: JSON.stringify(git) });
+      this.pushTask(t.id);
+    }
+  }
+  /** hub.task.diff: freeze a diff for the task and take its stat. */
+  hTaskDiff(ev) {
+    const { taskId, diff } = ev.data;
+    const t = this.getTask(taskId);
+    if (!t) throw new Error('task not found');
+    this.db.run(
+      `INSERT INTO task_diffs(task_id, diff, at) VALUES (?, ?, ?)
+       ON CONFLICT(task_id) DO UPDATE SET diff = excluded.diff, at = excluded.at`, taskId, JSON.stringify(diff), ev.at);
+    this.upd('tasks', taskId, { diff_stat: JSON.stringify(statOf(diff)) });
+    this.pushTask(taskId);
+  }
+  /** hub.task.diffstat: a client asked for a live diff; only the stat is kept (the snapshot stays frozen). */
+  hTaskDiffStat(ev) {
+    const { taskId, diffStat } = ev.data;
+    const t = this.getTask(taskId);
+    if (!t) throw new Error('task not found');
+    this.upd('tasks', taskId, { diff_stat: JSON.stringify(statOf({ totals: diffStat })) });
+    this.pushTask(taskId);
   }
   onToolCalled(ev) {
     const d = ev.data, sid = ev.sessionId, at = ev.at;

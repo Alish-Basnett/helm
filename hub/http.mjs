@@ -84,6 +84,7 @@ route('GET', '/v1/sessions/:id/activity', ({ hub, params, query }) => {
   return { activity: hub.sessionActivity(params.id, intParam(query.get('limit'), 200, 1, 2000)) };
 });
 route('POST', '/v1/sessions/:id/join', async ({ hub, params, json }) => hub.joinSession(params.id, await json()));
+route('GET', '/v1/tasks/:id/diff', ({ hub, params, query }) => hub.taskDiff(params.id, { refresh: /^(1|true|yes)$/i.test(query.get('refresh') || '') }));
 route('POST', '/v1/tasks/:id/start', ({ hub, params }) => hub.startTask(params.id));
 route('POST', '/v1/tasks/:id/explain', ({ hub, params }) => hub.explainTask(params.id));
 route('POST', '/v1/digest', async ({ hub, json }) => hub.requestDigest(await json()));
@@ -250,7 +251,7 @@ function serveStatic(cfg, req, res, pathname) {
   }
   res.writeHead(200, {
     'Content-Type': MIME[path.extname(hit.real).toLowerCase()] || 'application/octet-stream',
-    'Content-Length': hit.st.size, 'Cache-Control': 'no-cache',
+    'Content-Length': hit.st.size, 'Cache-Control': 'no-store', // tiny local files: never let a browser mix stale modules with new ones
     'X-Content-Type-Options': 'nosniff',
   });
   if (req.method === 'HEAD') return res.end();

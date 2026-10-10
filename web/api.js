@@ -62,6 +62,8 @@ export const api = {
   explain: (taskId) => request('POST', `/v1/tasks/${enc(taskId)}/explain`),
   generateDigest: (body) => request('POST', '/v1/digest', body || {}),
   digests: (projectId, limit = 14) => request('GET', `/v1/digests${q({ projectId, limit })}`),
+  // v0.5: git diff of a task's changed files (404 on hubs that predate it)
+  taskDiff: (id, refresh = false) => request('GET', `/v1/tasks/${enc(id)}/diff${refresh ? '?refresh=1' : ''}`),
   // v0.4
   usage: (days = 7) => request('GET', `/v1/usage${q({ days })}`),
   attachmentUrl: (id) => `/v1/attachments/${enc(id)}`,

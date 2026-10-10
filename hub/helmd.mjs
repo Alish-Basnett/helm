@@ -109,6 +109,7 @@ async function main() {
   if (args.flags.has('seed') || args.flags.has('demo-live')) {
     const { seed, startDemoLive } = await import('./seed.mjs');
     const r = seed(hub, log);
+    if (r.gitTaskId) hub.snapshotTask(r.gitTaskId).catch((e) => log.warn('seed diff snapshot failed', e));
     log.info(r.skipped ? 'seed skipped: database already seeded' : `seeded demo data: ${JSON.stringify(r.counts)}`);
     if (args.flags.has('demo-live')) stopDemo = startDemoLive(hub, log);
   }

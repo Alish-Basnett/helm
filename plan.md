@@ -207,3 +207,9 @@ via a follow-up spawn that continues from the task's context.
   (`helm.usage`, `/v1/usage`, header + popover), attachments (drag/drop/paste → `~/.helm/attachments`, paths
   handed to the agent), dashboard self-reload on new web build. Hub T-13 (95 tests), web T-14, mod tests
   T-15 (81). Fixes from tests: cache writes priced at 1.25×, unknown models price as Opus.
+- 2026-10-10 — **v0.5: diffs, task chat, task links** (from dashboard note N-7). Mod records a git base per
+  spawn (`git stash create` || HEAD → `agent.git`); hub T-16 serves per-task diffs (snapshot frozen at
+  completion via `hub.task.diff`, live refresh, history fallback for old tasks; 106 tests); web T-17 adds
+  the Dock (Talk + details + task chat side by side), collapsible Files changed with totals and a unified
+  diff viewer, and `T-n` chips that open a task while Talk stays open. Verified live in the browser pane.
+  Found in QA: the browser mixed cached old `app.js` with new modules → web files now `no-store`.

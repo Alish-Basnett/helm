@@ -1,4 +1,4 @@
-// views/sheet.js — task detail sheet (slides in from the right).
+// views/sheet.js — task details panel, mounted in the Dock (next to Talk and the task chat).
 import { h, setText, setAttr, setClass, setHidden, reconcile, startTicker } from '../dom.js';
 import { icon } from '../icons.js';
 import { state, sel, subscribe, upsert, ingestActivity, setUI } from '../store.js';
@@ -8,27 +8,30 @@ import { createStartStatus } from '../replies.js';
 import { fmtTokens, fmtElapsed, fmtAgo, STATUS_META, ALL_STATUSES, agentLabel, truncate, cwdTail } from '../format.js';
 import { toast, toastError, avatar, updateAvatar, modelBadge, updateModelBadge, nowDoingLine, statusDot } from '../ui.js';
 import { createTimeline } from '../timeline.js';
-import { createNotesPanel } from '../notes.js';
+import { createFilesChanged } from '../diffs.js';
+import { toggleChat, chatActivity } from './taskchat.js';
+import { panelClose } from '../dock.js';
 import { createReplay } from '../replay.js';
 import { createExplain } from '../explain.js';
-import { openTask, closeTask, navigate } from '../router.js';
+import { openTask, closeTask, navigate, route } from '../router.js';
 
 const AGENT_STATUS = { running: 'Running', done: 'Done', failed: 'Failed', stalled: 'Stalled', waiting: 'Waiting for you' };
 
-export function createSheet(root) {
-  const scrim = h('div', { class: 'scrim', onclick: () => closeTask() });
-  const sheet = h('aside', { class: 'sheet', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Task detail', 'aria-hidden': 'true', inert: true });
-  root.append(scrim, sheet);
+export function createSheet(dock) {
+  const panel = dock.register('details', {
+    order: 1, width: 460, label: 'Task', icon: 'file', ariaLabel: 'Task detail',
+    onClose: () => closeTask(),
+  });
+  const sheet = panel.el;
 
   let taskId = null;
   let ctx = null; // per-open component refs
-  let prevFocus = null;
 
   function destroyCtx() {
     if (!ctx) return;
     ctx.timeline = null;
     ctx.replay && ctx.replay.destroy();
-    ctx.notes && ctx.notes.destroy();
+    ctx.files && ctx.files.destroy();
     ctx = null;
     sheet.textContent = '';
   }
@@ -38,7 +41,10 @@ export function createSheet(root) {
     const c = {};
     c.id = h('span', { class: 'task-id mono' }, id);
     c.pill = h('span', { class: 'status-pill' }, statusDot('backlog'), h('span', {}, ''));
-    c.close = h('button', { class: 'icon-btn', type: 'button', 'aria-label': 'Close', title: 'Close (Esc)', onclick: () => closeTask() }, icon('close', 18));
+    c.close = panelClose(panel, 'Close');
+    c.chatDot = h('span', { class: 'chat-dot', hidden: true, 'aria-hidden': 'true' });
+    c.chatBtn = h('button', { class: 'btn btn-quiet btn-sm sheet-chat', type: 'button', 'aria-pressed': 'false', title: 'Show or hide this task’s chat (C)', onclick: () => toggleChat() },
+      icon('chat', 14), h('span', {}, 'Chat'), c.chatDot);
     c.title = h('input', {
       class: 'sheet-title', type: 'text', 'aria-label': 'Task title', spellcheck: 'false',
       onblur: () => commitTitle(), onkeydown: (e) => {
@@ -78,10 +84,8 @@ export function createSheet(root) {
     c.recapBody = h('div', { class: 'recap' });
     c.explain = createExplain({ getTask: () => state.tasks.get(id) || null });
     c.recapWrap = h('section', { class: 'sheet-section' }, h('h3', { class: 'section-title' }, icon('sparkle', 14), 'Recap'), c.recapBody, c.explain.el);
-    // files
-    c.filesList = h('ul', { class: 'files mono' });
-    c.filesCount = h('span', { class: 'panel-count mono' });
-    c.filesWrap = h('section', { class: 'sheet-section' }, h('h3', { class: 'section-title' }, icon('file', 14), 'Files changed', c.filesCount), c.filesList);
+    // files (collapsed rows -> git diff)
+    c.files = createFilesChanged({ getTask: () => state.tasks.get(id) || null });
     // deps
     c.depsList = h('div', { class: 'dep-chips' });
     c.depAdd = h('select', { class: 'select select-sm', 'aria-label': 'Add dependency', onchange: () => addDep() });
@@ -102,16 +106,14 @@ export function createSheet(root) {
       onclick: () => { const on = !c.replay.active; c.replay.setActive(on); c.replayBtn.setAttribute('aria-pressed', String(on)); setClass(c.replayBtn, 'on', on); setClass(c.tlWrap, 'replaying', on); },
     }, icon('replay', 14), 'Replay');
     c.tlWrap = h('section', { class: 'sheet-section' }, h('h3', { class: 'section-title' }, icon('terminal', 14), 'Activity', c.replayBtn), c.replay.el, c.timeline.el);
-    // notes
-    c.notes = createNotesPanel({ target: { kind: 'task', id } });
 
     const head = h('header', { class: 'sheet-head' },
-      h('div', { class: 'sheet-head-top' }, c.id, c.pill, h('span', { class: 'spacer' }), c.startBtn, c.close),
+      h('div', { class: 'sheet-head-top' }, c.id, c.pill, h('span', { class: 'spacer' }), c.startBtn, c.chatBtn, c.close),
       c.title);
     const body = h('div', { class: 'sheet-body' },
       c.blocked, c.startStatus.el,
       h('section', { class: 'sheet-section status-row' }, h('label', { class: 'field-label' }, 'Status', c.select), c.quick),
-      c.agentWrap, c.conflictsWrap, c.descWrap, c.recapWrap, c.filesWrap, c.depsWrap, c.tlWrap, c.notes.el);
+      c.agentWrap, c.conflictsWrap, c.descWrap, c.recapWrap, c.files.el, c.depsWrap, c.tlWrap);
     sheet.append(head, body);
     return c;
   }
@@ -240,11 +242,9 @@ export function createSheet(root) {
     setText(c.conflictCount, conflicts.length ? String(conflicts.length) : '');
     reconcile(c.conflictList, conflicts, (x) => `${x.path}\u0000${x.otherAgentId}`, makeConflictRow, updateConflictRow);
 
-    // files
-    const files = t.filesChanged || [];
-    setHidden(c.filesWrap, files.length === 0);
-    setText(c.filesCount, files.length ? String(files.length) : '');
-    reconcile(c.filesList, files, (f) => f, (f) => h('li', { title: f }, h('span', { class: 'file-dir' }, dirOf(f)), h('span', { class: 'file-name' }, baseOf(f))), null);
+    // files + diffs
+    c.files.update(t);
+    updateChatBtn(t);
 
     // deps
     const deps = t.dependsOn || [];
@@ -271,6 +271,22 @@ export function createSheet(root) {
     }
     c.replay.refresh();
     c.timeline.refresh();
+  }
+
+  /** The Chat button: pressed while the chat is open; a dot for replies you have not seen or notes still in flight. */
+  function updateChatBtn(t) {
+    const c = ctx;
+    if (!c) return;
+    const r = route();
+    const on = !!r.chat && r.task === taskId;
+    const visible = on && dock.isVisible('chat');
+    c.chatBtn.setAttribute('aria-pressed', String(on));
+    setClass(c.chatBtn, 'on', on);
+    const a = chatActivity(t.id);
+    const dot = !visible && (a.unread || a.pending);
+    setHidden(c.chatDot, !dot);
+    setClass(c.chatDot, 'pending', dot && !a.unread);
+    c.chatBtn.title = `Show or hide this task’s chat (C)${dot ? (a.unread ? ' — new reply' : ' — waiting for a reply') : ''}`;
   }
 
   function makeConflictRow() {
@@ -315,34 +331,12 @@ export function createSheet(root) {
     }
   }
 
-  function onKey(e) {
-    if (!taskId) return;
-    if (document.querySelector('.talk-sheet.open')) return; // the Talk sheet is on top and owns Esc / Tab
-    if (e.key === 'Escape' && !e.defaultPrevented && !document.querySelector('.menu, .spotlight-scrim.open')) {
-      e.preventDefault();
-      closeTask();
-    } else if (e.key === 'Tab') {
-      const f = Array.from(sheet.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])')).filter((x) => !x.disabled && !x.hidden && x.offsetParent !== null);
-      if (!f.length) return;
-      const first = f[0], last = f[f.length - 1];
-      if (!sheet.contains(document.activeElement)) { e.preventDefault(); first.focus(); }
-      else if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
-      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
-    }
-  }
-  document.addEventListener('keydown', onKey);
-
   function show(id) {
-    if (id === taskId) { update(); return; }
-    const opening = !taskId && id;
-    if (opening) prevFocus = document.activeElement;
+    if (id === taskId) { if (id) update(); return; }
     destroyCtx();
     taskId = id || null;
     if (!taskId) {
-      sheet.classList.remove('open'); scrim.classList.remove('open');
-      sheet.setAttribute('aria-hidden', 'true'); sheet.inert = true;
-      if (prevFocus && prevFocus.isConnected) prevFocus.focus({ preventScroll: true });
-      prevFocus = null;
+      panel.close();
       setUI({ selectedTaskId: state.ui.selectedTaskId });
       return;
     }
@@ -350,12 +344,7 @@ export function createSheet(root) {
     setUI({ selectedTaskId: taskId });
     ctx = build(taskId);
     update();
-    sheet.inert = false;
-    sheet.setAttribute('aria-hidden', 'false');
-    requestAnimationFrame(() => {
-      sheet.classList.add('open'); scrim.classList.add('open');
-      if (opening) ctx && ctx.close.focus({ preventScroll: true });
-    });
+    panel.open({ focus: !panel.isOpen, front: true });
     load(taskId);
   }
 
@@ -369,5 +358,6 @@ export function createSheet(root) {
     update();
   });
 
-  return { show, update, get taskId() { return taskId; }, destroy() { off(); document.removeEventListener('keydown', onKey); } };
+  const offDock = dock.subscribe(() => { if (taskId && ctx) { const t = state.tasks.get(taskId); if (t) updateChatBtn(t); } });
+  return { show, update, get taskId() { return taskId; }, destroy() { off(); offDock(); } };
 }

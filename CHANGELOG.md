@@ -4,6 +4,26 @@ All notable changes to Helm are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/). Shapes and endpoints are defined in `CONTRACT.md`.
 
+## [0.5.0] - 2026-10-10
+
+### Added
+
+- Git diffs per task: the mod records each agent's git base at spawn (`git stash create`, or HEAD when
+  the tree is clean). The hub serves `GET /v1/tasks/:id/diff` in snapshot, live, history (approximate,
+  for tasks with no recorded base) or none mode, freezes a snapshot when the agent completes, and keeps
+  `Task.diffStat`.
+- Files changed in task details: the label shows `N files +A −D`, each file is a collapsed row with a
+  status badge and `+a −d`, and expanding a row shows a unified diff with line numbers. A refresh button
+  recomputes the diff live.
+- The Dock: Talk, Task details and a new Task chat panel sit side by side, and extra panels fold into
+  tabs on narrow screens. Notes move into the Task chat panel, the task's own chatbox.
+- Task links: every `T-n` in Talk, replies, notes and activity renders as a chip that opens that task's
+  details and chat while Talk stays open.
+
+### Fixed
+
+- Web files are served with `no-store`, so a browser can't mix stale and new modules after an update.
+
 ## [0.4.0] - 2026-10-10
 
 ### Added

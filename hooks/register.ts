@@ -336,6 +336,7 @@ async function tick($: any) {
     await flush($)
     await pollInbox($)
     await pollJobs($)
+    await captureGitBases($)
     if (hubUp && !outbox.length) {
       await backfillRecaps($).catch(err => probe('backfill.error', String(err)))
       await runRecaps($)
@@ -423,6 +424,31 @@ async function exportRecap($: any, recap: any, title: string) {
   const tags = (recap.concepts as string[]).map(c => `#${c.replace(/\s+/g, '-')}`).join(' ')
   const entry = `\n## ${recap.taskId} · ${title}\n- **What:** ${recap.what}\n- **How:** ${recap.how}\n- **Learned:** ${recap.learned}\n${tags}\n`
   await $.fs.write(file, prev + entry)
+}
+
+// ---------- git base per spawn: lets the hub show each task's diff later ----------
+const gitQueue: { toolUseId: string; agentId?: string; cwd?: string; tries: number }[] = []
+
+async function git($: any, cwd: string, args: string[]): Promise<string> {
+  const r = await $.process.run(['git', '-C', cwd, ...args], { timeoutMs: 5000 })
+  if (r.exitCode !== 0) throw new Error(clip(r.stderr, 200))
+  return r.stdout.trim()
+}
+
+async function captureGitBases($: any) {
+  while (gitQueue.length) {
+    const job = gitQueue.shift()!
+    try {
+      const cwd = job.cwd || (await $.session.cwd())
+      const root = await git($, cwd, ['rev-parse', '--show-toplevel'])
+      const head = await git($, root, ['rev-parse', 'HEAD'])
+      // `git stash create` snapshots index + working tree as a commit object without touching anything.
+      const stash = await git($, root, ['stash', 'create']).catch(() => '')
+      emit('agent.git', { toolUseId: job.toolUseId, agentId: job.agentId, cwd, root, head, base: stash || head, at: Date.now() })
+    } catch (err) {
+      probe('git.base', String(err)) // not a repo, or git missing: no event
+    }
+  }
 }
 
 // Any finished task of this session still without a recap (a completion missed during a reload) gets one.
@@ -744,6 +770,7 @@ export const register: Register = (on, options) => {
         const info = { description: a.description, prompt: a.prompt, subagentType: a.subagentType, model: r?.model ?? model ?? '', at: Date.now() }
         spawnByToolUse.set(a.tool_use_id, info)
         const tag = String(a.description ?? '').match(/\[helm:(T-\d+)\]/)
+        gitQueue.push({ toolUseId: a.tool_use_id, agentId: r?.agentId, cwd: a.cwd, tries: 0 })
         emit('agent.spawned', { toolUseId: a.tool_use_id, taskId: tag?.[1], subagentType: info.subagentType, model: info.model, description: clip(String(a.description ?? '').replace(/\[helm:T-\d+\]\s*/, ''), 160), prompt: clip(a.prompt, 4000) })
         const followTask = String(a.description ?? '').match(/^\[helm:(T-\d+)\] follow-up/)?.[1]
         if (r?.agentId && followTask && pendingFollowups.has(followTask)) {

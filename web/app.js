@@ -6,8 +6,11 @@ import { fmtTokens, fmtUsd, fmtUsdSmall, fmtClock, plural } from './format.js';
 import { toggleMeter } from './meter.js';
 import { openMenu, emptyState } from './ui.js';
 import { route, onRoute, navigate, VIEWS } from './router.js';
+import { createDock } from './dock.js';
 import { createSheet } from './views/sheet.js';
+import { createTaskChat, toggleChat } from './views/taskchat.js';
 import { createTalkSheet } from './views/talk.js';
+import { startTaskLinks } from './tasklinks.js';
 import { createSpotlight } from './spotlight.js';
 import * as board from './views/board.js';
 import * as projects from './views/projects.js';
@@ -64,8 +67,11 @@ bus.on('toggle-sidebar', toggleSidebar);
 
 /* ---------- sidebar ---------- */
 const spotlight = createSpotlight($('#spotlight-root'));
-const sheet = createSheet($('#sheet-root'));
-const talk = createTalkSheet($('#sheet-root'));
+const dock = createDock($('#sheet-root'));
+const sheet = createSheet(dock);
+const taskChat = createTaskChat(dock);
+const talk = createTalkSheet(dock);
+startTaskLinks();
 bus.on('open-talk', (sessionId) => talk.open(typeof sessionId === 'string' ? sessionId : undefined));
 
 const psName = h('span', { class: 'ps-name' }, 'All projects');
@@ -188,6 +194,7 @@ function applyRoute(r) {
   }
   if (view && view.setRoute) view.setRoute(r);
   sheet.show(r.task);
+  taskChat.show(r.chat ? r.task : null);
   for (const a of navItems) {
     const on = a.getAttribute('data-view') === r.view;
     setClass(a, 'active', on);
@@ -223,6 +230,7 @@ document.addEventListener('keydown', (e) => {
   if (e.key === '/') { e.preventDefault(); spotlight.open(); }
   else if (e.key === 'n') { e.preventDefault(); newTask(); }
   else if (e.key === 't') { e.preventDefault(); talk.toggle(); }
+  else if (e.key === 'c' && route().task) { e.preventDefault(); toggleChat(); }
   else if (e.key === '>') { e.preventDefault(); spotlight.open('>'); }
 });
 

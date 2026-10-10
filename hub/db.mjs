@@ -46,7 +46,8 @@ CREATE TABLE IF NOT EXISTS agents (
   tool_use_id TEXT NOT NULL, subagent_type TEXT NOT NULL DEFAULT '', model TEXT NOT NULL DEFAULT '',
   description TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'running',
   started_at INTEGER NOT NULL, ended_at INTEGER, last_activity_at INTEGER NOT NULL,
-  now_doing TEXT NOT NULL DEFAULT '', tool_count INTEGER NOT NULL DEFAULT 0, tokens INTEGER NOT NULL DEFAULT 0
+  now_doing TEXT NOT NULL DEFAULT '', tool_count INTEGER NOT NULL DEFAULT 0, tokens INTEGER NOT NULL DEFAULT 0,
+  git TEXT                                -- v0.5: JSON { cwd, root, base, head, at } from agent.git
 );
 CREATE INDEX IF NOT EXISTS agents_session ON agents(session_id, status);
 CREATE INDEX IF NOT EXISTS agents_tooluse ON agents(tool_use_id);
@@ -61,7 +62,9 @@ CREATE TABLE IF NOT EXISTS tasks (
   conflicts TEXT NOT NULL DEFAULT '[]',   -- v0.2: derived from agent_files (see Projector.recomputeConflicts)
   explainer TEXT,                         -- v0.2: markdown from an explain job
   explain_job TEXT,                       -- v0.2: JSON { id, state } of the latest explain job
-  start_note_id TEXT                      -- v0.3: the latest Start note
+  start_note_id TEXT,                     -- v0.3: the latest Start note
+  git TEXT,                               -- v0.5: JSON { root, base, head, at } recorded at spawn (first base wins)
+  diff_stat TEXT                          -- v0.5: JSON { files, additions, deletions } from the latest snapshot / live diff
 );
 CREATE INDEX IF NOT EXISTS tasks_project ON tasks(project_id, status);
 CREATE INDEX IF NOT EXISTS tasks_session ON tasks(session_id);
@@ -132,6 +135,11 @@ CREATE TABLE IF NOT EXISTS usage (
 );
 CREATE INDEX IF NOT EXISTS usage_at ON usage(at);
 
+-- v0.5: the latest frozen diff per task (written by hub.task.diff events; bytes capped by diff.mjs).
+CREATE TABLE IF NOT EXISTS task_diffs (
+  task_id TEXT PRIMARY KEY, diff TEXT NOT NULL, at INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS changes (
   seq INTEGER PRIMARY KEY AUTOINCREMENT, entity TEXT NOT NULL, op TEXT NOT NULL, row TEXT NOT NULL
 );
@@ -190,6 +198,11 @@ export class Db {
     if (!has('tasks', 'start_note_id')) this.raw.exec('ALTER TABLE tasks ADD COLUMN start_note_id TEXT');
     // v0.4: note attachments (the attachments / usage tables come from SCHEMA; run `helmd --rebuild` to back-fill usage).
     if (!has('notes', 'attachments')) this.raw.exec("ALTER TABLE notes ADD COLUMN attachments TEXT NOT NULL DEFAULT '[]'");
+    // v0.5: git base + diff stat (task_diffs comes from SCHEMA). Additive and nullable, so safe on a live database;
+    // run `helmd --rebuild` to back-fill from old events.
+    if (!has('tasks', 'git')) this.raw.exec('ALTER TABLE tasks ADD COLUMN git TEXT');
+    if (!has('tasks', 'diff_stat')) this.raw.exec('ALTER TABLE tasks ADD COLUMN diff_stat TEXT');
+    if (!has('agents', 'git')) this.raw.exec('ALTER TABLE agents ADD COLUMN git TEXT');
   }
   prep(sql) {
     let s = this.cache.get(sql);

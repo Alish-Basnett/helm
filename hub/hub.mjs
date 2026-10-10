@@ -7,6 +7,7 @@ import {
   localDate, usageSummary, usageToday, toAttachment, MAX_NOTE_ATTACHMENTS,
   toProject, toSession, toAgent, toTask, toNote, toActivity, toQuestion, toJob, toDigest,
 } from './projections.mjs';
+import { computeDiff, diffStat } from './diff.mjs';
 import { search as ftsSearch, learn as ftsLearn } from './search.mjs';
 
 export class HttpError extends Error {
@@ -19,7 +20,7 @@ const isStr = (v) => typeof v === 'string';
 const isObj = (v) => v && typeof v === 'object' && !Array.isArray(v);
 const TABLES = [
   'projects', 'sessions', 'agents', 'tasks', 'notes', 'activity', 'late_completions',
-  'agent_files', 'conflicts', 'questions', 'jobs', 'digests', 'attachments', 'usage',
+  'agent_files', 'conflicts', 'questions', 'jobs', 'digests', 'attachments', 'usage', 'task_diffs',
 ];
 const START_FROM = ['backlog', 'next', 'later', 'blocked'];
 const DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
@@ -36,6 +37,9 @@ export class Hub {
     this.startedAt = clock();
     this.lastPushed = this.seqNow();
     this.trimmedTo = 0;
+    this.autoSnapshot = true;       // snapshot a task's diff when its agent completes (the seed switches this off)
+    this.snapshots = new Set();     // in-flight snapshot promises (see flushSnapshots)
+    this.closed = false;
   }
   now() { return this.clock(); }
   setClock(fn) { this.clock = fn; }
@@ -141,7 +145,64 @@ export class Hub {
       }
     });
     const lastSeq = Math.max(0, ...Object.values(lastSeqBySession));
+    if (this.autoSnapshot && accepted) this.scheduleSnapshots(valid);
     return { accepted, duplicates, rejected, lastSeq, lastSeqBySession };
+  }
+
+  // ------------------------------------------------------------ task diffs (v0.5)
+  /** After a commit: queue a diff snapshot for every task whose agent just finished. Never blocks or throws. */
+  scheduleSnapshots(events) {
+    try {
+      const tasks = new Set();
+      for (const ev of events) {
+        if (ev.type !== 'agent.completed' && ev.type !== 'agent.bound') continue; // a bind can apply a late completion
+        const id = ev.data && ev.data.agentId;
+        if (typeof id !== 'string') continue;
+        const a = this.p.getAgent(id);
+        if (a && a.task_id && (a.status === 'done' || a.status === 'failed')) tasks.add(a.task_id);
+      }
+      for (const taskId of tasks) {
+        const p = new Promise((r) => setImmediate(r))
+          .then(() => this.snapshotTask(taskId))
+          .catch((e) => this.log?.warn(`diff snapshot failed for ${taskId}`, e))
+          .finally(() => this.snapshots.delete(p));
+        this.snapshots.add(p);
+      }
+    } catch (e) { this.log?.warn('scheduleSnapshots failed', e); }
+  }
+  /** Resolves once every queued snapshot has been recorded (tests, shutdown). */
+  async flushSnapshots() {
+    while (this.snapshots.size) await Promise.all([...this.snapshots]);
+  }
+  taskDiffInput(t) {
+    return { filesChanged: JSON.parse(t.files_changed || '[]'), git: toTask(t).git, createdAt: t.created_at, doneAt: t.done_at };
+  }
+  /** Compute the task's diff now and record it as a hub.task.diff event. Skips when there is nothing to freeze. */
+  async snapshotTask(taskId) {
+    const t = this.p.getTask(taskId);
+    if (!t || this.closed) return null;
+    const diff = await computeDiff(this.taskDiffInput(t), { now: this.now() });
+    if (diff.source === 'none' || this.closed) return null;
+    this.tx(() => this.command('hub.task.diff', { taskId, diff }, this.now()));
+    return diff;
+  }
+  /** GET /v1/tasks/:id/diff. Snapshot if there is one (unless refresh), else live / history. */
+  async taskDiff(id, { refresh = false } = {}) {
+    const t = this.p.getTask(id);
+    if (!t) throw notFound('task not found');
+    if (!refresh) {
+      const s = this.db.get('SELECT diff FROM task_diffs WHERE task_id = ?', id);
+      if (s) { try { return { ...JSON.parse(s.diff), source: 'snapshot' }; } catch { /* recompute */ } }
+    }
+    const diff = await computeDiff(this.taskDiffInput(t), { now: this.now() });
+    const stat = diffStat(diff);
+    if (diff.source !== 'none' && !this.closed) {
+      const cur = this.p.getTask(id);
+      if (cur && cur.diff_stat !== JSON.stringify(stat)) {
+        this.tx(() => this.command('hub.task.diffstat', { taskId: id, diffStat: stat }, this.now()));
+      }
+    }
+    return diff;
   }
 
   /** Apply inside a savepoint: a poisoned event keeps its seq but cannot break the batch. */
@@ -652,6 +713,7 @@ export class Hub {
   }
 
   close() {
+    this.closed = true;
     this.subs.clear();
     this.db.close();
   }

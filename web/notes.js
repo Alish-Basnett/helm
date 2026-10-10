@@ -6,6 +6,7 @@ import { createReply, createWaitLine } from './replies.js';
 import { addNote, editNote, deleteNote, executeNotes, retryNote } from './actions.js';
 import { createAttachTray, createAttachmentList, bindAttachInput, attsOf } from './attachments.js';
 import { toast } from './ui.js';
+import { setLinked } from './tasklinks.js';
 
 const STATE_LABEL = { draft: 'Draft', queued: 'Queued', sending: 'Sending…', failed: 'Failed' };
 
@@ -122,7 +123,7 @@ export function createNotesPanel(opts) {
     const cls = `note state-${n.state}`;
     if (row.className !== cls) row.className = cls;
     setClass(row, 'pending', !!n.__pending);
-    if (!row.__editing) setText(row.__text, n.text);
+    if (!row.__editing) setLinked(row.__text, n.text);
     const meta = row.__meta;
     // rebuild meta only when its content signature changes
     const sig = `${n.state}|${n.ranAt}|${n.error || ''}|${n.via || ''}`;

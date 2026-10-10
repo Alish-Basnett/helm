@@ -2,7 +2,10 @@
 // Everything goes through hub.ingest() (mod events) and the hub command methods, never raw SQL inserts,
 // so seeding also exercises the projections. A virtual clock lets history be spread over the last ~3 hours.
 
+import fs from 'node:fs';
+import path from 'node:path';
 import zlib from 'node:zlib';
+import { execFileSync } from 'node:child_process';
 import { localDate } from './hub.mjs';
 
 const MIN = 60_000;
@@ -52,6 +55,8 @@ export function seed(hub, log) {
   const NOW = Date.now();
   let clock = NOW - 180 * MIN;
   hub.setClock(() => clock);
+  const prevSnap = hub.autoSnapshot;
+  hub.autoSnapshot = false; // no async diff snapshots while seeding; helmd snapshots the git demo task afterwards
 
   const seqs = {};
   const emit = (sid, type, data, at = clock) => {
@@ -559,8 +564,20 @@ export function seed(hub, log) {
     a.fn();
   }
 
+  // A real git repo for the JWT task so the demo shows real diffs (skipped quietly when git is unavailable).
+  let gitTaskId = null;
+  try {
+    const root = seedGitRepo(hub.cfg.home);
+    if (root && ids.jwt) {
+      const head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim();
+      emit(SESS_A, 'agent.git', { toolUseId: 'toolu_01Hk3aJwt', cwd: root, root, base: head, head, at: clock });
+      gitTaskId = ids.jwt;
+    }
+  } catch (e) { log?.warn?.('seed: git repo skipped', e); }
+
   // back to real time: apply the stall/idle rules to the seeded state (Session B idle, sparkline agent stalled+blocked)
   hub.setClock(Date.now);
+  hub.autoSnapshot = prevSnap;
   hub.sweep(Date.now());
   hub.tx(() => hub.db.run("INSERT OR REPLACE INTO meta(key, value) VALUES ('seeded', '1')"));
 
@@ -572,7 +589,47 @@ export function seed(hub, log) {
     attachments: count('attachments'), usage: count('usage'),
   };
   log?.info(`seed done ${JSON.stringify(counts)}`);
-  return { skipped: false, counts };
+  return { skipped: false, counts, gitTaskId };
+}
+
+/** Make $HELM_HOME/seed-repo: one commit, then a modified file and two new (untracked) ones. Returns the real root, or null. */
+export function seedGitRepo(home) {
+  const dir = path.join(home, 'seed-repo');
+  fs.rmSync(dir, { recursive: true, force: true });
+  fs.mkdirSync(dir, { recursive: true });
+  const git = (...a) => execFileSync('git', ['-c', 'user.email=demo@helm.local', '-c', 'user.name=Helm Demo', '-c', 'commit.gpgsign=false', ...a],
+    { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 10_000 });
+  const put = (rel, text) => { fs.mkdirSync(path.dirname(path.join(dir, rel)), { recursive: true }); fs.writeFileSync(path.join(dir, rel), text); };
+  try { git('init', '-q'); } catch { return null; }
+  put('README.md', '# meridian-api (demo)\n');
+  put('src/auth/tokens.ts', [
+    "import { sign, verify } from './jwt';", '',
+    'export function issueTokens(userId: string) {',
+    "  const access = sign({ sub: userId }, { expiresIn: '15m' });",
+    "  const refresh = sign({ sub: userId, kind: 'refresh' }, { expiresIn: '30d' });",
+    '  return { access, refresh };', '}', '',
+    'export function readToken(raw: string) {', '  return verify(raw);', '}', ''].join('\n'));
+  git('add', '-A'); git('commit', '-q', '-m', 'baseline');
+  put('src/auth/tokens.ts', [
+    "import { sign, verify } from './jwt';",
+    "import { rotate } from './refresh';", '',
+    'export function issueTokens(userId: string, familyId = crypto.randomUUID()) {',
+    "  const access = sign({ sub: userId }, { expiresIn: '15m' });",
+    "  const refresh = sign({ sub: userId, kind: 'refresh', fam: familyId }, { expiresIn: '30d' });",
+    '  return { access, refresh, familyId };', '}', '',
+    'export function refreshTokens(raw: string) {', '  return rotate(readToken(raw));', '}', '',
+    'export function readToken(raw: string) {', '  return verify(raw);', '}', ''].join('\n'));
+  put('src/auth/refresh.ts', [
+    "import { issueTokens } from './tokens';", '',
+    'const used = new Set<string>();', '',
+    'export function rotate(claims: { sub: string; jti: string; fam: string }) {',
+    '  if (used.has(claims.jti)) throw new Error(`token family ${claims.fam} revoked: replay detected`);',
+    '  used.add(claims.jti);', '  return issueTokens(claims.sub, claims.fam);', '}', ''].join('\n'));
+  put('test/auth/refresh.test.ts', [
+    "import { rotate } from '../../src/auth/refresh';", '',
+    "test('a replayed token revokes its family', () => {",
+    "  const c = { sub: 'u1', jti: 'a', fam: 'f1' };", '  rotate(c);', '  expect(() => rotate(c)).toThrow(/replay/);', '});', ''].join('\n'));
+  return fs.realpathSync(dir);
 }
 
 // ===================================================================== live demo

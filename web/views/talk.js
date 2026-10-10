@@ -1,33 +1,44 @@
 // views/talk.js — Talk: chat with a live session. Your notes are right-aligned bubbles coloured by note state,
-// Claude's replies are left bubbles. `createTalk` is the reusable thread + composer (used by the Talk sheet
-// and by Threads when the main node is selected); `createTalkSheet` is the right-hand sheet with a session picker.
+// Claude's replies are left bubbles. `createTalk` (alias `createChat`) is the reusable thread + composer for ANY note
+// target — a session (Talk panel, Threads) or a task (Task chat panel); `createTalkSheet` is the Talk panel in the
+// Dock, with a session picker.
 import { h, reconcile, setText, setHidden, setAttr, setClass, startTicker } from '../dom.js';
 import { icon } from '../icons.js';
 import { state, sel, subscribe, lsGet, lsSet } from '../store.js';
 import { addNote, deleteNote, executeNotes, retryNote } from '../actions.js';
 import { createAttachTray, createAttachmentList, bindAttachInput, attsOf } from '../attachments.js';
 import { createReply, createWaitLine } from '../replies.js';
+import { setLinked } from '../tasklinks.js';
+import { panelClose } from '../dock.js';
 import { cwdTail } from '../format.js';
 import { emptyState, modelBadge, updateModelBadge, toast } from '../ui.js';
 
 const STATE_LABEL = { draft: 'Draft', queued: 'Queued', sending: 'Sending…', ran: 'Delivered', failed: 'Failed' };
 
-/** opts: { sessionId, inline? }  →  { el, destroy, focus, scrollToEnd } */
+/**
+ * opts: { sessionId } (shorthand for a session target) | { target: { kind: 'session' | 'task', id } }, inline?
+ * →  { el, destroy, focus, scrollToEnd, render }
+ */
 export function createTalk(opts) {
-  const sid = opts.sessionId;
-  const target = { kind: 'session', id: sid };
+  const target = opts.target || { kind: 'session', id: opts.sessionId };
+  const sid = target.id;
+  const isTask = target.kind === 'task';
+  const who = isTask ? 'this task' : 'this session';
   let firstRender = true;
 
-  const list = h('ul', { class: 'talk-thread', role: 'log', 'aria-live': 'polite', 'aria-label': 'Conversation with session' });
-  const empty = h('div', { class: 'talk-empty' }, icon('chat', 22), h('p', {}, 'Say something to this session. ↵ sends it right away, and Claude’s reply lands here.'));
-  const ta = h('textarea', { class: 'note-input talk-input', rows: '1', placeholder: 'Message this session…', 'aria-label': 'Message this session' });
+  const list = h('ul', { class: 'talk-thread', role: 'log', 'aria-live': 'polite', 'aria-label': isTask ? 'Task chat' : 'Conversation with session' });
+  const empty = h('div', { class: 'talk-empty' }, icon('chat', 22), h('p', {}, isTask
+    ? 'Ask about this task or tell its agent what to do. ↵ sends it right away, and the reply lands here.'
+    : 'Say something to this session. ↵ sends it right away, and Claude’s reply lands here.'));
+  const ta = h('textarea', { class: 'note-input talk-input', rows: '1', placeholder: `Message ${who}…`, 'aria-label': `Message ${who}`, 'data-autofocus': '' });
   const send = h('button', { class: 'icon-btn note-send', type: 'button', 'aria-label': 'Send now', title: 'Send now (↵)', onclick: () => submit(true) }, icon('send', 18));
   const draftBtn = h('button', { class: 'link-btn talk-draft', type: 'button', onclick: () => submit(false), title: 'Keep it as a draft; run it later with Execute' }, 'Save as draft');
   const hint = h('div', { class: 'note-hint mono talk-hint' }, h('span', {}, '↵ send now · ⇧↵ new line'), draftBtn);
+  const cheapHint = isTask ? h('div', { class: 'note-hint note-hint-cheap mono' }, 'Questions are answered cheaply from the task record · start with ! to send to the agent') : null;
   const tray = createAttachTray({ onChange: () => setClass(composer, 'has-att', tray.count > 0) });
   const attachBtn = h('button', { class: 'icon-btn note-attach', type: 'button', 'aria-label': 'Attach files', title: 'Attach files (or drop / paste)', onclick: () => binding.pick() }, icon('paperclip', 18));
-  const composer = h('div', { class: 'note-composer talk-composer' }, tray.el, ta, attachBtn, send, hint);
-  const el = h('section', { class: ['talk', opts.inline && 'inline'], 'aria-label': 'Talk' }, list, empty, composer);
+  const composer = h('div', { class: 'note-composer talk-composer' }, tray.el, ta, attachBtn, send, hint, cheapHint);
+  const el = h('section', { class: ['talk', isTask && 'task-chat', opts.inline && 'inline'], 'aria-label': isTask ? 'Task chat' : 'Talk' }, list, empty, composer);
   const binding = bindAttachInput({ box: el, ta, tray, disabled: () => ta.disabled });
 
   const nearEnd = () => list.scrollHeight - list.scrollTop - list.clientHeight < 80;
@@ -75,7 +86,7 @@ export function createTalk(opts) {
     const r = li.__r;
     const cls = `tk-turn state-${n.state}${n.__pending ? ' pending' : ''}`;
     if (li.className !== cls) li.className = cls;
-    setText(r.text, n.text);
+    setLinked(r.text, n.text);
     r.atts.update(n.attachments);
     const sig = `${n.state}|${n.ranAt}|${n.error || ''}|${n.__pending ? 1 : 0}`;
     if (r.meta.__sig !== sig) {
@@ -99,11 +110,12 @@ export function createTalk(opts) {
   }
 
   function render() {
-    const s = state.sessions.get(sid);
-    const ended = !s || s.status === 'ended';
+    // a session you cannot reach is read-only; a task's chat stays open (the hub finds a live session when it sends)
+    const s = isTask ? null : state.sessions.get(sid);
+    const ended = !isTask && (!s || s.status === 'ended');
     ta.disabled = ended; send.disabled = ended; draftBtn.disabled = ended; attachBtn.disabled = ended;
-    setAttr(ta, 'placeholder', ended ? 'This session has ended' : 'Message this session…');
-    const notes = sel.notesFor('session', sid);
+    setAttr(ta, 'placeholder', ended ? 'This session has ended' : `Message ${who}…`);
+    const notes = sel.notesFor(target.kind, sid);
     empty.hidden = notes.length > 0;
     list.hidden = notes.length === 0;
     const stick = firstRender || nearEnd();
@@ -114,29 +126,30 @@ export function createTalk(opts) {
 
   startTicker();
   render();
-  const off = subscribe((changed) => { if (changed.has('note') || changed.has('session')) render(); });
+  const off = subscribe((changed) => { if (changed.has('note') || changed.has('session') || changed.has('task')) render(); });
   requestAnimationFrame(scrollToEnd); // re-pin once the thread is attached and laid out
   return { el, destroy() { off(); binding.destroy(); tray.destroy(); }, focus: () => ta.focus(), scrollToEnd, render };
 }
+export const createChat = createTalk;
 
-/* ---------- the sheet ---------- */
-export function createTalkSheet(root) {
-  const scrim = h('div', { class: 'scrim talk-scrim', onclick: () => close() });
+/* ---------- the Talk panel (in the Dock) ---------- */
+export function createTalkSheet(dock) {
   const picker = h('select', { class: 'select talk-picker', 'aria-label': 'Session to talk to', onchange: () => choose(picker.value, true) });
   const model = modelBadge('');
-  const closeBtn = h('button', { class: 'icon-btn', type: 'button', 'aria-label': 'Close', title: 'Close (Esc)', onclick: () => close() }, icon('close', 18));
   const sub = h('div', { class: 'talk-sub mono' });
-  const head = h('header', { class: 'sheet-head talk-head' },
-    h('div', { class: 'sheet-head-top' }, h('h2', { class: 'talk-title' }, icon('chat', 16), 'Talk'), model, h('span', { class: 'spacer' }), closeBtn),
-    picker, sub);
   const bodyEl = h('div', { class: 'talk-body' });
-  const sheet = h('aside', { class: 'sheet talk-sheet', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Talk to a session', 'aria-hidden': 'true', inert: true }, head, bodyEl);
-  root.append(scrim, sheet);
-
   let isOpen = false;
   let sid = null;
   let talk = null;
-  let prevFocus = null;
+
+  const panel = dock.register('talk', {
+    order: 2, width: 400, label: 'Talk', icon: 'chat', ariaLabel: 'Talk to a session',
+    onClosed: () => { isOpen = false; if (talk) { talk.destroy(); talk = null; bodyEl.textContent = ''; } },
+  });
+  const head = h('header', { class: 'sheet-head talk-head' },
+    h('div', { class: 'sheet-head-top' }, h('h2', { class: 'talk-title' }, icon('chat', 16), 'Talk'), model, h('span', { class: 'spacer' }), panelClose(panel)),
+    picker, sub);
+  panel.el.append(head, bodyEl);
 
   function pick(preferred) {
     const list = sel.talkSessions();
@@ -156,7 +169,7 @@ export function createTalkSheet(root) {
     }
     talk = createTalk({ sessionId: sid });
     bodyEl.append(talk.el);
-    if (isOpen) requestAnimationFrame(() => { if (talk) { talk.scrollToEnd(); talk.focus(); } });
+    if (isOpen) requestAnimationFrame(() => { if (talk) talk.scrollToEnd(); });
   }
 
   function choose(id, remember) {
@@ -186,43 +199,20 @@ export function createTalkSheet(root) {
     setText(sub, s ? `${sel.projectName(s.projectId)} · ${cwdTail(s.cwd, 3)}${s.busy ? ' · working' : ''}` : '');
   }
 
-  function onKey(e) {
-    if (!isOpen) return;
-    if (e.key === 'Escape' && !e.defaultPrevented && !document.querySelector('.menu, .spotlight-scrim.open')) { e.preventDefault(); close(); }
-    else if (e.key === 'Tab') {
-      const f = Array.from(sheet.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])')).filter((x) => !x.disabled && !x.hidden && x.offsetParent !== null);
-      if (!f.length) return;
-      const first = f[0], last = f[f.length - 1];
-      if (!sheet.contains(document.activeElement)) { e.preventDefault(); first.focus(); }
-      else if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
-      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
-    }
-  }
-  document.addEventListener('keydown', onKey);
-
   function open(sessionId) {
-    if (isOpen) { if (sessionId) choose(pick(sessionId), true); else if (talk) talk.focus(); return; }
+    if (isOpen) {
+      if (sessionId) choose(pick(sessionId), true);
+      panel.open({ focus: true });
+      return;
+    }
     isOpen = true;
-    prevFocus = document.activeElement;
     sid = pick(sessionId);
     syncPicker();
     mountTalk();
-    sheet.inert = false;
-    sheet.setAttribute('aria-hidden', 'false');
-    requestAnimationFrame(() => {
-      sheet.classList.add('open'); scrim.classList.add('open');
-      if (talk) { talk.scrollToEnd(); talk.focus(); } else closeBtn.focus({ preventScroll: true });
-    });
+    panel.open({ focus: true });
+    requestAnimationFrame(() => { if (talk) talk.scrollToEnd(); });
   }
-  function close() {
-    if (!isOpen) return;
-    isOpen = false;
-    sheet.classList.remove('open'); scrim.classList.remove('open');
-    sheet.setAttribute('aria-hidden', 'true'); sheet.inert = true;
-    if (talk) { talk.destroy(); talk = null; bodyEl.textContent = ''; }
-    if (prevFocus && prevFocus.isConnected) prevFocus.focus({ preventScroll: true });
-    prevFocus = null;
-  }
+  function close() { panel.close(); }
 
   const off = subscribe((changed) => {
     if (!isOpen) return;
@@ -236,8 +226,8 @@ export function createTalkSheet(root) {
   });
 
   return {
-    open, close, toggle: () => (isOpen ? close() : open()),
+    open, close, toggle: () => (isOpen && panel.isVisible ? close() : open()),
     get isOpen() { return isOpen; },
-    destroy() { off(); document.removeEventListener('keydown', onKey); },
+    destroy() { off(); },
   };
 }
