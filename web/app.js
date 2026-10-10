@@ -162,7 +162,7 @@ function renderChrome() {
   const running = Array.from(state.agents.values()).filter((a) => a.status === 'running' && (state.ui.projectId === 'all' || (state.sessions.get(a.sessionId) || {}).projectId === state.ui.projectId)).length;
   badge('board', blocked, 'red', `${blocked} blocked`);
   badge('office', running, 'accent', `${running} running`);
-  const waiting = sel.openQuestions().length;
+  const waiting = sel.openQuestions().length + sel.choiceTasks().length;
   badge('inbox', waiting, 'indigo', `${waiting} waiting for you`);
 }
 function badge(v, n, tone, title) {

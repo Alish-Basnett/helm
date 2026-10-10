@@ -213,3 +213,9 @@ via a follow-up spawn that continues from the task's context.
   the Dock (Talk + details + task chat side by side), collapsible Files changed with totals and a unified
   diff viewer, and `T-n` chips that open a task while Talk stays open. Verified live in the browser pane.
   Found in QA: the browser mixed cached old `app.js` with new modules → web files now `no-store`.
+- 2026-10-10 — **v0.6.** T-19 (dashboard card) Threads redesign: virtualised git-graph tree + timeline,
+  newest first, nested subagents (`Agent.parentId`). T-21 (notes N-9/N-10) Choices: plan outputs become
+  tick-to-run checklists; T-18's 11 suggested screens attached as choices. T-22 (card) resizable, saved dock
+  widths. Incident: a builder stopped the live hub with `--stop` minus `HELM_HOME`; the mod restarted it
+  within seconds, no data lost (backup `helm-pre-v06.db`). Builders are now told to always pass `HELM_HOME`.
+  Follow-up: Timeline axis should zoom to the visible range (bars are thin over a full day).

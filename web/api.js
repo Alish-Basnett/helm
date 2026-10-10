@@ -42,6 +42,8 @@ export const api = {
   join: (sessionId, projectId) => request('POST', `/v1/sessions/${enc(sessionId)}/join`, { projectId }),
   createTask: (body) => request('POST', '/v1/tasks', body),
   startTask: (id) => request('POST', `/v1/tasks/${enc(id)}/start`),
+  applyChoices: (id, picked, start) => request('POST', `/v1/tasks/${enc(id)}/choices/apply`, { picked, start: !!start }),
+  resetChoices: (id) => request('POST', `/v1/tasks/${enc(id)}/choices/reset`),
   patchTask: (id, patch) => request('PATCH', `/v1/tasks/${enc(id)}`, patch),
   createNote: (target, text, execute = false, attachments) => {
     const body = { target, text };

@@ -1,41 +1,210 @@
-// views/threads.js — live SVG graph (main → subagents) + inner view for the selected node.
-import { h, s, reconcile, setText, setClass, setHidden, reducedMotion, startTicker } from '../dom.js';
+// views/threads.js — v0.6 Threads at scale.
+// Tree (default): one trunk per session, agents hang off it as orthogonal branches, newest first, grouped
+// Live / Today (by hour) / Earlier. Timeline (toggle): the same rows against a horizontal time axis with
+// duration bars. Both are virtualised: only the rows near the viewport exist in the DOM. The inspector
+// (agent detail, tool timeline, scoped prompt) is unchanged and still drives the Dock via task chips.
+import { h, reconcile, setText, setClass, setHidden, setAttr, reducedMotion, startTicker, frameBatch, debounce } from '../dom.js';
 import { icon } from '../icons.js';
-import { state, sel, onActivity, ingestActivity } from '../store.js';
+import { state, sel, onActivity, ingestActivity, lsGet, lsSet } from '../store.js';
 import { api } from '../api.js';
-import { fmtElapsed, fmtTokens, fmtUsd, fmtTime, cwdTail, agentLabel, truncate, modelInfo } from '../format.js';
+import { fmtElapsed, fmtTokens, fmtUsd, fmtTime, fmtAgo, fmtDay, cwdTail, agentLabel, truncate, modelInfo } from '../format.js';
 import { avatar, updateAvatar, modelBadge, updateModelBadge, nowDoingLine, emptyState } from '../ui.js';
 import { createTimeline } from '../timeline.js';
 import { createNotesPanel } from '../notes.js';
 import { createTalk } from './talk.js';
+import { taskChip } from '../tasklinks.js';
 import { navigate, setArgs, openTask } from '../router.js';
 
-const W = 580, NODE_W = 236, NODE_H = 62, GAP = 14, PAD = 20, MAIN_X = 16, AGENT_X = W - NODE_W - 16, MAX_AGENTS = 40;
 const akey = (a) => a.toolUseId || a.id;
 const AGENT_STATUS = { running: 'Running', done: 'Done', failed: 'Failed', stalled: 'Stalled', waiting: 'Waiting for you' };
+const FILTER_STATUSES = [['running', 'Running'], ['waiting', 'Waiting'], ['stalled', 'Stalled'], ['done', 'Done'], ['failed', 'Failed']];
+const LIVE = new Set(['running', 'waiting', 'stalled']);
+const isLive = (a) => LIVE.has(a.status);
+const HOUR = 3600e3;
+const MAX_DEPTH = 6;          // deeper nesting keeps the last indent
+const BUF = 480;              // px of rows rendered above/below the viewport
+const AXIS_H = 32;            // timeline axis height
+const PREFS_KEY = 'helm.threads';
+
+// Row heights (px, 8-pt grid) per view and density. Fixed per row kind so the window maths is a binary search.
+const ROW_H = {
+  tree: {
+    compact: { lane: 48, section: 32, group: 32, hint: 40, agent: 32, agentLive: 48 },
+    comfy: { lane: 56, section: 32, group: 40, hint: 48, agent: 72, agentLive: 96 },
+  },
+  time: {
+    compact: { lane: 32, section: 24, group: 24, hint: 32, agent: 24, agentLive: 24 },
+    comfy: { lane: 40, section: 32, group: 32, hint: 40, agent: 32, agentLive: 32 },
+  },
+};
+// Guide geometry (px): trunk at X(0); the dot of a depth-d row sits exactly on X(d+1), where its children's spine runs.
+const X = (j) => 12 + 20 * j;
+
+/* ---------- pure helpers ---------- */
+const startOfHour = (t) => { const d = new Date(t); d.setMinutes(0, 0, 0); return d.getTime(); };
+const startOfDay = (t) => { const d = new Date(t); d.setHours(0, 0, 0, 0); return d.getTime(); };
+const pad2 = (n) => String(n).padStart(2, '0');
+const hourLabel = (t) => `${pad2(new Date(t).getHours())}:00`;
+const endOf = (a, now) => (isLive(a) ? now : (a.endedAt || a.lastActivityAt || a.startedAt));
+const plural = (n, one) => `${n} ${one}${n === 1 ? '' : 's'}`;
+
+export function fmtDur(ms) {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m${pad2(s % 60)}s`;
+  return `${Math.floor(m / 60)}h${pad2(m % 60)}m`;
+}
+
+function agentTitle(a) {
+  const t = a.taskId ? state.tasks.get(a.taskId) : null;
+  return (t && t.title) || a.description || agentLabel(a);
+}
+
+function sortNewest(x, y) { return (y.a.startedAt - x.a.startedAt) || (x.a.id < y.a.id ? -1 : 1); }
+
+function mkNode(a, kidsOf, seen, now) {
+  seen.add(a.id);
+  const node = { a, kids: [], size: 1, live: isLive(a), min: a.startedAt, max: endOf(a, now) };
+  for (const c of kidsOf.get(a.id) || []) {
+    if (seen.has(c.id)) continue;
+    const k = mkNode(c, kidsOf, seen, now);
+    node.kids.push(k);
+    node.size += k.size;
+    node.live = node.live || k.live;
+    node.min = Math.min(node.min, k.min);
+    node.max = Math.max(node.max, k.max);
+  }
+  node.kids.sort(sortNewest);
+  return node;
+}
+
+/** Nodes -> forest + sections for one session. `ctx.pass` filters agents, `ctx.now` is the clock. */
+function buildLane(session, ctx) {
+  const all = sel.agentsOfSession(session.id);
+  const shown = all.filter(ctx.pass);
+  const byId = new Map(shown.map((a) => [a.id, a]));
+  const kidsOf = new Map();
+  const rootAgents = [];
+  for (const a of shown) {
+    const p = a.parentId;
+    if (p && p !== a.id && byId.has(p)) { if (!kidsOf.has(p)) kidsOf.set(p, []); kidsOf.get(p).push(a); } else rootAgents.push(a);
+  }
+  const seen = new Set();
+  const roots = rootAgents.map((a) => mkNode(a, kidsOf, seen, ctx.now));
+  for (const a of shown) if (!seen.has(a.id)) roots.push(mkNode(a, kidsOf, seen, ctx.now)); // parent cycles: never lose a row
+  roots.sort(sortNewest);
+
+  const live = [], today = new Map(), earlier = new Map();
+  for (const n of roots) {
+    if (n.live) { live.push(n); continue; }
+    const t = n.a.startedAt;
+    if (t >= ctx.todayStart) { const k = startOfHour(t); if (!today.has(k)) today.set(k, []); today.get(k).push(n); } else { const k = startOfDay(t); if (!earlier.has(k)) earlier.set(k, []); earlier.get(k).push(n); }
+  }
+  const groups = (map, label) => Array.from(map.entries()).sort((x, y) => y[0] - x[0]).map(([t, nodes]) => ({
+    t, label: label(t), nodes, count: nodes.reduce((s, n) => s + n.size, 0),
+    min: Math.min(...nodes.map((n) => n.min)), max: Math.max(...nodes.map((n) => n.max)),
+  }));
+  const todayG = groups(today, hourLabel), earlierG = groups(earlier, (t) => fmtDay(t));
+  return {
+    session, all: all.length, total: shown.length, shown, live,
+    today: todayG, earlier: earlierG,
+    earlierCount: earlierG.reduce((s, g) => s + g.count, 0),
+  };
+}
+
+/** A time step that gives roughly `want` ticks over `span`. */
+const STEPS = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 10800, 21600, 43200, 86400, 172800, 604800].map((s) => s * 1000);
+export function niceStep(span, want) {
+  const raw = span / Math.max(1, want);
+  return STEPS.find((s) => s >= raw) || STEPS[STEPS.length - 1];
+}
+export function makeTicks(t0, t1, want) {
+  const step = niceStep(t1 - t0, want);
+  const off = new Date(t0).getTimezoneOffset() * 60000; // align to local clock
+  const out = [];
+  for (let t = Math.ceil((t0 - off) / step) * step + off; t <= t1 && out.length < 60; t += step) out.push(t);
+  const fmt = step < 60e3 ? (t) => { const d = new Date(t); return `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`; }
+    : step < 86400e3 ? (t) => fmtTime(t) : (t) => fmtDay(t);
+  return out.map((t) => ({ t, label: fmt(t) }));
+}
+
+function loadPrefs() {
+  const p = { view: 'tree', density: 'compact', status: [], model: 'all', scopeAll: false };
+  try {
+    const j = JSON.parse(lsGet(PREFS_KEY, '{}') || '{}');
+    if (j.view === 'tree' || j.view === 'timeline') p.view = j.view;
+    if (j.density === 'compact' || j.density === 'comfy') p.density = j.density;
+    if (Array.isArray(j.status)) p.status = j.status.filter((x) => FILTER_STATUSES.some((f) => f[0] === x));
+    if (typeof j.model === 'string') p.model = j.model;
+    p.scopeAll = !!j.scopeAll;
+  } catch { /* corrupt prefs: use defaults */ }
+  return p;
+}
+function savePrefs(p) {
+  try { lsSet(PREFS_KEY, JSON.stringify({ view: p.view, density: p.density, status: p.status, model: p.model, scopeAll: p.scopeAll })); } catch { /* storage unavailable */ }
+}
 
 export function mount(container) {
   let sid = null;
   let selKey = 'main';
   let insp = null; // {key, update, destroy}
   const loaded = new Set();
+  const prefs = loadPrefs();
+  let query = '';
+  const openOv = new Map();      // row key -> user-chosen open/closed (beats the default)
+  let cursorKey = null;          // keyboard cursor (row key)
+  let items = [];                // flat row descriptors, newest first
+  let lanes = [];                // [{ item, y, h }] for the pinned session header
+  let totalH = 0;
+  let modelVer = 0;
+  let scale = { t0: Date.now() - HOUR, t1: Date.now(), span: HOUR };
+  let hasLive = false;
+  let rid = 0;
   startTicker();
 
   /* ---------- structure ---------- */
   const picker = h('select', { class: 'select', 'aria-label': 'Session', onchange: () => choose(picker.value) });
   const sessMeta = h('div', { class: 'threads-meta mono' });
-  const bar = h('div', { class: 'threads-bar' }, h('label', { class: 'field-label inline' }, icon('threads', 15), picker), sessMeta);
 
-  const edgesG = s('g', { class: 'edges' });
-  const pulsesG = s('g', { class: 'pulses' });
-  const nodesG = s('g', { class: 'nodes' });
-  const svg = s('svg', { class: 'graph', viewBox: `0 0 ${W} 240`, width: W, height: 240, role: 'group', 'aria-label': 'Agent graph' }, edgesG, pulsesG, nodesG);
-  const legend = h('div', { class: 'graph-legend mono' },
-    h('span', {}, h('i', { class: 'ldot running' }), 'running'), h('span', {}, h('i', { class: 'ldot waiting' }), 'waiting for you'), h('span', {}, h('i', { class: 'ldot stalled' }), 'stalled'),
-    h('span', {}, h('i', { class: 'ldot failed' }), 'failed'), h('span', {}, h('i', { class: 'ldot done' }), 'done'));
-  const graphPane = h('div', { class: 'graph-pane' }, svg, legend);
+  const segBtn = (label, value, group, title) => h('button', { class: 'th-seg-btn', type: 'button', 'data-v': value, 'aria-pressed': 'false', title: title || label, onclick: () => group(value) }, label);
+  const viewSeg = h('div', { class: 'th-seg', role: 'group', 'aria-label': 'View' },
+    segBtn('Tree', 'tree', (v) => setPref('view', v), 'Tree: trunk and branches'), segBtn('Timeline', 'timeline', (v) => setPref('view', v), 'Timeline: duration bars on a time axis'));
+  const densSeg = h('div', { class: 'th-seg', role: 'group', 'aria-label': 'Density' },
+    segBtn('Compact', 'compact', (v) => setPref('density', v), 'One line per agent'), segBtn('Cards', 'comfy', (v) => setPref('density', v), 'Comfortable cards'));
+  const statusChips = new Map();
+  const chipRow = h('div', { class: 'th-chips', role: 'group', 'aria-label': 'Filter by status' },
+    FILTER_STATUSES.map(([k, label]) => {
+      const n = h('span', { class: 'th-chip-n mono' }, '0');
+      const b = h('button', { class: `th-fchip s-${k}`, type: 'button', 'aria-pressed': 'false', onclick: () => toggleStatus(k) }, h('i', { class: 'th-fdot' }), label, n);
+      b.__n = n; statusChips.set(k, b);
+      return b;
+    }));
+  const modelSel = h('select', { class: 'select select-sm', 'aria-label': 'Filter by model', onchange: () => setPref('model', modelSel.value) });
+  const search = h('input', { type: 'text', class: 'th-search', inputmode: 'search', placeholder: 'Search title, description, task id', 'aria-label': 'Search agents', autocomplete: 'off', spellcheck: 'false' });
+  const searchWrap = h('label', { class: 'th-search-wrap' }, icon('search', 14), search, h('kbd', { class: 'th-kbd mono', 'aria-hidden': 'true' }, '/'));
+  const bar = h('div', { class: 'threads-bar' },
+    h('div', { class: 'th-bar-row' }, h('label', { class: 'field-label inline' }, icon('threads', 15), picker), sessMeta, h('span', { class: 'th-grow' }), viewSeg, densSeg),
+    h('div', { class: 'th-bar-row' }, chipRow, modelSel, searchWrap));
+
+  const sizer = h('div', { class: 'th-sizer' });
+  const vp = h('div', { class: 'th-vp', role: 'presentation' });
+  const grid = h('div', { class: 'th-grid', 'aria-hidden': 'true' });
+  const nowLine = h('i', { class: 'th-nowline' });
+  grid.appendChild(nowLine);
+  const axisTicks = h('div', { class: 'th-axis-ticks' });
+  const axisNow = h('i', { class: 'th-axis-now' }, 'now');
+  const axis = h('div', { class: 'th-axis mono', 'aria-hidden': 'true' }, h('div', { class: 'th-axis-l' }, 'Time'), h('div', { class: 'th-axis-plot' }, axisTicks, axisNow));
+  const pinHost = h('div', { class: 'th-pin' });
+  const sticky = h('div', { class: 'th-sticky' }, axis, pinHost);
+  sizer.append(grid, vp);
+  const scroller = h('div', { class: 'th-scroll', tabindex: '0', role: 'tree', 'aria-label': 'Agents, newest first' }, sticky, sizer);
+  const tip = h('div', { class: 'th-tip mono', role: 'tooltip', hidden: true });
+  const legend = h('div', { class: 'th-legend mono' },
+    h('span', {}, 'Up Down move'), h('span', {}, 'Enter open'), h('span', {}, 'Left Right fold'), h('span', {}, '/ search'));
+  const listPane = h('div', { class: 'th-pane' }, scroller, legend, tip);
   const inspector = h('aside', { class: 'inspector', 'aria-label': 'Inner view' });
-  const main = h('div', { class: 'threads-main' }, graphPane, inspector);
+  const main = h('div', { class: 'threads-main' }, listPane, inspector);
   const empty = h('div', { class: 'view-empty' }, emptyState({
     iconName: 'threads', title: 'No sessions yet',
     body: 'Start Claude Code with Helm installed. Pick a session here to watch its agents work and step into any of them.',
@@ -43,7 +212,34 @@ export function mount(container) {
   const root = h('div', { class: 'threads' }, bar, main, empty);
   container.appendChild(root);
 
-  /* ---------- selection ---------- */
+  /* ---------- preferences + filters ---------- */
+  function setPref(k, v) {
+    prefs[k] = v;
+    savePrefs(prefs);
+    if (k === 'view' || k === 'density') { vp.textContent = ''; vp.__keyed = null; pinHost.textContent = ''; pinEl = null; }
+    rebuild();
+  }
+  function toggleStatus(k) {
+    const i = prefs.status.indexOf(k);
+    if (i >= 0) prefs.status.splice(i, 1); else prefs.status.push(k);
+    savePrefs(prefs);
+    rebuild();
+  }
+  search.addEventListener('input', debounce(() => { query = search.value.trim().toLowerCase(); rebuild(); }, 120));
+  search.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { if (search.value) { search.value = ''; query = ''; rebuild(); } else scroller.focus(); e.stopPropagation(); }
+    else if (e.key === 'Enter' || e.key === 'ArrowDown') { e.preventDefault(); scroller.focus(); }
+  });
+
+  const hayOf = (a) => `${agentTitle(a)}\n${a.description || ''}\n${a.taskId || ''}\n${a.subagentType || ''}`.toLowerCase();
+  const passBase = (a) => {
+    if (prefs.model !== 'all' && modelInfo(a.model).key !== prefs.model) return false;
+    if (query && !hayOf(a).includes(query)) return false;
+    return true;
+  };
+  const passAll = (a) => passBase(a) && (!prefs.status.length || prefs.status.includes(a.status));
+
+  /* ---------- selection / routing ---------- */
   function sessionList() {
     const list = sel.scopedSessions();
     if (sid && !list.some((x) => x.id === sid) && state.sessions.has(sid)) list.push(state.sessions.get(sid));
@@ -51,15 +247,17 @@ export function mount(container) {
     return list.sort((a, b) => (order[a.status] - order[b.status]) || (b.lastSeenAt - a.lastSeenAt));
   }
 
-  function choose(newSid, nodeId) {
-    setArgs(newSid ? (nodeId ? [newSid, nodeId] : [newSid]) : []);
+  function choose(value) {
+    if (value === 'all') { prefs.scopeAll = true; savePrefs(prefs); rebuild(); return; }
+    prefs.scopeAll = false; savePrefs(prefs);
+    setArgs(value ? [value] : []);
+    rebuild();
   }
 
   function applyRoute(r) {
     const [rs, ra] = r.args;
     const list = sessionList();
     let target = rs && state.sessions.has(rs) ? rs : null;
-    if (!target && rs && !state.ready) target = null;
     if (!target) {
       if (!state.ready) { sid = null; renderAll(); return; }
       const first = list[0];
@@ -72,6 +270,7 @@ export function mount(container) {
       if (ra) {
         const a = sel.agentsOfSession(sid).find((x) => x.id === ra || x.toolUseId === ra);
         selKey = a ? akey(a) : (state.ready ? 'main' : selKey);
+        if (a) revealAgent(a);
       } else selKey = 'main';
       ensureActivity(sid);
     }
@@ -87,113 +286,593 @@ export function mount(container) {
     } catch { loaded.delete(id); }
   }
 
-  /* ---------- graph ---------- */
-  const edgeEls = new Map();
-  function pathFor(cy1, cy2) {
-    const x1 = MAIN_X + NODE_W, x2 = AGENT_X;
-    const mx = (x1 + x2) / 2;
-    return `M${x1} ${cy1} C${mx} ${cy1} ${mx} ${cy2} ${x2} ${cy2}`;
-  }
+  /* ---------- list model ---------- */
+  const isOpen = (key, def) => (openOv.has(key) ? openOv.get(key) : def);
+  function toggleKey(key, curOpen) { openOv.set(key, !curOpen); rebuild(); }
 
-  function renderGraph() {
-    const session = sid && state.sessions.get(sid);
-    if (!session) return;
-    const all = sel.agentsOfSession(sid);
-    const agents = all.slice(-MAX_AGENTS);
-    const n = agents.length;
-    const H = Math.max(240, PAD * 2 + n * (NODE_H + GAP) - GAP);
-    svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
-    svg.setAttribute('height', String(H));
-    const mainCy = H / 2;
-    const rows = [{ key: 'main', kind: 'main', session, y: mainCy - NODE_H / 2, x: MAIN_X, cy: mainCy }];
-    const total = n * (NODE_H + GAP) - GAP;
-    const top = (H - total) / 2;
-    agents.forEach((a, i) => {
-      const y = top + i * (NODE_H + GAP);
-      rows.push({ key: akey(a), kind: 'agent', agent: a, y, x: AGENT_X, cy: y + NODE_H / 2 });
-    });
-    reconcile(nodesG, rows, (r) => r.key, makeNode, updateNode);
-    reconcile(edgesG, rows.filter((r) => r.kind === 'agent'), (r) => r.key, (r) => {
-      const p = s('path', { class: 'edge' });
-      edgeEls.set(r.key, p);
-      return p;
-    }, (p, r) => {
-      p.setAttribute('d', pathFor(mainCy, r.cy));
-      p.setAttribute('class', `edge a-${r.agent.status}${selKey === r.key ? ' selected' : ''}`);
-    });
-    for (const k of Array.from(edgeEls.keys())) if (!rows.some((r) => r.key === k)) edgeEls.delete(k);
-    graphPane.classList.toggle('no-agents', n === 0);
-  }
+  /** Flatten one lane into row descriptors. `forced` = search active, so every fold is open. */
+  function flatten(lane, out, forced) {
+    const id = lane.session.id;
+    const open = (key, def) => (forced ? true : isOpen(key, def));
+    const laneKey = `l:${id}`;
+    const laneOpen = isOpen(laneKey, true);
+    const first = out.length;
+    out.push({ kind: 'lane', key: laneKey, sid: id, lane, open: laneOpen });
+    if (!laneOpen) return;
+    if (!lane.total) { out.push({ kind: 'hint', key: `h:${id}`, text: lane.all ? 'No agents match these filters' : 'No agents in this session yet' }); return; }
 
-  function makeNode(r) {
-    const bg = s('rect', { class: 'node-bg', width: NODE_W, height: NODE_H, rx: 12 });
-    const dot = s('circle', { class: 'node-dot', cx: 20, cy: 22, r: 4.5 });
-    const ring = s('circle', { class: 'node-ring', cx: 20, cy: 22, r: 4.5 });
-    const title = s('text', { class: 'node-title', x: 34, y: 26 });
-    const sub = s('text', { class: 'node-sub', x: 16, y: 47 });
-    const g = s('g', { class: 'gnode', tabindex: '0', role: 'button' }, bg, ring, dot, title, sub);
-    g.__r = { title, sub, dot };
-    const activate = () => {
-      const row = g.__row;
-      selKey = row.key;
-      const rt = row.kind === 'agent' ? [sid, row.agent.id] : [sid];
-      setArgs(rt);
+    const wrap = (node, depth, anc) => {
+      const vd = Math.min(depth, MAX_DEPTH);
+      const k = `a:${akey(node.a)}`;
+      const kidsOpen = node.kids.length ? open(k, true) : false;
+      const row = {
+        kind: 'agent', key: k, a: node.a, node, depth: vd, sid: node.a.sessionId, nkids: node.kids.length, hidden: node.size - 1,
+        open: kidsOpen, cont: anc.slice(0, vd), last: false, tail: false,
+      };
+      out.push(row);
+      if (kidsOpen) node.kids.forEach((c, i) => { const r = wrap(c, depth + 1, [...anc, i !== node.kids.length - 1]); r.last = i === node.kids.length - 1; });
+      return row;
     };
-    g.addEventListener('click', activate);
-    g.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); activate(); } });
-    return g;
-  }
+    const trees = (nodes) => { for (const n of nodes) wrap(n, 0, [true]); };
 
-  function updateNode(g, r) {
-    g.__row = r;
-    const x = r.x, y = r.y;
-    g.setAttribute('transform', `translate(${x} ${y})`);
-    const isSel = selKey === r.key;
-    const t = g.__r;
-    if (r.kind === 'main') {
-      const ses = r.session;
-      g.setAttribute('class', `gnode main st-${ses.status}${ses.busy ? ' busy' : ''}${isSel ? ' selected' : ''}`);
-      t.title.textContent = truncate(ses.title || cwdTail(ses.cwd) || ses.id, 26);
-      t.sub.textContent = `${modelInfo(ses.model).label} · ${ses.busy ? 'working' : ses.status} · ${fmtTokens(ses.tokens)} tok`;
-      g.setAttribute('aria-label', `Main agent, ${ses.status}`);
-    } else {
-      const a = r.agent;
-      g.setAttribute('class', `gnode a-${a.status}${isSel ? ' selected' : ''}`);
-      t.title.textContent = truncate(a.description || agentLabel(a), 26);
-      t.sub.textContent = `${modelInfo(a.model).label} · ${a.status === 'waiting' ? 'waiting for you' : agentLabel(a)} · ${a.toolCount} tools`;
-      g.setAttribute('aria-label', `${agentLabel(a)} ${a.status}: ${a.description}`);
+    if (lane.live.length) {
+      out.push({ kind: 'section', key: `s:${id}:live`, sid: id, label: 'Live', count: lane.live.reduce((s, n) => s + n.size, 0), tone: 'live', toggle: false });
+      trees(lane.live);
     }
-    g.setAttribute('aria-pressed', String(isSel));
+    if (lane.today.length) {
+      out.push({ kind: 'section', key: `s:${id}:today`, sid: id, label: 'Today', count: lane.today.reduce((s, g) => s + g.count, 0), tone: 'today', toggle: false });
+      lane.today.forEach((g, i) => {
+        const key = `g:${id}:${g.t}`;
+        const o = open(key, i === 0);
+        out.push({ kind: 'group', key, sid: id, label: g.label, count: g.count, open: o, min: g.min, max: g.max });
+        if (o) trees(g.nodes);
+      });
+    }
+    if (lane.earlier.length) {
+      const key = `e:${id}`;
+      const o = open(key, false);
+      out.push({ kind: 'section', key, sid: id, label: o ? 'Earlier' : 'Show older', count: lane.earlierCount, tone: 'earlier', toggle: true, open: o });
+      if (o) lane.earlier.forEach((g) => {
+        const gk = `g:${id}:d${g.t}`;
+        const go = open(gk, false);
+        out.push({ kind: 'group', key: gk, sid: id, label: g.label, count: g.count, open: go, min: g.min, max: g.max });
+        if (go) trees(g.nodes);
+      });
+    }
+    // trunk ends at the last agent row of the lane
+    const lastRow = out[out.length - 1];
+    if (lastRow && lastRow.kind === 'agent' && out.length - 1 > first) lastRow.tail = true;
   }
 
-  function pulse(a) {
-    if (!sid || a.sessionId !== sid) return;
-    if (!a.agentId) { pingNode('main'); return; }
-    const ag = sel.agentsOfSession(sid).find((x) => x.id === a.agentId);
-    if (!ag) { pingNode('main'); return; }
-    const key = akey(ag);
-    const edge = edgeEls.get(key);
-    pingNode(key);
-    if (!edge) return;
-    edge.classList.add('hot');
-    setTimeout(() => edge.classList.remove('hot'), 800);
-    if (reducedMotion()) return;
-    const d = edge.getAttribute('d');
-    const back = a.kind === 'tool_done';
-    const c = s('circle', { class: `pulse${back ? ' back' : ''}`, r: 3.6 });
-    const am = s('animateMotion', { dur: '0.85s', begin: 'indefinite', repeatCount: '1', fill: 'freeze', path: d, calcMode: 'linear', keyTimes: '0;1', keyPoints: back ? '1;0' : '0;1' });
-    c.appendChild(am);
-    pulsesG.appendChild(c);
-    try { am.beginElement(); } catch { /* animation unsupported */ }
-    setTimeout(() => c.remove(), 1000);
+  const rowH = (it) => {
+    const t = ROW_H[prefs.view === 'timeline' ? 'time' : 'tree'][prefs.density];
+    if (it.kind === 'agent') return isLive(it.a) ? t.agentLive : t.agent;
+    return t[it.kind];
+  };
+  const topInset = () => (prefs.view === 'timeline' ? AXIS_H : 0);
+
+  function rebuild() {
+    modelVer++;
+    const now = Date.now();
+    const list = prefs.scopeAll ? sessionList() : (sid && state.sessions.has(sid) ? [state.sessions.get(sid)] : []);
+    const ctx = { now, todayStart: startOfDay(now), pass: passAll };
+    // status counts honour model + search but not the status filter itself
+    const counts = { running: 0, waiting: 0, stalled: 0, done: 0, failed: 0 };
+    const models = new Set();
+    const forced = !!query;
+    const out = [];
+    let agentsShown = 0, liveShown = 0, laneN = 0, t0 = Infinity, t1 = -Infinity;
+    for (const ses of list) {
+      for (const a of sel.agentsOfSession(ses.id)) { models.add(modelInfo(a.model).key); if (passBase(a) && counts[a.status] != null) counts[a.status]++; }
+      const lane = buildLane(ses, ctx);
+      if (prefs.scopeAll && !lane.total) continue; // all-sessions view: only lanes that have rows
+      laneN++;
+      agentsShown += lane.total;
+      liveShown += lane.shown.filter(isLive).length;
+      for (const a of lane.shown) { if (a.startedAt < t0) t0 = a.startedAt; const e = endOf(a, now); if (e > t1) t1 = e; }
+      flatten(lane, out, forced);
+    }
+    hasLive = liveShown > 0;
+    if (!out.length) out.push({ kind: 'hint', key: 'h:none', text: 'No agents match these filters' });
+    // layout
+    let y = topInset();
+    for (const it of out) { it.y = y; it.h = rowH(it); y += it.h; }
+    totalH = y + 24;
+    items = out;
+    lanes = items.filter((it) => it.kind === 'lane');
+    sizer.style.height = `${totalH}px`;
+    // time scale
+    if (!Number.isFinite(t0)) { t0 = now - HOUR; t1 = now; }
+    if (hasLive) t1 = Math.max(t1, now);
+    let span = Math.max(60e3, t1 - t0);
+    scale = { t0: t0 - span * 0.01, t1: t1 + span * 0.02, span: 0 };
+    scale.span = scale.t1 - scale.t0;
+    paintControls(counts, models, agentsShown, laneN, liveShown);
+    paintGridChrome();
+    renderWindow(true);
   }
-  function pingNode(key) {
-    for (const g of nodesG.children) {
-      if (g.__key === key) {
-        g.classList.remove('ping'); void g.getBoundingClientRect(); g.classList.add('ping');
-        setTimeout(() => g.classList.remove('ping'), 800);
+
+  function paintControls(counts, models, agentsShown, laneN, liveShown) {
+    root.dataset.view = prefs.view;
+    root.dataset.density = prefs.density;
+    for (const b of viewSeg.children) b.setAttribute('aria-pressed', String(b.dataset.v === prefs.view));
+    for (const b of densSeg.children) b.setAttribute('aria-pressed', String(b.dataset.v === prefs.density));
+    for (const [k, b] of statusChips) {
+      const on = prefs.status.includes(k);
+      b.setAttribute('aria-pressed', String(on));
+      setText(b.__n, String(counts[k]));
+      setClass(b, 'dim', !on && prefs.status.length > 0);
+    }
+    const msig = Array.from(models).sort().join(',') + '|' + prefs.model;
+    if (modelSel.__sig !== msig) {
+      modelSel.__sig = msig;
+      modelSel.textContent = '';
+      modelSel.appendChild(h('option', { value: 'all' }, 'All models'));
+      const keys = new Set(models); if (prefs.model !== 'all') keys.add(prefs.model);
+      for (const k of ['opus', 'sonnet', 'haiku', 'other']) if (keys.has(k)) modelSel.appendChild(h('option', { value: k }, k === 'other' ? 'Other' : k[0].toUpperCase() + k.slice(1)));
+      modelSel.value = prefs.model;
+    }
+    sessMeta.textContent = '';
+    if (prefs.scopeAll) sessMeta.append(h('span', {}, plural(laneN, 'session')), h('span', {}, plural(agentsShown, 'agent')), h('span', {}, `${liveShown} live`));
+    else {
+      const ses = sid && state.sessions.get(sid);
+      if (ses) sessMeta.append(h('span', {}, sel.projectName(ses.projectId)), h('span', {}, cwdTail(ses.cwd, 3)), h('span', {}, plural(sel.agentsOfSession(sid).length, 'agent')), h('span', {}, `${liveShown} live`));
+    }
+    setAttr(scroller, 'aria-label', `Agents, newest first, ${prefs.view} view`);
+  }
+
+  /* ---------- timeline chrome (ticks, now line) ---------- */
+  function paintGridChrome() {
+    const tl = prefs.view === 'timeline';
+    setHidden(axis, !tl);
+    setHidden(grid, !tl);
+    if (!tl) return;
+    const w = Math.max(300, (scroller.clientWidth || 900) - 260);
+    const ticks = makeTicks(scale.t0, scale.t1, Math.max(3, Math.floor(w / 110)));
+    const pct = (t) => `${(((t - scale.t0) / scale.span) * 100).toFixed(3)}%`;
+    reconcile(axisTicks, ticks, (t) => `t${t.t}`, (t) => h('span', { class: 'th-axis-tick' }, t.label), (el, t) => { el.style.left = pct(t.t); });
+    // grid lines live in `grid`, after the now line
+    const lines = ticks.map((t) => ({ k: `g${t.t}`, t: t.t }));
+    for (const el of Array.from(grid.children)) if (el !== nowLine && !lines.some((l) => l.k === el.__k)) el.remove();
+    for (const l of lines) {
+      let el = Array.from(grid.children).find((c) => c.__k === l.k);
+      if (!el) { el = h('i', { class: 'th-gridline' }); el.__k = l.k; grid.insertBefore(el, nowLine); }
+      el.style.left = pct(l.t);
+    }
+    nowLine.style.left = pct(Date.now());
+    axisNow.style.left = pct(Date.now());
+    nowLine.hidden = axisNow.hidden = !hasLive;
+  }
+
+  /* ---------- virtual window ---------- */
+  let pinEl = null;
+  function renderWindow(force) {
+    const st = scroller.scrollTop, vh = scroller.clientHeight || 640;
+    const lo = st - BUF, hi = st + vh + BUF;
+    let a = 0, b = items.length;
+    while (a < b) { const m = (a + b) >> 1; if (items[m].y + items[m].h < lo) a = m + 1; else b = m; }
+    const vis = [];
+    for (let i = a; i < items.length && items[i].y <= hi; i++) vis.push(items[i]);
+    reconcile(vp, vis, (it) => it.key, createRow, (el, it) => {
+      if (el.__d === it && el.__mv === modelVer && !force) return;
+      el.__mv = modelVer;
+      updateRow(el, it);
+    });
+    paintPinned(st);
+    scroller.dataset.rows = String(vp.children.length);
+  }
+
+  function paintPinned(st) {
+    const inset = topInset();
+    let cur = null, next = null;
+    for (let i = 0; i < lanes.length; i++) {
+      if (lanes[i].y <= st + inset) { cur = lanes[i]; next = lanes[i + 1] || null; } else break;
+    }
+    if (!cur || st + inset <= cur.y + 1) { pinHost.hidden = true; return; }
+    pinHost.hidden = false;
+    if (!pinEl) { pinEl = createRow(cur); pinHost.appendChild(pinEl); }
+    pinEl.__d = null;
+    updateRow(pinEl, cur);
+    pinEl.style.transform = 'none';
+    pinEl.classList.add('pinned');
+    let ty = 0;
+    if (next) ty = Math.min(0, next.y - (st + inset) - cur.h);
+    pinHost.style.top = `${inset}px`;
+    pinHost.style.height = `${cur.h}px`;
+    pinHost.style.transform = `translateY(${ty}px)`;
+  }
+
+  /* ---------- row construction ---------- */
+  const mode = () => prefs.view;
+  function createRow(it) {
+    const el = it.kind === 'lane' ? createLane() : it.kind === 'agent' ? (mode() === 'tree' ? createTreeAgent() : createTlAgent()) : createLabelRow(it.kind);
+    el.id = `thr-${++rid}`;
+    el.setAttribute('role', 'treeitem');
+    return el;
+  }
+
+  function createLane() {
+    const r = {};
+    r.tog = h('span', { class: 'th-tog', 'aria-hidden': 'true' }, icon('chevronDown', 14));
+    r.dot = h('span', { class: 'pdot' });
+    r.title = h('span', { class: 'th-lane-title' });
+    r.badge = modelBadge('');
+    r.meta = h('span', { class: 'th-lane-meta mono' });
+    const el = h('div', { class: 'th-row th-lane' }, h('span', { class: 'th-node', 'aria-hidden': 'true' }), h('div', { class: 'th-lane-body' }, r.tog, r.dot, r.title, r.badge, r.meta));
+    el.__r = r;
+    return el;
+  }
+
+  function createLabelRow(kind) {
+    const r = {};
+    r.tog = h('span', { class: 'th-tog', 'aria-hidden': 'true' }, icon('chevronDown', 14));
+    r.label = h('span', { class: 'th-label' });
+    r.count = h('span', { class: 'th-count mono' });
+    r.span = h('i', { class: 'th-gspan' });
+    const el = h('div', { class: `th-row th-${kind}` }, h('span', { class: 'th-mark', 'aria-hidden': 'true' }),
+      h('div', { class: 'th-lbl-body' }, r.tog, r.label, r.count), h('span', { class: 'th-plot' }, r.span));
+    el.__r = r;
+    return el;
+  }
+
+  function createTreeAgent() {
+    const r = {};
+    r.guides = h('span', { class: 'th-guides', 'aria-hidden': 'true' });
+    r.dot = h('span', { class: 'th-dot', 'aria-hidden': 'true' });
+    r.title = h('span', { class: 'th-title' });
+    r.kids = h('button', { class: 'th-kids mono', type: 'button', tabindex: '-1' });
+    r.badge = modelBadge('');
+    r.desc = h('span', { class: 'th-desc' });
+    r.type = h('span', { class: 'th-type mono' });
+    r.tools = h('span', { class: 'th-tools mono' });
+    r.dur = h('span', { class: 'th-dur mono' });
+    r.ago = h('span', { class: 'th-ago mono' });
+    r.chip = h('span', { class: 'th-chipslot' });
+    r.now = nowDoingLine();
+    r.now.classList.add('th-now');
+    const l1 = h('span', { class: 'th-l1' }, r.dot, r.title, r.kids, r.badge);
+    const meta = h('span', { class: 'th-meta' }, r.type, r.tools, r.dur, r.ago, r.chip);
+    const el = h('div', { class: 'th-row th-agent' }, r.guides, h('div', { class: 'th-body' }, l1, r.desc, meta, r.now));
+    el.__r = r;
+    return el;
+  }
+
+  function createTlAgent() {
+    const r = {};
+    r.dot = h('span', { class: 'th-dot', 'aria-hidden': 'true' });
+    r.title = h('span', { class: 'th-title' });
+    r.dur = h('span', { class: 'th-dur mono' });
+    r.bar = h('i', { class: 'th-bar' });
+    const el = h('div', { class: 'th-row th-agent th-tl' },
+      h('div', { class: 'th-tl-label' }, r.dot, r.title, r.dur), h('span', { class: 'th-plot' }, r.bar));
+    el.__r = r;
+    return el;
+  }
+
+  /* ---------- row updates ---------- */
+  const isSelected = (it) => (it.kind === 'agent' ? akey(it.a) === selKey && it.a.sessionId === sid : it.kind === 'lane' ? selKey === 'main' && it.sid === sid : false);
+  const pctOf = (t) => ((t - scale.t0) / scale.span) * 100;
+
+  function updateRow(el, it) {
+    el.__d = it;
+    const r = el.__r;
+    if (!el.classList.contains('pinned')) {
+      el.style.transform = `translateY(${it.y}px)`;
+    }
+    const hpx = `${it.h}px`;
+    if (el.style.height !== hpx) el.style.height = hpx;
+    el.setAttribute('aria-level', String(it.kind === 'agent' ? it.depth + 2 : it.kind === 'lane' ? 1 : 2));
+    if (it.kind === 'lane') updateLane(el, r, it);
+    else if (it.kind === 'agent') (mode() === 'tree' ? updateTreeAgent : updateTlAgent)(el, r, it);
+    else updateLabel(el, r, it);
+    paintState(el);
+  }
+
+  function paintState(el) {
+    const it = el.__d;
+    if (!it) return;
+    setClass(el, 'selected', isSelected(it));
+    setClass(el, 'cursor', cursorKey === it.key);
+    el.setAttribute('aria-selected', String(isSelected(it)));
+  }
+  function paintAllStates() {
+    for (const el of vp.children) paintState(el);
+    if (pinEl && !pinHost.hidden) paintState(pinEl);
+    const cur = cursorKey && vp.__keyed && vp.__keyed.get(cursorKey);
+    if (cur) scroller.setAttribute('aria-activedescendant', cur.id); else scroller.removeAttribute('aria-activedescendant');
+  }
+
+  function updateLane(el, r, it) {
+    const ses = state.sessions.get(it.sid);
+    if (!ses) return;
+    el.className = `th-row th-lane st-${ses.status}${el.classList.contains('pinned') ? ' pinned' : ''}`;
+    setClass(el, 'folded', !it.open);
+    r.dot.className = `pdot ${ses.status}`;
+    setText(r.title, ses.title || cwdTail(ses.cwd) || ses.id);
+    updateModelBadge(r.badge, ses.model);
+    const live = it.lane.shown.filter(isLive).length;
+    setText(r.meta, `${sel.projectName(ses.projectId)} · ${cwdTail(ses.cwd, 2)} · ${plural(it.lane.all, 'agent')}${live ? ` · ${live} live` : ''}`);
+    el.setAttribute('aria-expanded', String(it.open));
+    el.setAttribute('aria-label', `Session ${ses.title || ses.id}, ${ses.status}`);
+  }
+
+  function updateLabel(el, r, it) {
+    const toggle = it.kind === 'group' || it.toggle;
+    const cls = `th-row th-${it.kind}${it.tone ? ` tone-${it.tone}` : ''}${toggle ? ' foldable' : ''}`;
+    if (el.className.split(' ').filter((c) => !['selected', 'cursor'].includes(c)).join(' ') !== cls) el.className = cls;
+    setHidden(r.tog, !toggle);
+    setClass(el, 'folded', toggle && !it.open);
+    if (it.kind === 'hint') { setText(r.label, it.text); setText(r.count, ''); el.removeAttribute('aria-expanded'); return; }
+    if (it.kind === 'section' && it.toggle && !it.open) setText(r.label, `${it.label} (${it.count})`);
+    else setText(r.label, it.kind === 'group' ? `${it.label} · ${plural(it.count, 'agent')}` : it.label);
+    setText(r.count, it.kind === 'section' && !(it.toggle && !it.open) ? String(it.count) : '');
+    if (toggle) el.setAttribute('aria-expanded', String(it.open)); else el.removeAttribute('aria-expanded');
+    if (mode() === 'timeline' && it.kind === 'group') {
+      r.span.hidden = false;
+      r.span.style.left = `${pctOf(it.min)}%`;
+      r.span.style.width = `${Math.max(0.2, pctOf(it.max) - pctOf(it.min))}%`;
+    } else r.span.hidden = true;
+  }
+
+  function paintGuides(r, it) {
+    const sig = `${it.depth}|${it.cont.map((c) => (c ? 1 : 0)).join('')}|${it.last ? 1 : 0}|${it.tail ? 1 : 0}`;
+    if (r.gsig === sig) return;
+    r.gsig = sig;
+    r.guides.textContent = '';
+    const d = it.depth;
+    for (let j = 0; j <= d; j++) {
+      let full, half = false;
+      if (j === 0) { full = true; half = d === 0 && it.tail; } // the session trunk
+      else if (j < d) full = !!it.cont[j];
+      else { full = !it.last; half = it.last; }
+      if (!full && !half) continue;
+      const v = h('i', { class: `gv${half ? ' half' : ''}` });
+      v.style.left = `${X(j)}px`;
+      r.guides.appendChild(v);
+    }
+    const br = h('i', { class: 'gh' });
+    br.style.left = `${X(d)}px`;
+    r.guides.appendChild(br);
+  }
+
+  function chipFor(r, a) {
+    const k = a.taskId ? `${a.taskId}|${state.tasks.has(a.taskId) ? 1 : 0}` : '';
+    if (r.chipKey === k) return;
+    r.chipKey = k;
+    r.chip.textContent = '';
+    const c = a.taskId ? taskChip(a.taskId) : null;
+    if (c) { c.tabIndex = -1; r.chip.appendChild(c); }
+  }
+
+  function updateTreeAgent(el, r, it) {
+    const a = it.a;
+    const live = isLive(a);
+    const title = agentTitle(a);
+    const cls = `th-row th-agent st-${a.status}${live ? ' live' : ''}${a.status === 'running' || a.status === 'waiting' ? ' pulse' : ''}`;
+    if (el.__cls !== cls) { el.__cls = cls; el.className = cls; }
+    el.style.setProperty('--x', `${X(it.depth)}px`);
+    paintGuides(r, it);
+    setText(r.title, title);
+    el.title = a.description && a.description !== title ? a.description : '';
+    const showDesc = a.description && a.description !== title;
+    setText(r.desc, showDesc ? a.description : '');
+    updateModelBadge(r.badge, a.model);
+    setText(r.type, agentLabel(a));
+    r.type.title = a.subagentType || 'agent';
+    setText(r.tools, `${a.toolCount} tool${a.toolCount === 1 ? '' : 's'}`);
+    setHidden(r.kids, !it.nkids);
+    if (it.nkids) {
+      setText(r.kids, `${it.open ? '▾' : '▸'} ${it.open ? it.nkids : it.hidden}`);
+      r.kids.title = it.open ? `Fold ${plural(it.nkids, 'sub-agent')}` : `Unfold ${plural(it.hidden, 'sub-agent')}`;
+      r.kids.setAttribute('aria-expanded', String(it.open));
+    }
+    el.setAttribute('aria-expanded', it.nkids ? String(it.open) : '');
+    if (!it.nkids) el.removeAttribute('aria-expanded');
+    chipFor(r, a);
+    setHidden(r.now, !live);
+    if (live) r.now.__set(a.nowDoing, a.status === 'running');
+    el.setAttribute('aria-label', `${agentLabel(a)} ${AGENT_STATUS[a.status] || a.status}: ${title}`);
+    paintTimes(el);
+  }
+
+  function paintTimes(el) {
+    const it = el.__d;
+    if (!it || it.kind !== 'agent') return;
+    const r = el.__r, a = it.a, now = Date.now();
+    setText(r.dur, fmtDur(endOf(a, now) - a.startedAt));
+    if (r.ago) {
+      setText(r.ago, fmtAgo(isLive(a) ? a.startedAt : (a.endedAt || a.lastActivityAt), now));
+      r.ago.title = `${isLive(a) ? 'Started' : 'Ended'} ${new Date(isLive(a) ? a.startedAt : (a.endedAt || a.lastActivityAt)).toLocaleString()}`;
+    }
+  }
+
+  function updateTlAgent(el, r, it) {
+    const a = it.a, now = Date.now();
+    const live = isLive(a);
+    const cls = `th-row th-agent th-tl st-${a.status}${live ? ' live' : ''}`;
+    if (el.__cls !== cls) { el.__cls = cls; el.className = cls; }
+    setText(r.title, agentTitle(a));
+    r.title.style.paddingLeft = `${it.depth * 12}px`;
+    const end = endOf(a, now);
+    setText(r.dur, fmtDur(end - a.startedAt));
+    r.bar.style.left = `${pctOf(a.startedAt).toFixed(3)}%`;
+    r.bar.style.width = `${Math.max(0, ((end - a.startedAt) / scale.span) * 100).toFixed(3)}%`;
+    el.setAttribute('aria-label', `${agentLabel(a)} ${AGENT_STATUS[a.status] || a.status}: ${agentTitle(a)}, ${fmtDur(end - a.startedAt)}`);
+  }
+
+  /* ---------- interaction ---------- */
+  function activate(it) {
+    if (!it) return;
+    cursorKey = it.key;
+    if (it.kind === 'agent') { selKey = akey(it.a); setArgs([it.a.sessionId, it.a.id]); paintAllStates(); }
+    else if (it.kind === 'lane') { selKey = 'main'; setArgs([it.sid]); paintAllStates(); }
+    else if (it.kind === 'group' || (it.kind === 'section' && it.toggle)) toggleKey(it.key, it.open);
+  }
+  const onRowClick = (e) => {
+    const el = e.target.closest('.th-row');
+    if (!el || !el.__d) return;
+    const it = el.__d;
+    if (el.classList.contains('pinned') && it.kind === 'lane') { activate(it); return; }
+    if (it.kind === 'agent' && e.target.closest('.th-kids')) { cursorKey = it.key; toggleKey(it.key, it.open); return; }
+    if (it.kind === 'lane' && e.target.closest('.th-tog')) { cursorKey = it.key; toggleKey(it.key, it.open); return; }
+    scroller.focus({ preventScroll: true });
+    activate(it);
+  };
+  vp.addEventListener('click', onRowClick);
+  pinHost.addEventListener('click', onRowClick);
+
+  // tooltip (timeline)
+  const showTip = (e) => {
+    if (prefs.view !== 'timeline') { tip.hidden = true; return; }
+    const el = e.target.closest && e.target.closest('.th-row.th-agent');
+    if (!el || !el.__d) { tip.hidden = true; return; }
+    const a = el.__d.a, now = Date.now(), end = endOf(a, now);
+    tip.textContent = '';
+    tip.append(
+      h('div', { class: 'th-tip-title' }, truncate(agentTitle(a), 90)),
+      h('div', {}, `${AGENT_STATUS[a.status] || a.status} · ${modelInfo(a.model).label} · ${agentLabel(a)}`),
+      h('div', {}, `${fmtClockSec(a.startedAt)} → ${isLive(a) ? 'now' : fmtClockSec(end)} · ${fmtDur(end - a.startedAt)}`),
+      h('div', {}, `${plural(a.toolCount, 'tool')}${a.taskId ? ` · ${a.taskId}` : ''}`));
+    tip.hidden = false;
+    const pr = listPane.getBoundingClientRect();
+    const w = tip.offsetWidth || 260, hh = tip.offsetHeight || 80;
+    let x = e.clientX - pr.left + 14, y = e.clientY - pr.top + 16;
+    if (x + w > pr.width - 8) x = Math.max(8, e.clientX - pr.left - w - 14);
+    if (y + hh > pr.height - 8) y = Math.max(8, e.clientY - pr.top - hh - 12);
+    tip.style.left = `${x}px`; tip.style.top = `${y}px`;
+  };
+  vp.addEventListener('mousemove', showTip);
+  vp.addEventListener('mouseleave', () => { tip.hidden = true; });
+  function fmtClockSec(t) { const d = new Date(t); return `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`; }
+
+  // keyboard: Up/Down move, Enter opens, Left/Right fold
+  const navItems = () => items.filter((it) => it.kind === 'agent' || it.kind === 'group' || it.kind === 'lane' || (it.kind === 'section' && it.toggle));
+  function ensureVisible(it) {
+    const vh = scroller.clientHeight || 640, inset = topInset() + (lanes.length ? lanes[0].h : 0);
+    if (it.y < scroller.scrollTop + inset) scroller.scrollTop = Math.max(0, it.y - inset);
+    else if (it.y + it.h > scroller.scrollTop + vh) scroller.scrollTop = it.y + it.h - vh + 8;
+  }
+  function moveCursor(it) {
+    if (!it) return;
+    cursorKey = it.key;
+    ensureVisible(it);
+    renderWindow(false);
+    paintAllStates();
+  }
+  const currentItem = () => items.find((it) => it.key === cursorKey) || items.find((it) => isSelected(it)) || null;
+  scroller.addEventListener('keydown', (e) => {
+    if (e.target !== scroller || e.metaKey || e.ctrlKey || e.altKey) return;
+    const nav = navItems();
+    if (!nav.length) return;
+    const cur = currentItem();
+    let i = cur ? nav.indexOf(cur) : -1;
+    switch (e.key) {
+      case 'ArrowDown': e.preventDefault(); moveCursor(nav[Math.min(nav.length - 1, i + 1)]); break;
+      case 'ArrowUp': e.preventDefault(); moveCursor(nav[Math.max(0, i < 0 ? 0 : i - 1)]); break;
+      case 'Home': e.preventDefault(); moveCursor(nav[0]); break;
+      case 'End': e.preventDefault(); moveCursor(nav[nav.length - 1]); break;
+      case 'Enter': case ' ': if (cur) { e.preventDefault(); activate(cur); } break;
+      case 'ArrowLeft': {
+        if (!cur) break;
+        e.preventDefault();
+        if ((cur.kind === 'group' || cur.kind === 'lane' || (cur.kind === 'section' && cur.toggle) || (cur.kind === 'agent' && cur.nkids)) && cur.open) { toggleKey(cur.key, true); break; }
+        // already folded (or a leaf): jump to the enclosing group / parent / lane
+        const idx = items.indexOf(cur);
+        for (let k = idx - 1; k >= 0; k--) {
+          const p = items[k];
+          if ((cur.kind === 'agent' && p.kind === 'agent' && p.depth < cur.depth) || (p.kind === 'group') || (p.kind === 'section' && p.toggle) || p.kind === 'lane') { if (p.kind === 'lane' && cur.kind === 'lane') break; moveCursor(p); break; }
+        }
+        break;
       }
+      case 'ArrowRight': {
+        if (!cur) break;
+        e.preventDefault();
+        if ((cur.kind === 'group' || cur.kind === 'lane' || (cur.kind === 'section' && cur.toggle) || (cur.kind === 'agent' && cur.nkids)) && !cur.open) { toggleKey(cur.key, false); break; }
+        const nxt = nav[i + 1];
+        if (nxt && cur.kind !== 'agent') moveCursor(nxt);
+        else if (nxt && cur.kind === 'agent' && cur.nkids && nxt.kind === 'agent' && nxt.depth > cur.depth) moveCursor(nxt);
+        break;
+      }
+      default:
     }
+  });
+  scroller.addEventListener('focus', () => { if (!cursorKey) { const c = currentItem() || navItems()[0]; if (c) { cursorKey = c.key; paintAllStates(); } } });
+  const onDocKey = (e) => {
+    if (e.key !== '/' || e.metaKey || e.ctrlKey || e.altKey || !root.isConnected) return;
+    const t = e.target;
+    if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return;
+    e.preventDefault();
+    search.focus();
+    search.select();
+  };
+  document.addEventListener('keydown', onDocKey);
+
+  /** Make sure the agent's row exists (unfold its hour / lane / parents) and is in view. */
+  function revealAgent(a) {
+    const g = `g:${a.sessionId}:`;
+    if (!isLive(a)) {
+      let root0 = a, hops = 0;
+      while (root0.parentId && state.agents.has(root0.parentId) && hops++ < 50) { const p = state.agents.get(root0.parentId); if (p.sessionId !== a.sessionId) break; openOv.set(`a:${akey(p)}`, true); root0 = p; }
+      const t = root0.startedAt;
+      if (root0.startedAt >= startOfDay(Date.now())) openOv.set(`${g}${startOfHour(t)}`, true);
+      else { openOv.set(`e:${a.sessionId}`, true); openOv.set(`${g}d${startOfDay(t)}`, true); }
+    }
+    openOv.set(`l:${a.sessionId}`, true);
+    pendingReveal = akey(a);
+  }
+  let pendingReveal = null;
+  function doReveal() {
+    if (!pendingReveal) return;
+    const it = items.find((x) => x.kind === 'agent' && akey(x.a) === pendingReveal);
+    pendingReveal = null;
+    if (!it) return;
+    cursorKey = it.key;
+    ensureVisible(it);
+    renderWindow(false);
+  }
+
+  /* ---------- scroll / resize / clock ---------- */
+  const raf = (fn) => (typeof requestAnimationFrame === 'function' ? requestAnimationFrame(fn) : setTimeout(fn, 16));
+  let framePending = false;
+  const schedule = () => {
+    if (framePending) return;
+    framePending = true;
+    raf(() => { framePending = false; renderWindow(false); });
+  };
+  scroller.addEventListener('scroll', schedule, { passive: true });
+  let lastW = 0;
+  const onResize = () => {
+    raf(() => {
+      const w = scroller.clientWidth;
+      if (prefs.view === 'timeline' && w !== lastW) { lastW = w; paintGridChrome(); }
+      renderWindow(false);
+    });
+  };
+  window.addEventListener('resize', onResize);
+  let ro = null;
+  if (typeof ResizeObserver === 'function') { ro = new ResizeObserver(onResize); ro.observe(scroller); }
+  const clock = setInterval(() => {
+    if (document.hidden) return;
+    if (prefs.view === 'timeline') {
+      if (hasLive) {
+        const now = Date.now();
+        scale.t1 = Math.max(scale.t1, now + scale.span * 0.02);
+        scale.span = scale.t1 - scale.t0;
+        paintGridChrome();
+        renderWindow(true);
+      }
+    } else for (const el of vp.children) paintTimes(el);
+  }, 1000);
+
+  /* ---------- live pings ---------- */
+  function pulse(a) {
+    if (!sid || !vp.__keyed || reducedMotion() || prefs.view !== 'tree') return;
+    let key = null;
+    if (a.agentId) { const ag = state.agents.get(a.agentId); if (ag) key = `a:${akey(ag)}`; }
+    const el = key && vp.__keyed.get(key);
+    if (!el) return;
+    el.classList.remove('ping'); void el.offsetWidth; el.classList.add('ping');
+    setTimeout(() => el.classList.remove('ping'), 700);
   }
   const offActivity = onActivity(pulse);
 
@@ -369,28 +1048,28 @@ export function mount(container) {
     setHidden(bar, none);
     setHidden(main, none);
     if (none || !sid) { if (insp) { insp.destroy(); insp = null; inspector.textContent = ''; } return; }
-    // picker
+    // picker: "All sessions" + each session
     const sig = list.map((x) => `${x.id}|${x.title}|${x.status}`).join(';');
     if (picker.__sig !== sig) {
       picker.__sig = sig;
       picker.textContent = '';
+      picker.appendChild(h('option', { value: 'all' }, `All sessions  ·  ${list.length}`));
       for (const x of list) {
         picker.appendChild(h('option', { value: x.id }, `${x.title || cwdTail(x.cwd) || x.id}  ·  ${x.status}`));
       }
     }
-    if (picker.value !== sid && document.activeElement !== picker) picker.value = sid;
-    const ses = state.sessions.get(sid);
-    if (ses) {
-      sessMeta.textContent = '';
-      sessMeta.append(h('span', {}, sel.projectName(ses.projectId)), h('span', {}, cwdTail(ses.cwd, 3)),
-        h('span', {}, `${sel.agentsOfSession(sid).length} agents`));
-    }
-    renderGraph();
+    const want = prefs.scopeAll ? 'all' : sid;
+    if (picker.value !== want && document.activeElement !== picker) picker.value = want;
+    rebuild();
+    doReveal();
+    paintAllStates();
     if (selectionChanged || !insp || (insp.key !== selKey)) {
       buildInspector();
       if (insp) insp.key = selKey;
     } else insp.update();
   }
+
+  const renderSoon = frameBatch(() => renderAll(selKey !== 'main' && !resolveAgent()));
 
   function onStore(changed) {
     if (!sid && state.ready) { applyRoute(lastRoute); return; }
@@ -401,8 +1080,7 @@ export function mount(container) {
       if (insp) insp.update();
       return;
     }
-    // if the selected agent was renamed/removed, fall back
-    renderAll(selKey !== 'main' && !resolveAgent());
+    renderSoon();
   }
 
   let lastRoute = { args: [] };
@@ -410,6 +1088,10 @@ export function mount(container) {
     watch: ['session', 'agent', 'task', 'project', 'activity', 'ui', 'ready', 'question'],
     update: onStore,
     setRoute(r) { lastRoute = r; applyRoute(r); },
-    destroy() { offActivity(); if (insp) insp.destroy(); root.remove(); },
+    destroy() {
+      offActivity(); clearInterval(clock); document.removeEventListener('keydown', onDocKey);
+      window.removeEventListener('resize', onResize); if (ro) ro.disconnect();
+      if (insp) insp.destroy(); root.remove();
+    },
   };
 }

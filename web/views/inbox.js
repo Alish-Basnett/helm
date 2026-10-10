@@ -32,7 +32,12 @@ export function mount(container) {
     iconName: 'inbox', title: 'Inbox is empty',
     body: 'Questions from your agents show up here — either something they asked you, or an agent that is waiting for input.',
   }));
+  const choiceList = h('div', { class: 'q-list choices-waiting', role: 'list', 'aria-label': 'Choices waiting' });
+  const choiceCount = h('span', { class: 'panel-count mono' });
+  const choiceWrap = h('section', { class: 'q-section', 'aria-label': 'Choices waiting', hidden: true },
+    h('h2', { class: 'section-title' }, icon('checklist', 14), 'Choices waiting', choiceCount), choiceList);
   const root = h('div', { class: 'inbox' },
+    choiceWrap,
     h('section', { class: 'q-section' }, h('h2', { class: 'section-title' }, icon('inbox', 14), 'Needs you', openCount), openList, clear),
     answeredWrap, empty);
   container.appendChild(root);
@@ -67,6 +72,31 @@ export function mount(container) {
     r.dismiss.addEventListener('click', () => dismissQuestion(el.__q.id));
     r.reply.addEventListener('click', () => togglePanel(el));
     return el;
+  }
+
+  /* ---------- v0.6: tasks whose agent proposed choices (derived from Task.choices, not a question row) ---------- */
+  function makeChoiceRow(t) {
+    const r = {};
+    r.text = h('div', { class: 'q-text' });
+    r.meta = h('div', { class: 'q-meta' });
+    r.open = h('button', { class: 'btn btn-accent btn-sm', type: 'button' }, icon('checklist', 14), 'Review choices');
+    const el = h('article', { class: 'q-row k-choices', role: 'listitem', 'data-task': t.id },
+      h('span', { class: 'q-kind' }, icon('checklist', 18)),
+      h('div', { class: 'q-main' }, h('div', { class: 'q-head' }, h('span', { class: 'q-label mono' }, 'Choices'), (r.age = h('span', { class: 'q-age mono' }))), r.text, r.meta,
+        h('div', { class: 'q-actions' }, r.open)));
+    el.__r = r;
+    r.open.addEventListener('click', () => openTask(el.__t.id));
+    return el;
+  }
+  function updateChoiceRow(el, t) {
+    const r = el.__r;
+    el.__t = t;
+    const n = sel.openChoiceCount(t);
+    setText(r.text, `${t.title}`);
+    setText(r.meta, `${t.id} · ${n} ${n === 1 ? 'suggestion' : 'suggestions'} to tick${state.ui.projectId === 'all' && state.projects.size > 1 ? ' · ' + sel.projectName(t.projectId) : ''}`);
+    r.age.setAttribute('data-ago', t.updatedAt);
+    setText(r.age, fmtAgo(t.updatedAt));
+    r.open.setAttribute('aria-label', `Review ${n} choices on ${t.id}`);
   }
 
   function target(q) { return q.taskId && state.tasks.has(q.taskId) ? { kind: 'task', id: q.taskId } : { kind: 'session', id: q.sessionId }; }
@@ -126,6 +156,10 @@ export function mount(container) {
   function render() {
     const open = sel.openQuestions();
     const answered = sel.answeredQuestions();
+    const choices = sel.choiceTasks();
+    reconcile(choiceList, choices, (t) => t.id, makeChoiceRow, updateChoiceRow);
+    setHidden(choiceWrap, choices.length === 0);
+    setText(choiceCount, choices.length ? String(choices.length) : '');
     reconcile(openList, open, (q) => q.id, makeRow, updateRow);
     reconcile(answeredList, answered, (q) => q.id, makeRow, updateRow);
     // free panels whose row has gone
@@ -138,8 +172,8 @@ export function mount(container) {
     setHidden(answeredList, !answeredOpen);
     setClass(answeredWrap, 'open', answeredOpen);
     answeredToggle.setAttribute('aria-expanded', String(answeredOpen));
-    setHidden(empty, !(state.ready && open.length === 0 && answered.length === 0));
-    setHidden(clear, !(state.ready && open.length === 0 && answered.length > 0));
+    setHidden(empty, !(state.ready && open.length === 0 && answered.length === 0 && choices.length === 0));
+    setHidden(clear, !(state.ready && open.length === 0 && answered.length > 0 && choices.length === 0));
   }
 
   function focusRow(id) {

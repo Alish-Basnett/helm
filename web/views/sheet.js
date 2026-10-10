@@ -14,6 +14,7 @@ import { panelClose } from '../dock.js';
 import { createReplay } from '../replay.js';
 import { createExplain } from '../explain.js';
 import { openTask, closeTask, navigate, route } from '../router.js';
+import { createChoices } from '../choices.js';
 
 const AGENT_STATUS = { running: 'Running', done: 'Done', failed: 'Failed', stalled: 'Stalled', waiting: 'Waiting for you' };
 
@@ -72,6 +73,8 @@ export function createSheet(dock) {
       h('div', { class: 'agent-top' }, c.avatar,
         h('div', { class: 'agent-id' }, h('div', { class: 'agent-line' }, c.agentName, c.agentModel), c.agentStatus), c.agentOpen),
       c.nd, c.agentMeta);
+    // v0.6 choices: the first thing on the card when an agent proposed options
+    c.choices = createChoices({ getTask: () => state.tasks.get(id) || null });
     // description
     c.desc = h('div', { class: 'desc-text', tabindex: '0', role: 'button', 'aria-label': 'Edit description', onclick: () => editDesc(), onkeydown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); editDesc(); } } });
     c.descWrap = h('section', { class: 'sheet-section' }, h('h3', { class: 'section-title' }, 'Description', h('button', { class: 'icon-btn sm', type: 'button', 'aria-label': 'Edit description', onclick: () => editDesc() }, icon('pencil', 14))), c.desc);
@@ -111,7 +114,7 @@ export function createSheet(dock) {
       h('div', { class: 'sheet-head-top' }, c.id, c.pill, h('span', { class: 'spacer' }), c.startBtn, c.chatBtn, c.close),
       c.title);
     const body = h('div', { class: 'sheet-body' },
-      c.blocked, c.startStatus.el,
+      c.choices.el, c.blocked, c.startStatus.el,
       h('section', { class: 'sheet-section status-row' }, h('label', { class: 'field-label' }, 'Status', c.select), c.quick),
       c.agentWrap, c.conflictsWrap, c.descWrap, c.recapWrap, c.files.el, c.depsWrap, c.tlWrap);
     sheet.append(head, body);
@@ -209,6 +212,8 @@ export function createSheet(dock) {
       setText(c.agentName, t.agentId);
       c.nd.__set('', false);
     }
+
+    c.choices.update();
 
     // description
     const d = (t.description || '').trim();

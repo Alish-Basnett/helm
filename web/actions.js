@@ -257,6 +257,42 @@ export async function startTask(id) {
   }
 }
 
+/* ---------- v0.6: Choices ---------- */
+/** Create (and optionally start) a task per picked choice. Returns { tasks, choices, errors } or null. */
+export async function applyChoices(taskId, picked, start) {
+  if (!picked.length) return null;
+  try {
+    const res = await api.applyChoices(taskId, picked, start);
+    (res.tasks || []).forEach((t) => upsert('task', t));
+    const parent = state.tasks.get(taskId);
+    if (parent && res.choices) upsert('task', { ...parent, choices: res.choices });
+    const n = (res.tasks || []).length;
+    const errs = res.errors || [];
+    if (errs.length) {
+      toast(`Created ${n} task${n === 1 ? '' : 's'}; ${errs.length} not started: ${startErrorMessage({ status: errs[0].status, message: errs[0].error })}`, { kind: 'error' });
+    } else {
+      toast(start ? `Created and started ${n} task${n === 1 ? '' : 's'}` : `Created ${n} task${n === 1 ? '' : 's'}`, { kind: 'success' });
+    }
+    return res;
+  } catch (e) {
+    toastError(e, 'Could not apply choices');
+    return null;
+  }
+}
+
+export async function resetChoices(taskId) {
+  try {
+    const res = await api.resetChoices(taskId);
+    const parent = state.tasks.get(taskId);
+    if (res && res.task) upsert('task', res.task);
+    else if (parent && res && res.choices) upsert('task', { ...parent, choices: res.choices });
+    return res;
+  } catch (e) {
+    toastError(e, 'Could not reset choices');
+    return null;
+  }
+}
+
 /* ---------- card actions (shared by board, sheet, spotlight) ---------- */
 export function quickActions(task) {
   const out = [];

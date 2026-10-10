@@ -118,6 +118,17 @@ export function seed(hub, log) {
     'Table renders every row. Window it to the visible range and keep keyboard navigation working.', 'backlog', { min: 164 });
   mk('csv', 'P2', 'Add CSV export to usage chart',
     'Export the series currently on screen, respecting the selected date range.', 'later', { min: 164 });
+  // v0.6: a planning task whose agent proposed six screens; the card shows them as a tick-to-run checklist.
+  mk('plan', 'P2', 'Plan the new dashboard screens',
+    'Propose the extra screens Orbit needs. Tick the ones you want and Helm creates and starts a task for each.', 'next', { min: 163 });
+  atMin(162, () => emit(SESS_B, 'task.choices', { taskId: ids.plan, choices: [
+    { id: 'overview', title: 'Overview screen with the five headline KPIs', detail: 'One glanceable page: active users, error rate, p95 latency, spend and uptime, each with a sparkline and a delta against last week.', effort: 'M', value: 'high' },
+    { id: 'alerts', title: 'Alerts inbox', detail: 'List fired alerts with severity, snooze and acknowledge. Links through to the chart that triggered it.', effort: 'M', value: 'high' },
+    { id: 'compare', title: 'Compare two date ranges side by side', detail: 'Pick range A and B and overlay the series with a shared axis.', effort: 'L', value: 'medium' },
+    { id: 'share', title: 'Shareable read-only dashboard links', detail: 'Signed URLs with an expiry that render a frozen snapshot of the current view.', effort: 'S', value: 'medium' },
+    { id: 'empty', title: 'Empty and first-run states', detail: 'Friendly zero-data screens that explain how to connect a source.', effort: 'S', value: 'low' },
+    { id: 'settings', title: 'Workspace settings page', detail: 'Members, API keys and billing in one tabbed screen.', effort: 'L', value: 'low' },
+  ] }));
 
   // -------------------------------------------------------------------- main-session activity
   const mainTool = (sid, minAgo, tool, called, finished, ok = true) => {

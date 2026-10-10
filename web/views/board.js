@@ -147,10 +147,12 @@ export function mount(container) {
     r.files = h('span', { class: 'meta-item' }, icon('file', 13), h('span', { class: 'mono' }));
     r.dep = h('span', { class: 'dep-badge mono' }, icon('link', 12), h('span', {}));
     r.meta = h('div', { class: 'card-meta' }, r.elapsed, r.tokens, r.files, r.dep);
+    r.choices = h('button', { class: 'choices-chip', type: 'button', hidden: true }, h('span', { 'aria-hidden': 'true' }, '◆'), h('span', {}));
+    r.choices.addEventListener('click', (e) => { e.stopPropagation(); openTask(r.choices.__task); });
     r.start = createStartStatus();
     r.actions = h('div', { class: 'card-actions' });
     const el = h('article', { class: 'card', tabindex: '0', draggable: 'true', 'data-id': t.id, role: 'group' },
-      r.actions, r.title, h('div', { class: 'card-sub' }, r.id, r.proj, r.conflict), r.agent, r.blocked, r.start.el, r.meta);
+      r.actions, r.title, h('div', { class: 'card-sub' }, r.id, r.proj, r.conflict, r.choices), r.agent, r.blocked, r.start.el, r.meta);
     el.__r = r;
     el.addEventListener('click', (e) => { if (!e.target.closest('.card-actions') && !el.__task.__pending) openTask(el.__task.id); });
     el.addEventListener('focus', () => { if (state.ui.selectedTaskId !== el.__task.id) setUI({ selectedTaskId: el.__task.id }); });
@@ -199,6 +201,14 @@ export function mount(container) {
     if (conflicts.length) {
       setText(r.conflict.lastChild, plural(conflicts.length, 'file'));
       r.conflict.title = conflicts.map((c) => `${c.path} → ${c.otherTaskId || 'another agent'}`).join('\n');
+    }
+    const nChoices = sel.openChoiceCount(t);
+    setHidden(r.choices, nChoices === 0);
+    if (nChoices) {
+      r.choices.__task = t.id;
+      setText(r.choices.lastChild, nChoices === 1 ? '1 choice' : `${nChoices} choices`);
+      r.choices.title = `${nChoices} suggestion${nChoices === 1 ? '' : 's'} waiting for you to tick — open ${t.id}`;
+      r.choices.setAttribute('aria-label', `${nChoices} open choices on ${t.id}. Open to review`);
     }
     const showBlocked = t.status === 'blocked' && !!t.blockedReason;
     setHidden(r.blocked, !showBlocked);

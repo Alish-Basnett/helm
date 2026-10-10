@@ -47,7 +47,8 @@ CREATE TABLE IF NOT EXISTS agents (
   description TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'running',
   started_at INTEGER NOT NULL, ended_at INTEGER, last_activity_at INTEGER NOT NULL,
   now_doing TEXT NOT NULL DEFAULT '', tool_count INTEGER NOT NULL DEFAULT 0, tokens INTEGER NOT NULL DEFAULT 0,
-  git TEXT                                -- v0.5: JSON { cwd, root, base, head, at } from agent.git
+  git TEXT,                               -- v0.5: JSON { cwd, root, base, head, at } from agent.git
+  parent_id TEXT                          -- v0.6: id of the agent that spawned this one (follows renames)
 );
 CREATE INDEX IF NOT EXISTS agents_session ON agents(session_id, status);
 CREATE INDEX IF NOT EXISTS agents_tooluse ON agents(tool_use_id);
@@ -203,6 +204,11 @@ export class Db {
     if (!has('tasks', 'git')) this.raw.exec('ALTER TABLE tasks ADD COLUMN git TEXT');
     if (!has('tasks', 'diff_stat')) this.raw.exec('ALTER TABLE tasks ADD COLUMN diff_stat TEXT');
     if (!has('agents', 'git')) this.raw.exec('ALTER TABLE agents ADD COLUMN git TEXT');
+    // v0.6: subagent nesting. Additive + nullable, so safe on a live database; `helmd --rebuild` back-fills it.
+    if (!has('agents', 'parent_id')) this.raw.exec('ALTER TABLE agents ADD COLUMN parent_id TEXT');
+    // v0.6 (T-21): Choices + task parent link. Additive, defaulted, safe on a live database; `helmd --rebuild` back-fills.
+    if (!has('tasks', 'choices')) this.raw.exec("ALTER TABLE tasks ADD COLUMN choices TEXT NOT NULL DEFAULT '[]'");
+    if (!has('tasks', 'parent_task_id')) this.raw.exec('ALTER TABLE tasks ADD COLUMN parent_task_id TEXT');
   }
   prep(sql) {
     let s = this.cache.get(sql);

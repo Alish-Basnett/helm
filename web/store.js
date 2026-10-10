@@ -66,6 +66,8 @@ export function normalizeRow(entity, row) {
     if (!Array.isArray(row.attachments)) row.attachments = []; // v0.4
   } else if (entity === 'task') {
     if (row.startNoteId === undefined) row.startNoteId = null;
+    if (!Array.isArray(row.choices)) row.choices = []; // v0.6 Choices
+    if (row.parentTaskId === undefined) row.parentTaskId = null;
   }
   return row;
 }
@@ -217,6 +219,15 @@ export const sel = {
     return sel.activityRows((a) => a.sessionId === sid);
   },
   selectedTask() { return state.ui.selectedTaskId ? state.tasks.get(state.ui.selectedTaskId) : null; },
+
+  /* ----- v0.6: choices (tick-to-run checklists) ----- */
+  openChoiceCount(t) { return t && Array.isArray(t.choices) ? t.choices.filter((c) => c.state === 'open').length : 0; },
+  /** Tasks with at least one open choice, newest activity first. */
+  choiceTasks(scoped = true) {
+    return Array.from(state.tasks.values())
+      .filter((t) => !String(t.id).startsWith('tmp-') && sel.openChoiceCount(t) > 0 && (!scoped || sel.inScope(t)))
+      .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+  },
 
   /* ----- v0.2: questions inbox ----- */
   questionProject(q) { const s = state.sessions.get(q.sessionId); return s ? s.projectId : null; },

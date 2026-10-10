@@ -134,7 +134,8 @@ export class Hub {
         if (r.changes === 0) { duplicates++; continue; }
         accepted++;
         const prev = maxSeen.get(ev.sessionId);
-        if (prev >= 0 && ev.seq > prev + 1) {
+        // The mod numbers events by clock (≥ 1e12), so gaps are normal there; only counter-style seqs warn.
+        if (prev >= 0 && ev.seq > prev + 1 && ev.seq < 1e12) {
           this.log?.warn(`seq gap for ${ev.sessionId}: ${prev} -> ${ev.seq}`);
         }
         if (ev.seq > prev) maxSeen.set(ev.sessionId, ev.seq);
@@ -451,6 +452,56 @@ export class Hub {
     if (!t) throw notFound('task not found');
     const plan = this.startPlan(t);
     return this.tx(() => this.command('hub.task.start', { id, ...plan }, at));
+  }
+  /**
+   * Choices: create one task per picked choice (linked to the parent), start each when `start` (a 409 is recorded in
+   * `errors` and never fails the batch), then mark picked / skipped. Every step is a hub.* event, so replay is exact.
+   */
+  applyChoices(id, body, at = this.now()) {
+    const t = this.p.getTask(id);
+    if (!t) throw notFound('task not found');
+    if (!isObj(body) || !Array.isArray(body.picked) || body.picked.some((x) => !isStr(x))) throw bad('picked must be an array of choice ids');
+    const choices = JSON.parse(t.choices || '[]');
+    const byId = new Map(choices.map((c) => [c.id, c]));
+    const picked = [...new Set(body.picked)];
+    for (const cid of picked) {
+      const c = byId.get(cid);
+      if (!c) throw bad(`unknown choice: ${cid}`);
+      if (c.state !== 'open') throw bad(`choice ${cid} is already ${c.state}`);
+    }
+    const start = body.start === true;
+    return this.tx(() => {
+      const tasks = [], errors = [], results = [];
+      for (const cid of picked) {
+        const c = byId.get(cid);
+        const description = `${c.detail ? c.detail + '\n\n' : ''}From ${t.id}.`;
+        const task = this.command('hub.task.create', {
+          projectId: t.project_id, title: c.title, description, status: 'backlog', dependsOn: [],
+          sessionId: t.session_id ?? null, parentTaskId: t.id,
+        }, at);
+        results.push({ choiceId: cid, taskId: task.id });
+        let out = task;
+        if (start) {
+          try {
+            const plan = this.startPlan(this.p.getTask(task.id));
+            out = this.command('hub.task.start', { id: task.id, ...plan }, at).task;
+          } catch (e) {
+            if (!(e instanceof HttpError)) throw e;
+            errors.push({ choiceId: cid, taskId: task.id, error: e.message, status: e.status });
+          }
+        }
+        tasks.push(out);
+      }
+      const parent = this.command('hub.task.choices', { id, mode: 'apply', results }, at);
+      return { tasks, choices: parent.choices, errors };
+    });
+  }
+  resetChoices(id, at = this.now()) {
+    if (!this.p.getTask(id)) throw notFound('task not found');
+    return this.tx(() => {
+      const task = this.command('hub.task.choices', { id, mode: 'reset' }, at);
+      return { task, choices: task.choices };
+    });
   }
   updateTask(id, body, at = this.now()) {
     const t = this.p.getTask(id);

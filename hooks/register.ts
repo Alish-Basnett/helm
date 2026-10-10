@@ -34,7 +34,11 @@ HOW: <one or two lines, the approach and key decisions>
 FILES: <comma-separated paths you changed, or none>
 LEARNED: <one line, the transferable dev/IT concept behind this task, explained for a learner>
 TAGS: <1-3 lowercase topic tags, e.g. css, sql, testing>
-If the user only asked a question, answer it in 1–2 sentences and skip the report.`
+If the user only asked a question, answer it in 1–2 sentences and skip the report.
+If your work proposes options for the user to pick from (plans, audits, suggestions), end with a fenced block:
+\`\`\`helm-choices
+[{"id":"short-slug","title":"one line","detail":"one or two lines","effort":"S|M|L","value":"low|medium|high"}]
+\`\`\``
 
 const SCOUT_PROMPT = `You are a Helm scout (Haiku). You answer one narrow question fast: search, read, list, check. Never edit files.
 Be precise: cite file paths with line numbers. End with:
@@ -81,6 +85,21 @@ function recapFromReport(answer: string) {
   if (!what || !learned) return null
   const tags = (line('TAGS') ?? '').split(/,\s*/).map(t => t.trim().toLowerCase()).filter(Boolean).slice(0, 3)
   return { what: clip(what, 160), how: clip(how ?? '', 200), learned: clip(learned, 240), concepts: tags.map(t => clip(t, 24)) }
+}
+
+// Actionable outputs: a ```helm-choices JSON block in a final answer becomes a checklist on the card.
+function choicesFrom(answer: string): any[] | null {
+  const m = String(answer ?? '').match(/```helm-choices\s*([\s\S]*?)```/)
+  if (!m) return null
+  try {
+    const list = JSON.parse(m[1]!)
+    if (!Array.isArray(list)) return null
+    return list.slice(0, 30).map((c: any, i: number) => ({
+      id: clip(c.id || `c${i + 1}`, 40), title: clip(c.title, 140), detail: clip(c.detail ?? '', 400),
+      effort: ['S', 'M', 'L'].includes(c.effort) ? c.effort : undefined,
+      value: ['low', 'medium', 'high'].includes(c.value) ? c.value : undefined,
+    })).filter(c => c.title)
+  } catch { return null }
 }
 
 const QUESTION = /^(what|why|how|when|where|who|which|does|do|did|is|are|was|were|can|could|should|would|will|has|have)\b/i
@@ -145,6 +164,25 @@ const replyAgents = new Map<string, string[]>()
 // follow-up spawns made for task notes: taskId → note ids, bound to the agent in our own agent.spawn hook
 // (a plugin's $.agent.spawn may not hand the agentId back to its caller)
 const pendingFollowups = new Map<string, string[]>()
+const choiceQueue: { agentId: string; choices: any[]; tries: number }[] = []
+
+async function flushChoices($: any) {
+  while (choiceQueue.length) {
+    const job = choiceQueue[0]!
+    try {
+      const { agents } = await hub($, 'GET', `/v1/sessions/${sessionId}/agents`)
+      const agent = (agents as any[]).find(a => a.id === job.agentId)
+      if (!agent?.taskId) {
+        if (++job.tries > 5) choiceQueue.shift()
+        return
+      }
+      choiceQueue.shift()
+      emit('task.choices', { taskId: agent.taskId, choices: job.choices })
+    } catch {
+      return
+    }
+  }
+}
 let repliesDirty = false
 
 function awaitAgentReply(agentId: string, noteId: string) {
@@ -164,6 +202,8 @@ function completeAgent(agentId: string, ok: boolean, summary: string, tokens: nu
   completedDirty = true
   emit('agent.completed', { agentId, ok, summary: clip(summary, 400), tokens, files: reportedFiles(answer) })
   if (ok) recapQueue.push({ agentId, answer, tries: 0 })
+  const choices = ok ? choicesFrom(answer) : null
+  if (choices?.length) choiceQueue.push({ agentId, choices, tries: 0 })
   sendReplies(replyAgents.get(agentId), answer || summary)
   replyAgents.delete(agentId)
 }
@@ -337,6 +377,7 @@ async function tick($: any) {
     await pollInbox($)
     await pollJobs($)
     await captureGitBases($)
+    if (hubUp && !outbox.length) await flushChoices($)
     if (hubUp && !outbox.length) {
       await backfillRecaps($).catch(err => probe('backfill.error', String(err)))
       await runRecaps($)
@@ -701,7 +742,8 @@ export const register: Register = (on, options) => {
         inputSchema: {
           type: 'object',
           properties: {
-            action: { type: 'string', enum: ['create', 'update', 'list'] },
+            action: { type: 'string', enum: ['create', 'update', 'list', 'choices'] },
+            choices: { type: 'array', description: 'for action "choices": options the user can tick', items: { type: 'object', properties: { id: { type: 'string' }, title: { type: 'string' }, detail: { type: 'string' }, effort: { type: 'string', enum: ['S', 'M', 'L'] }, value: { type: 'string', enum: ['low', 'medium', 'high'] } }, required: ['title'] } },
             id: { type: 'string', description: 'task id for update, e.g. T-12' },
             title: { type: 'string' },
             description: { type: 'string' },
@@ -771,7 +813,7 @@ export const register: Register = (on, options) => {
         spawnByToolUse.set(a.tool_use_id, info)
         const tag = String(a.description ?? '').match(/\[helm:(T-\d+)\]/)
         gitQueue.push({ toolUseId: a.tool_use_id, agentId: r?.agentId, cwd: a.cwd, tries: 0 })
-        emit('agent.spawned', { toolUseId: a.tool_use_id, taskId: tag?.[1], subagentType: info.subagentType, model: info.model, description: clip(String(a.description ?? '').replace(/\[helm:T-\d+\]\s*/, ''), 160), prompt: clip(a.prompt, 4000) })
+        emit('agent.spawned', { toolUseId: a.tool_use_id, parentAgentId: a.parentAgentId, taskId: tag?.[1], subagentType: info.subagentType, model: info.model, description: clip(String(a.description ?? '').replace(/\[helm:T-\d+\]\s*/, ''), 160), prompt: clip(a.prompt, 4000) })
         const followTask = String(a.description ?? '').match(/^\[helm:(T-\d+)\] follow-up/)?.[1]
         if (r?.agentId && followTask && pendingFollowups.has(followTask)) {
           for (const id of pendingFollowups.get(followTask)!) awaitAgentReply(r.agentId, id)
@@ -803,6 +845,12 @@ export const register: Register = (on, options) => {
         const { task } = await hub($, 'POST', '/v1/tasks', { projectId: project.id, sessionId, title: a.title ?? 'Untitled', description: a.description ?? '', status: a.status ?? 'next', dependsOn: a.dependsOn ?? [] })
         // A plugin tool's result must be a string or an array (MCP content), not an object.
         return { result: `Created ${task.id} (${task.status}): ${task.title}`, context: [`Put [helm:${task.id}] at the start of the Agent description when delegating it.`] }
+      }
+      if (a.action === 'choices') {
+        const choices = choicesFrom('```helm-choices\n' + JSON.stringify(a.choices ?? []) + '\n```') ?? []
+        emit('task.choices', { taskId: a.id, choices })
+        await flush($)
+        return { result: `${a.id}: ${choices.length} choices shown on the card` }
       }
       if (a.action === 'update') {
         const patch: Record<string, unknown> = {}

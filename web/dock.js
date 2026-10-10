@@ -9,6 +9,19 @@ import { icon } from './icons.js';
 const GAP = 8;
 const RAIL_W = 38;
 const RESERVE = 240; // always leave this much of the viewport to the page behind the dock
+const MIN_W = 320; // narrowest a user can drag a panel
+const STEP = 16, STEP_BIG = 64; // keyboard resize steps (Shift = big)
+const STORE_KEY = 'helm.dock.widths';
+
+function loadWidths() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(STORE_KEY) || '{}');
+    const out = {};
+    if (raw && typeof raw === 'object') for (const [k, v] of Object.entries(raw)) if (Number.isFinite(v) && v > 0) out[k] = Math.round(v);
+    return out;
+  } catch { return {}; }
+}
+function saveWidths(w) { try { localStorage.setItem(STORE_KEY, JSON.stringify(w)); } catch { /* storage blocked: width just won't persist */ } }
 
 export function createDock(root) {
   const el = h('div', { class: 'dock', 'data-open': '0' });
@@ -21,6 +34,7 @@ export function createDock(root) {
   let focusId = null;
   const listeners = new Set();
   let layoutQueued = false;
+  const saved = loadWidths(); // id -> preferred width (never overwritten by clamping, only by an explicit resize)
 
   const emit = () => { for (const fn of Array.from(listeners)) { try { fn(); } catch (e) { console.error(e); } } };
 
@@ -28,13 +42,17 @@ export function createDock(root) {
   /** cfg: { order, label, icon, width, ariaLabel, onClose?() (user asked to close), onClosed?() (it was hidden), onOpened?() } */
   function register(id, cfg) {
     const panelEl = h('aside', { class: `dock-panel dock-${id}`, role: 'dialog', 'aria-modal': 'false', 'aria-label': cfg.ariaLabel || cfg.label, 'data-panel': id, tabindex: '-1', hidden: true, inert: true });
-    const rec = { id, cfg, el: panelEl, open: false, visible: false, badge: false, label: cfg.label, tab: null, prevFocus: null };
+    const rec = { id, cfg, el: panelEl, grip: null, open: false, visible: false, badge: false, label: cfg.label, tab: null, prevFocus: null };
     panels.set(id, rec);
     panelEl.addEventListener('focusin', () => { focusId = id; });
     panelEl.addEventListener('pointerdown', () => { focusId = id; }, true);
     // keep DOM order = layout order (left to right)
     const sorted = Array.from(panels.values()).sort((a, b) => a.cfg.order - b.cfg.order);
     for (const p of sorted) el.append(p.el);
+    rec.grip = makeGrip(rec);
+    panelEl.append(rec.grip);
+    // some panels rebuild their contents with textContent = '' — put the grip back if that happens
+    new MutationObserver(() => { if (rec.grip.parentNode !== panelEl) panelEl.append(rec.grip); }).observe(panelEl, { childList: true });
 
     const handle = {
       id,
@@ -102,7 +120,73 @@ export function createDock(root) {
   }
 
   /* ---------- layout ---------- */
-  const widthOf = (rec) => Math.min(rec.cfg.width, Math.max(280, window.innerWidth - 16));
+  const cap = () => Math.max(280, window.innerWidth - 16); // never wider than the screen
+  /** Widest a panel may be: leave RESERVE to the page and MIN_W (+gap) for every other open panel. */
+  function maxOf(rec) {
+    const others = Array.from(panels.values()).filter((r) => r.open && r !== rec).length;
+    return Math.max(MIN_W, Math.min(cap(), window.innerWidth - RESERVE - others * (MIN_W + GAP)));
+  }
+  const clampW = (rec, w) => Math.round(Math.min(maxOf(rec), Math.max(Math.min(MIN_W, cap()), w)));
+  /** Preferred width (saved or default), clamped to what fits right now. A saved width is only clamped for display. */
+  const widthOf = (rec) => (saved[rec.id] != null ? clampW(rec, saved[rec.id]) : Math.min(rec.cfg.width, cap()));
+
+  function syncGrip(rec, w = widthOf(rec)) {
+    const g = rec.grip;
+    g.setAttribute('aria-valuenow', String(Math.round(w)));
+    g.setAttribute('aria-valuemin', String(Math.min(MIN_W, cap())));
+    g.setAttribute('aria-valuemax', String(maxOf(rec)));
+  }
+  function persist(rec, w) {
+    if (w == null) delete saved[rec.id]; else saved[rec.id] = Math.round(w);
+    saveWidths(saved);
+  }
+  function makeGrip(rec) {
+    const g = h('div', { class: 'dock-grip', role: 'separator', 'aria-orientation': 'vertical', tabindex: '0', title: 'Drag to resize, double-click to reset', 'aria-label': `Resize ${rec.cfg.label} panel` });
+    let drag = null, raf = 0, nextW = 0;
+    const apply = () => { raf = 0; rec.el.style.width = nextW + 'px'; syncGrip(rec, nextW); };
+    const endDrag = (e) => {
+      if (!drag) return;
+      const wasDragging = drag; drag = null;
+      if (raf) { cancelAnimationFrame(raf); raf = 0; }
+      try { g.releasePointerCapture(e.pointerId); } catch { /* not captured */ }
+      g.classList.remove('dragging');
+      document.documentElement.classList.remove('dock-resizing');
+      if (wasDragging.moved) { persist(rec, nextW); layout(); }
+    };
+    g.addEventListener('pointerdown', (e) => {
+      if (e.button != null && e.button !== 0) return;
+      e.preventDefault();
+      drag = { x: e.clientX, w: rec.el.getBoundingClientRect().width || widthOf(rec), moved: false };
+      nextW = clampW(rec, drag.w);
+      try { g.setPointerCapture(e.pointerId); } catch { /* unsupported */ }
+      g.classList.add('dragging');
+      document.documentElement.classList.add('dock-resizing'); // locks user-select + cursor
+    });
+    g.addEventListener('pointermove', (e) => {
+      if (!drag) return;
+      drag.moved = true;
+      nextW = clampW(rec, drag.w + (drag.x - e.clientX)); // panel grows leftwards
+      if (!raf) raf = requestAnimationFrame(apply);
+    });
+    g.addEventListener('pointerup', endDrag);
+    g.addEventListener('pointercancel', endDrag);
+    g.addEventListener('lostpointercapture', endDrag);
+    g.addEventListener('dblclick', () => { persist(rec, null); layout(); });
+    g.addEventListener('keydown', (e) => {
+      const big = e.shiftKey ? STEP_BIG : STEP;
+      const cur = widthOf(rec);
+      let w = null;
+      if (e.key === 'ArrowLeft') w = cur + big; // edge moves left -> wider
+      else if (e.key === 'ArrowRight') w = cur - big;
+      else if (e.key === 'Home') w = 0;
+      else if (e.key === 'End') w = Infinity;
+      if (w == null) return;
+      e.preventDefault();
+      persist(rec, clampW(rec, w));
+      layout();
+    });
+    return g;
+  }
 
   function layout() {
     const open = mru.map((id) => panels.get(id)).filter(Boolean);
@@ -123,6 +207,7 @@ export function createDock(root) {
       const wasVisible = rec.visible;
       rec.visible = vis;
       rec.el.style.width = widthOf(rec) + 'px';
+      syncGrip(rec);
       if (rec.el.hidden === vis) rec.el.hidden = !vis;
       rec.el.inert = !vis;
       if (vis && !wasVisible) {

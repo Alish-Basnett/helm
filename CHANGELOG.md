@@ -4,6 +4,25 @@ All notable changes to Helm are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/). Shapes and endpoints are defined in `CONTRACT.md`.
 
+## [0.6.0] - 2026-10-10
+
+### Added
+
+- Choices: when an agent's output proposes options, they appear as a checklist at the top of the task
+  panel. Tick what you want and choose "Create & start selected": each pick becomes a linked task and is
+  delegated. Agents emit a ` ```helm-choices ` block, and the `task` tool gains a `choices` action.
+  Waiting choices show as a Board chip, an Inbox group and a Spotlight command.
+- Threads redesign: a git-graph style tree (newest first, live agents pinned, finished agents grouped by
+  hour, subagents nested under their parent) and a Timeline view with duration bars. Rows are virtualised
+  for hundreds of agents. Adds filters, search, density, an all-sessions view and keyboard navigation.
+- Resizable dock panels: drag or use the keyboard on each panel's left edge, double-click to reset.
+  Widths are saved per panel.
+- `Agent.parentId` (from the engine's `parentAgentId`) and `Task.parentTaskId`.
+
+### Changed
+
+- The hub no longer logs a "seq gap" warning for the mod's clock-based sequence numbers.
+
 ## [0.5.0] - 2026-10-10
 
 ### Added

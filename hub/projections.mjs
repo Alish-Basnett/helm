@@ -13,6 +13,7 @@ export const JOB_TIMEOUT_ERROR = 'timed out';
 export const JOB_UNCLAIMED_ERROR = 'not picked up by a live session';
 export const TASK_STATUSES = ['backlog', 'next', 'in_progress', 'review', 'done', 'later', 'blocked', 'archived'];
 export const HUB_SESSION = '_hub';
+export const MAX_CHOICES = 30;
 export const CONFLICT_WINDOW_MS = 10 * 60_000; // a finished agent's file touch still counts for this long
 const LIVE = ['running', 'stalled', 'waiting'];
 const TOOL_EDIT_CAP = 50; // files per tool.called
@@ -45,7 +46,7 @@ export const toAgent = (r) => ({
   id: r.id, sessionId: r.session_id, taskId: r.task_id ?? null, toolUseId: r.tool_use_id,
   subagentType: r.subagent_type, model: r.model, description: r.description, status: r.status,
   startedAt: r.started_at, endedAt: r.ended_at ?? null, lastActivityAt: r.last_activity_at,
-  nowDoing: r.now_doing, toolCount: r.tool_count, tokens: r.tokens,
+  nowDoing: r.now_doing, toolCount: r.tool_count, tokens: r.tokens, parentId: r.parent_id ?? null,
 });
 export const toTask = (r) => ({
   id: r.id, projectId: r.project_id, sessionId: r.session_id ?? null, title: r.title,
@@ -55,6 +56,7 @@ export const toTask = (r) => ({
   createdAt: r.created_at, updatedAt: r.updated_at, doneAt: r.done_at ?? null,
   conflicts: parse(r.conflicts, []), explainer: r.explainer ?? null, explainJob: parse(r.explain_job, null),
   startNoteId: r.start_note_id ?? null, git: parse(r.git, null), diffStat: parse(r.diff_stat, null),
+  choices: parse(r.choices, []), parentTaskId: r.parent_task_id ?? null,
 });
 export const toNote = (r) => ({
   id: r.id, target: { kind: r.target_kind, id: r.target_id }, sessionId: r.session_id, text: r.text,
@@ -407,12 +409,16 @@ export class Projector {
         task_id: existing.task_id ?? pending.task_id, tool_use_id: pending.tool_use_id,
         subagent_type: pending.subagent_type, model: pending.model || existing.model,
         description: pending.description, started_at: Math.min(existing.started_at, pending.started_at),
+        parent_id: pending.parent_id ?? existing.parent_id ?? null,
       });
       this.db.run('DELETE FROM agents WHERE id = ?', old);
     } else {
       this.db.run('UPDATE agents SET id = ? WHERE id = ?', agentId, old);
     }
     this.db.run('UPDATE activity SET agent_id = ? WHERE agent_id = ?', agentId, old);
+    // v0.6: children that pointed at the pending id now point at the bound id.
+    const kids = this.db.all('SELECT id FROM agents WHERE parent_id = ?', old).map((r) => r.id);
+    if (kids.length) this.db.run('UPDATE agents SET parent_id = ? WHERE parent_id = ?', agentId, old);
     this.db.run('UPDATE tasks SET agent_id = ? WHERE agent_id = ?', agentId, old);
     this.db.run('UPDATE questions SET agent_id = ? WHERE agent_id = ?', agentId, old);
     for (const f of this.db.all('SELECT path, at FROM agent_files WHERE agent_id = ? ORDER BY path', old)) {
@@ -441,6 +447,7 @@ export class Projector {
     }
     if (old !== agentId) this.emit('agent', 'delete', toAgent(pending));
     this.pushAgent(agentId);
+    for (const k of kids) this.pushAgent(k);
     for (const t of this.db.all('SELECT id FROM tasks WHERE agent_id = ?', agentId)) this.pushTask(t.id);
     this.recomputeConflicts(at); // conflict entries name agents by id
     for (const id of actRows) {
@@ -494,6 +501,8 @@ export class Projector {
       case 'hub.sweep': return this.hSweep(ev);
       case 'hub.task.diff': return this.hTaskDiff(ev);
       case 'hub.task.diffstat': return this.hTaskDiffStat(ev);
+      case 'task.choices': return this.onTaskChoices(ev);
+      case 'hub.task.choices': return this.hTaskChoices(ev);
       default:
         this.log?.warn(`unknown event type ignored: ${ev.type}`);
         return null;
@@ -596,9 +605,9 @@ export class Projector {
     const id = `pending:${toolUseId}`;
     this.db.run(
       `INSERT INTO agents(id, session_id, task_id, tool_use_id, subagent_type, model, description, status,
-         started_at, ended_at, last_activity_at, now_doing, tool_count, tokens)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 'running', ?, NULL, ?, 'starting', 0, 0)`,
-      id, sid, task.id, toolUseId, subagentType, str(d.model), cut(description, 500), at, at);
+         started_at, ended_at, last_activity_at, now_doing, tool_count, tokens, parent_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'running', ?, NULL, ?, 'starting', 0, 0, ?)`,
+      id, sid, task.id, toolUseId, subagentType, str(d.model), cut(description, 500), at, at, str(d.parentAgentId) || null);
     this.setTaskStatus(task, 'in_progress', at, null);
     this.upd('tasks', task.id, { agent_id: id, updated_at: at, session_id: task.session_id ?? sid });
     this.indexTask(this.getTask(task.id));
@@ -1038,7 +1047,54 @@ export class Projector {
       projectId: d.projectId, sessionId: d.sessionId ?? null, title: str(d.title), description: str(d.description),
       status: d.status || 'backlog', dependsOn: d.dependsOn || [], at: ev.at,
     });
+    if (d.parentTaskId) { this.upd('tasks', t.id, { parent_task_id: str(d.parentTaskId) }); this.pushTask(t.id); return toTask(this.getTask(t.id)); }
     return toTask(t);
+  }
+  // ----------------------------------------------------------------- choices (v0.6)
+  /** task.choices (mod event): replace the task's choice set, keeping state / taskId of ids that still exist. */
+  onTaskChoices(ev) {
+    const t = this.getTask(str(ev.data.taskId));
+    if (!t) return null;
+    const old = new Map(parse(t.choices, []).map((c) => [c.id, c]));
+    const seen = new Set();
+    const list = [];
+    for (const raw of Array.isArray(ev.data.choices) ? ev.data.choices : []) {
+      if (!raw || typeof raw !== 'object' || list.length >= MAX_CHOICES) continue;
+      const title = cut(str(raw.title).trim(), 300);
+      if (!title) continue;
+      let id = cut(str(raw.id).trim(), 64) || `c${list.length + 1}`;
+      if (seen.has(id)) id = `c${list.length + 1}`;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      const prev = old.get(id);
+      list.push({
+        id, title, detail: cut(str(raw.detail), 4000),
+        effort: ['S', 'M', 'L'].includes(raw.effort) ? raw.effort : null,
+        value: ['low', 'medium', 'high'].includes(raw.value) ? raw.value : null,
+        state: prev ? prev.state : 'open', taskId: prev ? prev.taskId : null,
+      });
+    }
+    this.db.run('UPDATE tasks SET choices = ?, updated_at = ? WHERE id = ?', JSON.stringify(list), ev.at, t.id);
+    this.pushTask(t.id);
+    return toTask(this.getTask(t.id));
+  }
+  /**
+   * hub.task.choices: { id, mode: 'apply', results: [{ choiceId, taskId }] } marks those picked (with their new task)
+   * and every other open choice skipped; { id, mode: 'reset' } puts every choice back to open (created tasks stay).
+   */
+  hTaskChoices(ev) {
+    const { id, mode } = ev.data;
+    const t = this.getTask(id);
+    if (!t) throw new Error('task not found');
+    const results = new Map((ev.data.results || []).map((r) => [r.choiceId, r.taskId]));
+    const list = parse(t.choices, []).map((c) => {
+      if (mode === 'reset') return { ...c, state: 'open', taskId: null };
+      if (c.state !== 'open') return c;
+      return results.has(c.id) ? { ...c, state: 'picked', taskId: results.get(c.id) } : { ...c, state: 'skipped' };
+    });
+    this.db.run('UPDATE tasks SET choices = ?, updated_at = ? WHERE id = ?', JSON.stringify(list), ev.at, id);
+    this.pushTask(id);
+    return toTask(this.getTask(id));
   }
   hTaskUpdate(ev) {
     const { id, patch: p } = ev.data;

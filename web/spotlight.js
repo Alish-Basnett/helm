@@ -51,6 +51,7 @@ export function createSpotlight(root) {
     const cmds = [
       { title: 'Talk to session', sub: 'Chat with a live session of this project', icon: 'chat', run: () => bus.emit('open-talk') },
       { title: 'Start task…', sub: 'Pick a task to start in a live session', icon: 'play', stay: true, run: () => { input.value = '>start '; onInput(); input.focus(); } },
+      { title: 'Review choices…', sub: 'Tick which suggestions to turn into tasks', icon: 'checklist', stay: true, run: () => { input.value = '>choices '; onInput(); input.focus(); } },
       { title: 'New task', sub: 'Open the composer on the Board', icon: 'plus', run: () => { navigate('board'); setTimeout(() => bus.emit('new-task'), 60); } },
       { title: 'Go to Board', icon: 'board', run: () => navigate('board') },
       { title: 'Go to Projects', icon: 'folder', run: () => navigate('projects') },
@@ -76,6 +77,11 @@ export function createSpotlight(root) {
         .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
       for (const x of startable) cmds.push({ taskCmd: true, hay: `${x.id} ${x.title}`.toLowerCase(), title: `Start ${x.id} · ${truncate(x.title, 56)}`, sub: `${STATUS_META[x.status].label} · ${sel.projectName(x.projectId)}`, icon: 'play', run: () => startTask(x.id) });
       if (!startable.length) cmds.push({ title: 'Nothing to start', sub: 'Backlog, Up next, Saved for later and Blocked tasks can be started', icon: 'play', disabled: true });
+    }
+    if (/^(choices|review)\b/.test(needle)) {
+      const ct = sel.choiceTasks();
+      for (const x of ct) cmds.push({ taskCmd: true, hay: `${x.id} ${x.title}`.toLowerCase(), title: `Review ${sel.openChoiceCount(x)} choices · ${x.id} ${truncate(x.title, 50)}`, sub: sel.projectName(x.projectId), icon: 'checklist', run: () => openTask(x.id) });
+      if (!ct.length) cmds.push({ title: 'No choices waiting', sub: 'When an agent proposes options they appear here', icon: 'checklist', disabled: true });
     }
     cmds.push({ title: 'Toggle theme', sub: 'System · Light · Dark', icon: 'sun', run: () => bus.emit('toggle-theme') });
     cmds.push({ title: 'Toggle sidebar', icon: 'sidebar', run: () => bus.emit('toggle-sidebar') });
@@ -166,7 +172,7 @@ export function createSpotlight(root) {
     search.cancel();
     if (cmdMode) {
       const needle = raw.slice(1).trim().toLowerCase();
-      const rest = (/^start\s+(.*)$/.exec(needle) || [])[1];
+      const rest = (/^(?:start|choices|review)\s+(.*)$/.exec(needle) || [])[1];
       items = commands(needle).filter((c) => (c.taskCmd ? !rest || c.hay.includes(rest) : !needle || c.title.toLowerCase().includes(needle) || (c.sub || '').toLowerCase().includes(needle))).map((c) => ({ ...c, group: 'command' }));
       loading = false;
       render();

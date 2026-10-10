@@ -351,3 +351,30 @@ Opening a v0.1 database adds the new tables/columns in place. Old events are not
   `T-12 · <title>`; clicking opens that task's details + chat while Talk stays open.
 
 (Clarified, v0.5 hub: `hub.task.diff { taskId, diff }` freezes the snapshot; a live `?refresh=1` records `hub.task.diffstat { taskId, diffStat }` (stat only, the snapshot stays frozen). A completion snapshot is skipped when the result is `none`. `agent.git` needs absolute `root` and hex `base`/`head`, else it is ignored; relative `filesChanged` resolve against `Task.git.root`. Refused paths (outside any repo, `..`, symlink escapes) are dropped from `files` and named in `note`. With a recorded base that no longer exists the diff falls back to `history`. The hub version is 0.5.0.)
+
+## v0.6 additions — Threads at scale
+- `agent.spawned` data gains `parentAgentId?` (the engine's `AgentSpawnInput.parentAgentId`: set when a
+  subagent spawned this one). `Agent` gains `parentId: string | null` (bound ids follow renames).
+- (v0.6) **Choices: actionable outputs.** An agent that proposes options ends its final answer with a fenced
+  block ` ```helm-choices ` containing a JSON array of `{ id, title, detail?, effort?: 'S'|'M'|'L', value?: 'low'|'medium'|'high' }`
+  (≤ 30). The mod parses it on completion and emits `task.choices { taskId, choices }` (replaces the set; ids
+  kept stable). The `mcp__helm__task` tool gains action `"choices"` (`id`, `choices`) that does the same.
+  `Task` gains `choices: { id, title, detail, effort, value, state: 'open'|'picked'|'skipped', taskId: string|null }[]`
+  (empty array when none).
+  `POST /v1/tasks/:id/choices/apply` `{ picked: string[], start?: boolean }` → creates one task per picked
+  choice (title = choice title, description = detail + "From T-n.", same project, `parentTaskId` = T-n),
+  starts each when `start` (same rules and 409 handling as `/start`, per task, never failing the batch), marks
+  picked → `picked` with its `taskId`, every other open choice → `skipped`; returns `{ tasks, choices, errors }`.
+  `POST /v1/tasks/:id/choices/reset` → all back to `open` (created tasks stay). `Task` gains `parentTaskId: string | null`.
+  Open choices count as "needs you" (Inbox kind `choices`, one entry per task with open choices).
+  Open choices are not a `questions` row: clients derive the Inbox "Choices waiting" entries (kind `choices`, one per task)
+  from `Task.choices` in `/v1/state`, so there is no second list to keep in sync. Commands are `hub.task.create` (with `parentTaskId`),
+  `hub.task.start` and `hub.task.choices` events, so `--rebuild` is exact; `tasks.choices` / `tasks.parent_task_id` are additive migrations.
+- **parentId storage**: the column is `agents.parent_id` (additive, nullable; `ALTER TABLE` on open, `helmd --rebuild` back-fills). A
+  child's `parentId` follows the parent's pending -> bound rename; unknown parents are kept as-is.
+- **Threads UI** (web): Tree (default) = one trunk per session, agents as orthogonal branches, newest first, in
+  Live / Today (by hour, latest open) / Earlier ("Show older (N)") sections, sub-agents nested by `parentId`.
+  Timeline = same rows and grouping against a time axis with duration bars. Both are virtualised (rows near the
+  viewport only). Header controls: session picker (+ "All sessions"), status chips, model filter, search,
+  density, Tree/Timeline; choices persist in `localStorage["helm.threads"]`. Keys: Up/Down move, Enter opens,
+  Left/Right fold, `/` focuses search.
