@@ -259,10 +259,10 @@ export async function startTask(id) {
 
 /* ---------- v0.6: Choices ---------- */
 /** Create (and optionally start) a task per picked choice. Returns { tasks, choices, errors } or null. */
-export async function applyChoices(taskId, picked, start) {
+export async function applyChoices(taskId, picked, start, extra = {}) {
   if (!picked.length) return null;
   try {
-    const res = await api.applyChoices(taskId, picked, start);
+    const res = await api.applyChoices(taskId, picked, start, extra);
     (res.tasks || []).forEach((t) => upsert('task', t));
     const parent = state.tasks.get(taskId);
     if (parent && res.choices) upsert('task', { ...parent, choices: res.choices });

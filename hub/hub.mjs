@@ -470,16 +470,21 @@ export class Hub {
       if (c.state !== 'open') throw bad(`choice ${cid} is already ${c.state}`);
     }
     const start = body.start === true;
+    const notes = body.notes === undefined || body.notes === null ? {} : body.notes;
+    if (!isObj(notes) || Array.isArray(notes) || Object.values(notes).some((v) => !isStr(v) || v.length > 500)) throw bad('notes must be an object of strings (max 500 characters each)');
+    if (body.message !== undefined && body.message !== null && (!isStr(body.message) || body.message.length > 1000)) throw bad('message must be a string (max 1000 characters)');
+    const message = isStr(body.message) ? body.message.trim() : '';
     return this.tx(() => {
       const tasks = [], errors = [], results = [];
       for (const cid of picked) {
         const c = byId.get(cid);
-        const description = `${c.detail ? c.detail + '\n\n' : ''}From ${t.id}.`;
+        const note = isStr(notes[cid]) ? notes[cid].trim() : '';
+        const description = `${c.detail ? c.detail + '\n\n' : ''}${note ? `Note: ${note}\n\n` : ''}${message ? `Message: ${message}\n\n` : ''}From ${t.id}.`;
         const task = this.command('hub.task.create', {
           projectId: t.project_id, title: c.title, description, status: 'backlog', dependsOn: [],
           sessionId: t.session_id ?? null, parentTaskId: t.id,
         }, at);
-        results.push({ choiceId: cid, taskId: task.id });
+        results.push({ choiceId: cid, taskId: task.id, note, message });
         let out = task;
         if (start) {
           try {

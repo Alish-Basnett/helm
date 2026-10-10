@@ -1,0 +1,127 @@
+/* code.css — "code disguise" for Talk and Task chat (html[data-code="on"]). Palette is One Dark / GitHub-ish for dark
+   and a light counterpart; every text token is >= 4.5:1 on its background (checked in the T-27 verification). */
+:root {
+  --cm-bg: light-dark(#f6f8fa, #0d1117);
+  --cm-bg-2: light-dark(#eaeef2, #161b22);
+  --cm-text: light-dark(#1f2328, #e6edf3);
+  --cm-doc: light-dark(#424a53, #adbac7);
+  --cm-com: light-dark(#59636e, #8b949e);
+  --cm-k: light-dark(#cf222e, #ff7b72);
+  --cm-s: light-dark(#0a3069, #a5d6ff);
+  --cm-n: light-dark(#0550ae, #79c0ff);
+  --cm-f: light-dark(#6639ba, #d2a8ff);
+  --cm-t: light-dark(#953800, #ffa657);
+  --cm-v: light-dark(#0550ae, #79c0ff);
+  --cm-p: light-dark(#424a53, #c9d1d9);
+  --cm-gut: light-dark(#59636e, #7d8590);
+  --cm-guide: light-dark(rgba(31, 35, 40, .14), rgba(230, 237, 243, .14));
+  --cm-ok: light-dark(#116329, #3fb950);
+  --cm-warn: light-dark(#7d4e00, #d29922);
+  --cm-bad: light-dark(#cf222e, #ff7b72);
+  --cm-fs: 12.5px;
+  --cm-gut-w: 3ch;
+}
+
+/* ---------- lines: a gutter number (CSS counter, not selectable) + wrapped code ---------- */
+.talk-thread, .set-preview { counter-reset: cm-ln; }
+.cm-line {
+  display: grid; grid-template-columns: var(--cm-gut-w) minmax(0, 1fr); column-gap: 14px; counter-increment: cm-ln;
+  font: var(--cm-fs)/1.65 var(--mono); font-variant-ligatures: none; letter-spacing: 0; color: var(--cm-text); tab-size: 2;
+}
+.cm-line::before { content: counter(cm-ln); text-align: right; color: var(--cm-gut); user-select: none; -webkit-user-select: none; font-variant-numeric: tabular-nums; }
+.cm-code { display: block; min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; padding-left: var(--hang, 0px); text-indent: calc(-1 * var(--hang, 0px)); max-width: 92ch; }
+.cm-doc .cm-code { color: var(--cm-doc); }
+.cm-turn { padding-block: 3px; }
+.cm-turn + .cm-turn { margin-top: 2px; }
+
+/* ---------- tokens ---------- */
+.cm-k { color: var(--cm-k); }
+.cm-s, .cm-sb { color: var(--cm-s); }
+.cm-c, .cm-ph { color: var(--cm-com); font-style: italic; }
+.cm-n { color: var(--cm-n); }
+.cm-f { color: var(--cm-f); }
+.cm-t { color: var(--cm-t); }
+.cm-v { color: var(--cm-v); }
+.cm-p { color: var(--cm-p); }
+.cm-i { color: var(--cm-text); }
+.cm-ig { box-shadow: inset 1px 0 0 var(--cm-guide); }
+.cm-tag { color: var(--cm-k); font-weight: 600; }
+.cm-b { font-weight: 700; color: var(--cm-text); }
+.cm-em { font-style: italic; }
+.cm-ic { color: var(--cm-text); background: var(--cm-bg-2); border-radius: 4px; padding: 0 3px; font: inherit; }
+.cm-ex { color: var(--cm-text); }
+.cm-exline { background: var(--cm-bg-2); }
+.cm-exline .cm-code { max-width: none; }
+
+/* state trailing comment */
+.cm-state { white-space: pre-wrap; }
+.cm-st-ran { color: var(--cm-ok); }
+.cm-st-queued, .cm-st-sending { color: var(--cm-warn); }
+.cm-st-failed { color: var(--cm-bad); }
+.cm-err { overflow-wrap: anywhere; }
+.cm-wait-text { animation: cm-pulse 1.6s ease-in-out infinite; }
+@keyframes cm-pulse { 50% { opacity: .55; } }
+
+/* interactive bits keep looking like code but stay clearly clickable */
+.cm-act, .cm-fold, .cm-task, button.cm-link {
+  border: 0; background: none; padding: 0; margin: 0; font: inherit; letter-spacing: inherit; cursor: pointer; text-align: left;
+}
+.cm-act { color: var(--cm-f); font-style: normal; text-decoration: underline dotted; text-underline-offset: 3px; }
+.cm-act:hover { text-decoration-style: solid; }
+.cm-fold { color: var(--cm-com); font-style: italic; }
+.cm-fold:hover { color: var(--cm-text); text-decoration: underline; text-underline-offset: 3px; }
+.cm-task { color: var(--cm-t); text-decoration: underline; text-decoration-color: var(--u, currentColor); text-decoration-thickness: 1.5px; text-underline-offset: 3px; border-radius: 3px; }
+.cm-task:hover { background: var(--cm-bg-2); }
+.cm-task[data-status="backlog"] { --u: var(--st-backlog); } .cm-task[data-status="next"] { --u: var(--st-next); }
+.cm-task[data-status="in_progress"] { --u: var(--st-in_progress); } .cm-task[data-status="review"] { --u: var(--st-review); }
+.cm-task[data-status="done"] { --u: var(--st-done); } .cm-task[data-status="later"] { --u: var(--st-later); }
+.cm-task[data-status="blocked"] { --u: var(--st-blocked); }
+.cm-link { color: var(--cm-s); text-decoration: underline; text-underline-offset: 3px; }
+.cm-act:focus-visible, .cm-fold:focus-visible, .cm-task:focus-visible, .cm-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* ---------- Talk / Task chat surface ---------- */
+html[data-code="on"] .tk-std { display: none; }
+html[data-code="on"] .talk { background: var(--cm-bg); }
+html[data-code="on"] .talk.inline { box-shadow: var(--shadow-1); }
+html[data-code="on"] .talk-thread { gap: 0; padding: 10px 12px 10px 4px; background: transparent; }
+html[data-code="on"] .talk-empty { color: var(--cm-com); font: var(--cm-fs)/1.5 var(--mono); }
+html[data-code="on"] .tk-turn { gap: 0; animation: none; }
+
+/* ---------- composer: transparent textarea over a highlighted layer ---------- */
+.talk-inputwrap { position: relative; flex: 1; min-width: 0; }
+.talk-inputwrap .cm-hl { display: none; }
+html[data-code="on"] .talk-composer { background: var(--cm-bg); }
+html[data-code="on"] .talk-inputwrap { background: var(--cm-bg-2); border-radius: 10px; box-shadow: inset 0 0 0 .5px var(--separator); transition: box-shadow var(--dur) var(--ease); }
+html[data-code="on"] .talk-inputwrap:focus-within { box-shadow: inset 0 0 0 1.5px var(--accent), 0 0 0 4px var(--accent-soft); }
+html[data-code="on"] .talk-inputwrap .cm-hl, html[data-code="on"] .talk-inputwrap textarea.talk-input {
+  font: var(--cm-fs)/1.55 var(--mono); letter-spacing: 0; font-variant-ligatures: none; font-variant-numeric: normal; tab-size: 2;
+  padding: 9px 12px; margin: 0; border: 0; width: 100%; white-space: pre-wrap; overflow-wrap: anywhere; word-break: normal; text-align: left;
+}
+html[data-code="on"] .talk-inputwrap .cm-hl { display: block; position: absolute; inset: 0; overflow: hidden; pointer-events: none; color: var(--cm-text); background: none; }
+html[data-code="on"] .talk-inputwrap textarea.talk-input,
+html[data-code="on"] .talk-inputwrap textarea.talk-input:focus {
+  position: relative; display: block; background: transparent; box-shadow: none; color: transparent; -webkit-text-fill-color: transparent;
+  caret-color: var(--cm-text); scrollbar-width: none; min-height: 40px;
+}
+html[data-code="on"] .talk-inputwrap textarea.talk-input::-webkit-scrollbar { display: none; }
+html[data-code="on"] .talk-inputwrap textarea.talk-input::placeholder { color: transparent; }
+html[data-code="on"] .talk-inputwrap textarea.talk-input::selection { background: color-mix(in srgb, var(--accent) 35%, transparent); }
+html[data-code="on"] .talk-inputwrap:has(textarea:disabled) { opacity: .5; }
+html[data-code="on"] .talk-inputwrap .cm-hl .cm-ic { padding: 0; background: none; }
+html[data-code="on"] .talk-inputwrap .cm-hl .cm-b { font-weight: inherit; }
+
+/* attachments waiting in the composer read as import lines */
+html[data-code="on"] .talk-composer .att-chip { background: transparent; box-shadow: none; padding: 1px 4px; border-radius: 4px; font: var(--cm-fs)/1.5 var(--mono); max-width: 100%; }
+html[data-code="on"] .talk-composer .att-chip-thumb, html[data-code="on"] .talk-composer .att-chip-icon { display: none; }
+html[data-code="on"] .talk-composer .att-chip-text { flex-direction: row; align-items: baseline; flex-wrap: wrap; line-height: 1.5; }
+html[data-code="on"] .talk-composer .att-chip-text::before { content: "import file from "; color: var(--cm-k); }
+html[data-code="on"] .talk-composer .att-chip-text::after { content: ";"; color: var(--cm-p); order: 1; }
+html[data-code="on"] .talk-composer .att-chip .att-name { font: inherit; color: var(--cm-s); max-width: 100%; }
+html[data-code="on"] .talk-composer .att-chip .att-name::before { content: "\"./"; }
+html[data-code="on"] .talk-composer .att-chip .att-name::after { content: "\""; }
+html[data-code="on"] .talk-composer .att-chip .att-state { order: 2; margin-left: 8px; font: inherit; font-style: italic; color: var(--cm-com); }
+html[data-code="on"] .talk-composer .att-chip.uploading .att-state { color: var(--cm-warn); }
+html[data-code="on"] .talk-composer .att-chip.error .att-state { color: var(--cm-bad); }
+html[data-codestyle="py"][data-code="on"] .talk-composer .att-chip-text::before { content: "file = open("; }
+html[data-codestyle="py"][data-code="on"] .talk-composer .att-chip-text::after { content: ")"; }
+html[data-code="on"] .talk-composer .note-hint { font-family: var(--mono); }

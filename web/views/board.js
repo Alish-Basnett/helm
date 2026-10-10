@@ -10,6 +10,7 @@ import { openTask, navigate } from '../router.js';
 
 const DONE_LIMIT = 30;
 const cmp = (a, b) => (a.order - b.order) || (a.createdAt - b.createdAt) || String(a.id).localeCompare(String(b.id));
+const needsOf = (t) => sel.needsYou(t).length > 0;
 const cmpDone = (a, b) => (b.doneAt || b.updatedAt || 0) - (a.doneAt || a.updatedAt || 0);
 
 export function mount(container) {
@@ -17,6 +18,7 @@ export function mount(container) {
   let dragId = null;
   let needsRender = false;
   let doneExpanded = false;
+  let onlyNeeds = lsGet('helm.board.needsMe') === '1';
   const cols = {}; // status -> {el, body, count, composer, ...}
 
   startTicker();
@@ -25,7 +27,12 @@ export function mount(container) {
   const banner = h('div', { class: 'board-banner', hidden: true });
   const colsEl = h('div', { class: 'board-cols' });
   const lanesEl = h('div', { class: 'board-lanes' });
-  const root = h('div', { class: 'board' }, banner, colsEl, lanesEl);
+  const needsBtnCount = h('span', { class: 'needs-toggle-count mono', hidden: true }, '0');
+  const needsBtn = h('button', { class: 'needs-toggle', type: 'button', 'aria-pressed': String(onlyNeeds), title: 'Show only cards waiting for you (y jumps to the next one)',
+    onclick: () => { onlyNeeds = !onlyNeeds; lsSet('helm.board.needsMe', onlyNeeds ? '1' : '0'); render(); } },
+  h('span', { class: 'needs-dot', 'aria-hidden': 'true' }), h('span', {}, 'Needs me'), needsBtnCount);
+  const bar = h('div', { class: 'board-bar' }, needsBtn);
+  const root = h('div', { class: 'board' }, bar, banner, colsEl, lanesEl);
   container.appendChild(root);
 
   for (const status of MAIN_COLUMNS) colsEl.appendChild(buildColumn(status));
@@ -34,15 +41,16 @@ export function mount(container) {
   function buildColumn(status) {
     const meta = STATUS_META[status];
     const count = h('span', { class: 'col-count mono' }, '0');
+    const need = h('span', { class: 'col-need mono', hidden: true });
     const addBtn = h('button', { class: 'icon-btn sm', type: 'button', 'aria-label': `Add task to ${meta.label}`, title: `Add to ${meta.label}`, onclick: () => openComposer(status) }, icon('plus', 16));
     const body = h('div', { class: 'col-body', 'data-status': status, 'data-layout': 'v', 'data-empty': status === 'done' ? 'Nothing done yet' : 'Drop tasks here' });
     const more = h('button', { class: 'col-more', type: 'button', hidden: true, onclick: () => { doneExpanded = !doneExpanded; render(); } });
     const composer = buildComposer(status);
     const el = h('section', { class: `col col-${status}`, 'aria-label': meta.label },
-      h('header', { class: 'col-head' }, statusDot(status), h('h3', { class: 'col-title' }, meta.label), count, h('span', { class: 'spacer' }), addBtn),
+      h('header', { class: 'col-head' }, statusDot(status), h('h3', { class: 'col-title' }, meta.label), count, need, h('span', { class: 'spacer' }), addBtn),
       composer.el, body, more);
     wireDrop(body);
-    cols[status] = { el, body, count, composer, more };
+    cols[status] = { el, body, count, need, composer, more };
     return el;
   }
 
@@ -50,16 +58,17 @@ export function mount(container) {
     const meta = STATUS_META[status];
     const key = `helm.lane.${status}`;
     const count = h('span', { class: 'col-count mono' }, '0');
+    const need = h('span', { class: 'col-need mono', hidden: true });
     const body = h('div', { class: 'lane-body', 'data-status': status, 'data-layout': 'grid', 'data-empty': status === 'later' ? 'Park tasks here to come back to them' : 'Nothing is blocked' });
     const toggle = h('button', { class: 'lane-toggle', type: 'button', 'aria-expanded': 'true' },
-      icon('chevronDown', 14, 'lane-chev'), statusDot(status), h('span', { class: 'col-title' }, meta.label), count);
+      icon('chevronDown', 14, 'lane-chev'), statusDot(status), h('span', { class: 'col-title' }, meta.label), count, need);
     const el = h('section', { class: `lane lane-${status}`, 'aria-label': meta.label }, toggle, body);
     const apply = (open) => { setClass(el, 'collapsed', !open); toggle.setAttribute('aria-expanded', String(open)); };
     let open = lsGet(key) !== '0';
     apply(open);
     toggle.addEventListener('click', () => { open = !open; lsSet(key, open ? '1' : '0'); apply(open); });
     wireDrop(body);
-    cols[status] = { el, body, count, toggle, forceOpen: () => { if (!open) { open = true; apply(true); } }, isOpen: () => open, apply };
+    cols[status] = { el, body, count, need, toggle, forceOpen: () => { if (!open) { open = true; apply(true); } }, isOpen: () => open, apply };
     return el;
   }
 
@@ -130,7 +139,7 @@ export function mount(container) {
   }
 
   /* ---------- cards ---------- */
-  function createCard(t) {
+  function createCard(t, animate) {
     const r = {};
     r.title = h('h4', { class: 'card-title' });
     r.id = h('span', { class: 'task-id mono' });
@@ -149,11 +158,14 @@ export function mount(container) {
     r.meta = h('div', { class: 'card-meta' }, r.elapsed, r.tokens, r.files, r.dep);
     r.choices = h('button', { class: 'choices-chip', type: 'button', hidden: true }, h('span', { 'aria-hidden': 'true' }, '◆'), h('span', {}));
     r.choices.addEventListener('click', (e) => { e.stopPropagation(); openTask(r.choices.__task); });
+    r.need = h('span', { class: 'need-pill', hidden: true }, h('span', { class: 'need-pill-dot', 'aria-hidden': 'true' }), h('span', {}));
     r.start = createStartStatus();
     r.actions = h('div', { class: 'card-actions' });
     const el = h('article', { class: 'card', tabindex: '0', draggable: 'true', 'data-id': t.id, role: 'group' },
-      r.actions, r.title, h('div', { class: 'card-sub' }, r.id, r.proj, r.conflict, r.choices), r.agent, r.blocked, r.start.el, r.meta);
+      r.actions, r.need, r.title, h('div', { class: 'card-sub' }, r.id, r.proj, r.conflict, r.choices), r.agent, r.blocked, r.start.el, r.meta);
     el.__r = r;
+    el.__animate = !!animate;
+    el.__needs = null; // unknown until first update; a card created already waiting pulses once when the board has rendered before
     el.addEventListener('click', (e) => { if (!e.target.closest('.card-actions') && !el.__task.__pending) openTask(el.__task.id); });
     el.addEventListener('focus', () => { if (state.ui.selectedTaskId !== el.__task.id) setUI({ selectedTaskId: el.__task.id }); });
     el.addEventListener('keydown', (e) => onCardKey(e, el));
@@ -178,7 +190,22 @@ export function mount(container) {
   function updateCard(el, t) {
     const r = el.__r;
     el.__task = t;
-    setAttr(el, 'aria-label', `${t.id} ${t.title}`);
+    const needs = sel.needsYou(t);
+    const isNeed = needs.length > 0;
+    setAttr(el, 'aria-label', `${t.id} ${t.title}${isNeed ? ` — needs you: ${needs.map((n) => n.label).join(', ')}` : ''}`);
+    setClass(el, 'needs-you', isNeed);
+    setHidden(r.need, !isNeed);
+    if (isNeed) {
+      setText(r.need.lastChild, `Needs you · ${needs[0].label}${needs.length > 1 ? ` +${needs.length - 1}` : ''}`);
+      r.need.title = needs.map((n) => n.label).join(' · ');
+    }
+    if (isNeed && el.__needs === false || (isNeed && el.__needs === null && el.__animate)) {
+      el.classList.remove('needs-pulse'); void el.offsetWidth; el.classList.add('needs-pulse');
+      const done = () => el.classList.remove('needs-pulse');
+      el.addEventListener('animationend', done, { once: true });
+      setTimeout(done, 1600);
+    }
+    el.__needs = isNeed;
     setClass(el, 'pending', !!t.__pending);
     setText(r.title, t.title);
     setText(r.id, String(t.id).startsWith('tmp-') ? '…' : t.id);
@@ -266,12 +293,14 @@ export function mount(container) {
       if (next) { e.preventDefault(); placeTask(t.id, next, columnTasks(next, t.id).length).then(() => refocus(t.id)); }
     } else if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
       e.preventDefault();
-      const list = columnTasks(t.status, null);
+      const grp = needsOf(t);
+      const list = columnTasks(t.status, null).filter((x) => needsOf(x) === grp); // moves stay inside the card's group
       const i = list.findIndex((x) => x.id === t.id);
-      const j = i + (e.key === 'ArrowDown' ? 1 : -1);
-      if (i < 0 || j < 0 || j >= list.length) return;
-      // index within the list excluding self
-      placeTask(t.id, t.status, j).then(() => refocus(t.id));
+      const down = e.key === 'ArrowDown';
+      const target = list[i + (down ? 1 : -1)];
+      if (i < 0 || !target) return;
+      const k = columnTasks(t.status, t.id).findIndex((x) => x.id === target.id);
+      placeTask(t.id, t.status, down ? k + 1 : k).then(() => refocus(t.id));
     }
   }
   function refocus(id) {
@@ -279,9 +308,15 @@ export function mount(container) {
   }
 
   /* ---------- ordering + dnd ---------- */
+  /** Needs-you cards first; the user's manual order (cmp) applies inside each group. */
+  function sortNeedsFirst(list) {
+    const flag = new Map(list.map((t) => [t.id, needsOf(t)]));
+    return list.sort((a, b) => (flag.get(b.id) - flag.get(a.id)) || cmp(a, b));
+  }
+
   function columnTasks(status, excludeId) {
     const list = sel.scopedTasks().filter((t) => t.status === status && t.id !== excludeId);
-    return list.sort(status === 'done' ? cmpDone : cmp);
+    return status === 'done' ? list.sort(cmpDone) : sortNeedsFirst(list);
   }
 
   async function placeTask(id, status, index) {
@@ -291,7 +326,13 @@ export function mount(container) {
       if (t.status !== status) await patchTask(id, { status }, 'Could not move task');
       return;
     }
-    const col = columnTasks(status, id);
+    // `index` is a position in the displayed column (needs-you group first); orders only matter within a group,
+    // so translate it to a position among the cards that share this card's group.
+    const grp = needsOf(t);
+    const display = columnTasks(status, id);
+    const gIndex = display.slice(0, index).filter((x) => needsOf(x) === grp).length;
+    const col = display.filter((x) => needsOf(x) === grp);
+    index = gIndex;
     const prev = col[index - 1], next = col[index];
     let order;
     if (prev && next) order = (prev.order + next.order) / 2;
@@ -345,12 +386,14 @@ export function mount(container) {
       if (!dragId) return;
       e.preventDefault();
       const id = dragId;
-      const { index } = dropIndex(body, e.clientX, e.clientY);
+      const { before } = dropIndex(body, e.clientX, e.clientY);
       clearDropMarks();
       dragId = null;
       root.classList.remove('is-dragging');
       const status = body.dataset.status;
-      placeTask(id, status, index);
+      const col = columnTasks(status, id); // unfiltered, so the "Needs me" filter cannot skew the position
+      const k = before && before.__task ? col.findIndex((x) => x.id === before.__task.id) : -1;
+      placeTask(id, status, k >= 0 ? k : col.length);
     });
   }
 
@@ -361,18 +404,30 @@ export function mount(container) {
     const tasks = sel.scopedTasks();
     const byStatus = {};
     for (const t of tasks) (byStatus[t.status] ||= []).push(t);
+    let needTotal = 0;
+    setAttr(needsBtn, 'aria-pressed', String(onlyNeeds));
+    setClass(needsBtn, 'on', onlyNeeds);
     for (const status of [...MAIN_COLUMNS, ...LANES]) {
-      let list = (byStatus[status] || []).sort(status === 'done' ? cmpDone : cmp);
+      let list = status === 'done' ? (byStatus[status] || []).sort(cmpDone) : sortNeedsFirst(byStatus[status] || []);
       const c = cols[status];
+      const nNeed = list.filter(needsOf).length;
+      needTotal += nNeed;
+      setHidden(c.need, nNeed === 0);
+      setText(c.need, nNeed === 1 ? '1 needs you' : `${nNeed} need you`);
+      if (onlyNeeds) list = list.filter(needsOf);
       const total = list.length;
       if (status === 'done' && !doneExpanded) list = list.slice(0, DONE_LIMIT);
       reconcile(c.body, list, (t) => t.id, createCard, updateCard);
+      c.body.setAttribute('data-empty', onlyNeeds ? 'Nothing here needs you' : (status === 'done' ? 'Nothing done yet' : status === 'later' ? 'Park tasks here to come back to them' : status === 'blocked' ? 'Nothing is blocked' : 'Drop tasks here'));
       setText(c.count, String(total));
       if (status === 'done') {
         setHidden(c.more, total <= DONE_LIMIT);
         setText(c.more, doneExpanded ? 'Show fewer' : `Show ${total - DONE_LIMIT} more`);
       }
     }
+    setHidden(needsBtnCount, needTotal === 0);
+    setText(needsBtnCount, String(needTotal));
+    setClass(needsBtn, 'has-items', needTotal > 0);
     // blocked lane draws attention
     if (byStatus.blocked && byStatus.blocked.length) setClass(cols.blocked.el, 'has-items', true); else setClass(cols.blocked.el, 'has-items', false);
     setClass(cols.later.el, 'has-items', !!(byStatus.later && byStatus.later.length));
@@ -400,6 +455,21 @@ export function mount(container) {
       action ? h('button', { class: 'btn btn-primary btn-sm', type: 'button', onclick: action.onClick }, action.label) : null);
   }
 
+  function onYKey(e) {
+    if (e.key !== 'y' || e.metaKey || e.ctrlKey || e.altKey || e.defaultPrevented) return;
+    const tag = (e.target && e.target.tagName) || '';
+    if (/^(INPUT|TEXTAREA|SELECT|BUTTON)$/.test(tag) || (e.target && e.target.isContentEditable)) return;
+    const cards = Array.from(root.querySelectorAll('.card.needs-you'));
+    if (!cards.length) return;
+    e.preventDefault();
+    const cur = document.activeElement && document.activeElement.closest ? document.activeElement.closest('.card') : null;
+    const i = cards.indexOf(cur);
+    const next = cards[(i + 1) % cards.length];
+    next.focus({ preventScroll: true });
+    next.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  }
+  document.addEventListener('keydown', onYKey);
+
   const offNew = bus.on('new-task', () => openComposer('backlog'));
   render();
   if (state.ui.pendingNewTask) { setUI({ pendingNewTask: false }); openComposer('backlog'); }
@@ -408,6 +478,6 @@ export function mount(container) {
     watch: ['task', 'agent', 'project', 'session', 'ui', 'ready', 'question', 'note'],
     update: render,
     setRoute() {},
-    destroy() { offNew(); root.remove(); },
+    destroy() { offNew(); document.removeEventListener('keydown', onYKey); root.remove(); },
   };
 }

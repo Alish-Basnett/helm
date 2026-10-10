@@ -1,0 +1,74 @@
+/* settings.css — user appearance settings (accent, text size, density) and the Settings page.
+   prefs.js / theme-init.js put data-accent / data-fs / data-density on <html>; defaults leave the attribute off. */
+
+/* ---------- accent palettes (each: colour, hover tint, text-on-accent) ---------- */
+:root {
+  --ac-cyan: light-dark(#007f88, #5ce1e6);   --ac-cyan-hi: light-dark(#14b4be, #b4f7fa);   --ac-cyan-on: light-dark(#ffffff, #04272a);
+  --ac-blue: light-dark(#0a67d8, #6aa8ff);   --ac-blue-hi: light-dark(#3b8cf0, #bcd7ff);   --ac-blue-on: light-dark(#ffffff, #06213f);
+  --ac-indigo: light-dark(#4f46e5, #a5a8ff); --ac-indigo-hi: light-dark(#6d65f0, #d3d4ff); --ac-indigo-on: light-dark(#ffffff, #15163f);
+  --ac-green: light-dark(#1a7f37, #52d27c);  --ac-green-hi: light-dark(#2da44e, #b6f2cb);  --ac-green-on: light-dark(#ffffff, #052e14);
+  --ac-orange: light-dark(#b45309, #ffab2e); --ac-orange-hi: light-dark(#d97706, #ffd699); --ac-orange-on: light-dark(#ffffff, #3a2200);
+  --ac-pink: light-dark(#c2255c, #ff7ab8);   --ac-pink-hi: light-dark(#e0407a, #ffc2dd);   --ac-pink-on: light-dark(#ffffff, #3d0a20);
+}
+:root[data-accent="blue"] { --accent: var(--ac-blue); --accent-hi: var(--ac-blue-hi); --on-accent: var(--ac-blue-on); }
+:root[data-accent="indigo"] { --accent: var(--ac-indigo); --accent-hi: var(--ac-indigo-hi); --on-accent: var(--ac-indigo-on); }
+:root[data-accent="green"] { --accent: var(--ac-green); --accent-hi: var(--ac-green-hi); --on-accent: var(--ac-green-on); }
+:root[data-accent="orange"] { --accent: var(--ac-orange); --accent-hi: var(--ac-orange-hi); --on-accent: var(--ac-orange-on); }
+:root[data-accent="pink"] { --accent: var(--ac-pink); --accent-hi: var(--ac-pink-hi); --on-accent: var(--ac-pink-on); }
+
+/* ---------- text size (body + chat/markdown text) ---------- */
+:root[data-fs="s"] { --fs: 13px; --fs-chat: 12.5px; --cm-fs: 11.5px; }
+:root[data-fs="l"] { --fs: 15.5px; --fs-chat: 15px; --cm-fs: 14px; }
+:root[data-fs] .md, :root[data-fs] .tk-text, :root[data-fs] .note-text, :root[data-fs] .note-input,
+:root[data-fs] .reply-bubble .md, :root[data-fs] .reply-short .md, :root[data-fs] .reply-short .md-p { font-size: var(--fs-chat); }
+
+/* ---------- density ---------- */
+:root[data-density="compact"] { --sp-2: 6px; --sp-3: 9px; --sp-4: 12px; --sp-5: 18px; --sp-6: 24px; }
+:root[data-density="compact"] .nav-item { min-height: 32px; }
+:root[data-density="compact"] .talk-thread { gap: 8px; padding-block: 10px; }
+:root[data-density="compact"] .tk-bubble { padding-block: 5px; }
+:root[data-density="compact"] .set-row { padding-block: 8px; }
+:root[data-density="compact"] .cm-line { line-height: 1.45; }
+
+/* ---------- sidebar: Settings sits at the bottom, above the theme toggle ---------- */
+.sb-settings { margin-top: auto; }
+.sb-foot { margin-top: 0; }
+
+/* ---------- Settings page ---------- */
+.settings { max-width: 760px; margin: 0 auto; padding: var(--sp-5) var(--sp-4) 48px; display: flex; flex-direction: column; gap: var(--sp-4); }
+.set-card { background: var(--bg-2); border-radius: var(--r-lg); box-shadow: var(--shadow-1); padding: var(--sp-2) var(--sp-4) var(--sp-3); }
+.set-h { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--label-2); padding: 12px 0 6px; }
+.set-row { display: flex; gap: var(--sp-4); align-items: center; justify-content: space-between; padding: 12px 0; border-top: .5px solid var(--separator); }
+.set-h + .set-row { border-top: 0; }
+.set-text { min-width: 0; flex: 1; }
+.set-title { font-weight: 600; }
+.set-hint { color: var(--label-2); font-size: 12.5px; margin-top: 2px; max-width: 58ch; line-height: 1.4; }
+.set-ctl { flex: none; }
+.set-foot { display: flex; justify-content: flex-end; padding-top: 8px; border-top: .5px solid var(--separator); }
+@media (max-width: 720px) { .set-row { flex-direction: column; align-items: flex-start; } .set-ctl { max-width: 100%; } }
+
+.seg { display: inline-flex; flex-wrap: wrap; padding: 2px; border-radius: 10px; background: var(--fill-2); gap: 2px; }
+.seg-btn { border: 0; background: transparent; color: var(--label-2); min-height: 30px; padding: 0 12px; border-radius: 8px; font-size: 13px; font-weight: 500; }
+.seg-btn:hover { color: var(--label); }
+.seg-btn.on { background: var(--elevated); color: var(--label); box-shadow: var(--shadow-1); font-weight: 600; }
+
+.sw-row { display: flex; gap: 10px; }
+.sw { --c: var(--ac-cyan); --c-on: var(--ac-cyan-on); width: 28px; height: 28px; border-radius: 50%; border: 0; padding: 0; background: var(--c); color: transparent; display: grid; place-items: center; box-shadow: inset 0 0 0 .5px rgba(0, 0, 0, .18); transition: transform 120ms var(--ease); }
+.sw:hover { transform: scale(1.1); }
+.sw[data-v="blue"] { --c: var(--ac-blue); --c-on: var(--ac-blue-on); }
+.sw[data-v="indigo"] { --c: var(--ac-indigo); --c-on: var(--ac-indigo-on); }
+.sw[data-v="green"] { --c: var(--ac-green); --c-on: var(--ac-green-on); }
+.sw[data-v="orange"] { --c: var(--ac-orange); --c-on: var(--ac-orange-on); }
+.sw[data-v="pink"] { --c: var(--ac-pink); --c-on: var(--ac-pink-on); }
+.sw.on { color: var(--c-on); box-shadow: 0 0 0 2px var(--bg-2), 0 0 0 4px var(--c); }
+
+.tgl { position: relative; width: 44px; height: 26px; border-radius: 99px; border: 0; padding: 0; background: var(--fill); transition: background var(--dur) var(--ease); }
+.tgl-knob { position: absolute; top: 2px; left: 2px; width: 22px; height: 22px; border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(0, 0, 0, .3); transition: transform var(--dur) var(--ease); }
+.tgl[aria-checked="true"] { background: var(--accent); }
+.tgl[aria-checked="true"] .tgl-knob { transform: translateX(18px); }
+
+.set-previewbox { border-top: .5px solid var(--separator); padding-top: 4px; }
+.set-prevlabel { display: flex; align-items: center; gap: 6px; margin: 8px 0; }
+.set-preview { border-radius: 12px; overflow: hidden; padding: 6px 0; background: var(--bg-3); }
+.set-preview .tk-turn { padding: 6px 10px; }
+.set-preview.cm-surface { background: var(--cm-bg); counter-reset: cm-ln; padding: 8px 8px 8px 0; }

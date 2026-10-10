@@ -365,6 +365,7 @@ Opening a v0.1 database adds the new tables/columns in place. Old events are not
   choice (title = choice title, description = detail + "From T-n.", same project, `parentTaskId` = T-n),
   starts each when `start` (same rules and 409 handling as `/start`, per task, never failing the batch), marks
   picked → `picked` with its `taskId`, every other open choice → `skipped`; returns `{ tasks, choices, errors }`.
+  `apply` also takes `notes?: { [choiceId]: string ≤500 }` and `message?: string ≤1000`; each created task's description is detail, `Note: …`, `Message: …`, `From T-n.` (so the start note carries them), and picked `choices[]` rows store `note` / `message` (hub.task.choices event data, rebuild-exact; reset clears them).
   `POST /v1/tasks/:id/choices/reset` → all back to `open` (created tasks stay). `Task` gains `parentTaskId: string | null`.
   Open choices count as "needs you" (Inbox kind `choices`, one entry per task with open choices).
   Open choices are not a `questions` row: clients derive the Inbox "Choices waiting" entries (kind `choices`, one per task)

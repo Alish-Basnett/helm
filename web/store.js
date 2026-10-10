@@ -251,6 +251,28 @@ export const sel = {
     }
     return best;
   },
+  /**
+   * Why a task is waiting on the user: [{key, label}] in priority order, or [] when nothing is.
+   * Same sources as the Inbox (open choices, open questions, waiting agents) plus failed notes and review.
+   */
+  needsYou(task) {
+    if (!task || task.status === 'done' || task.status === 'archived' || String(task.id).startsWith('tmp-')) return [];
+    const out = [];
+    const add = (key, label) => { if (!out.some((r) => r.key === key)) out.push({ key, label }); };
+    const nc = sel.openChoiceCount(task);
+    if (nc) add('choices', nc === 1 ? '1 choice' : `${nc} choices`);
+    const agent = sel.agentOfTask(task);
+    for (const q of state.questions.values()) {
+      if (q.state !== 'open') continue;
+      if (q.taskId === task.id || (agent && q.agentId === agent.id)) add(q.kind === 'waiting' ? 'waiting' : 'question', q.kind === 'waiting' ? 'Waiting for you' : 'Question');
+    }
+    if (agent && agent.status === 'waiting') add('waiting', 'Waiting for you');
+    for (const n of state.notes.values()) {
+      if (n.state === 'failed' && n.target && n.target.kind === 'task' && n.target.id === task.id) { add('note', 'Note failed'); break; }
+    }
+    if (task.status === 'review') add('review', 'Review');
+    return out;
+  },
   sessionWaiting(sid) { return sel.agentsOfSession(sid).some((a) => a.status === 'waiting'); },
 
   /* ----- v0.2: jobs + digests ----- */

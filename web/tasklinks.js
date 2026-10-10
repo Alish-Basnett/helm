@@ -78,6 +78,35 @@ export function setLinked(el, text) {
   else el.textContent = text;
 }
 
+/* ---- code-mode chips: look like identifiers (T_18) but stay clickable with the same hover title ---- */
+const titleOf = (t) => `${t.id} · ${t.title} (${(STATUS_META[t.status] || {}).label || t.status}) — open details and chat`;
+export function codeChip(id) {
+  const t = state.tasks.get(id);
+  if (!t || !known(id)) return null;
+  const chip = h('button', { class: 'cm-task', type: 'button', 'data-task': id, 'data-status': t.status, title: titleOf(t) }, id.replace('-', '_'));
+  chip.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); openTask(id); });
+  return chip;
+}
+/** text → (string | Node)[] with code chips for known tasks; null when there is none. */
+export function codeChipParts(text) {
+  if (!text || text.indexOf('T-') < 0) return null;
+  let out = null;
+  let last = 0;
+  TOKEN.lastIndex = 0;
+  let m;
+  while ((m = TOKEN.exec(text))) {
+    const chip = codeChip(`T-${m[1]}`);
+    if (!chip) continue;
+    out = out || [];
+    if (m.index > last) out.push(text.slice(last, m.index));
+    out.push(chip);
+    last = m.index + m[0].length;
+  }
+  if (!out) return null;
+  if (last < text.length) out.push(text.slice(last));
+  return out;
+}
+
 /** Keep every chip on the page in step with its task (title, status dot). */
 let started = false;
 export function startTaskLinks() {
@@ -88,6 +117,10 @@ export function startTaskLinks() {
     for (const chip of document.querySelectorAll('.task-link[data-task]')) {
       const t = state.tasks.get(chip.getAttribute('data-task'));
       if (t) paint(chip, t);
+    }
+    for (const chip of document.querySelectorAll('.cm-task[data-task]')) {
+      const t = state.tasks.get(chip.getAttribute('data-task'));
+      if (t) { chip.title = titleOf(t); chip.setAttribute('data-status', t.status); }
     }
   });
 }

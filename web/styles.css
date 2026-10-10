@@ -90,7 +90,7 @@
 html, body { height: 100%; }
 body {
   margin: 0; background: var(--bg); color: var(--label);
-  font: 14px/1.4 var(--font); letter-spacing: -0.006em;
+  font: var(--fs, 14px)/1.4 var(--font); letter-spacing: -0.006em;
   -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;
   overflow: hidden;
 }

@@ -1072,6 +1072,7 @@ export class Projector {
         effort: ['S', 'M', 'L'].includes(raw.effort) ? raw.effort : null,
         value: ['low', 'medium', 'high'].includes(raw.value) ? raw.value : null,
         state: prev ? prev.state : 'open', taskId: prev ? prev.taskId : null,
+        ...(prev && prev.note ? { note: prev.note } : {}), ...(prev && prev.message ? { message: prev.message } : {}),
       });
     }
     this.db.run('UPDATE tasks SET choices = ?, updated_at = ? WHERE id = ?', JSON.stringify(list), ev.at, t.id);
@@ -1086,11 +1087,16 @@ export class Projector {
     const { id, mode } = ev.data;
     const t = this.getTask(id);
     if (!t) throw new Error('task not found');
-    const results = new Map((ev.data.results || []).map((r) => [r.choiceId, r.taskId]));
+    const results = new Map((ev.data.results || []).map((r) => [r.choiceId, r]));
     const list = parse(t.choices, []).map((c) => {
-      if (mode === 'reset') return { ...c, state: 'open', taskId: null };
+      if (mode === 'reset') { const { note, message, ...rest } = c; return { ...rest, state: 'open', taskId: null }; }
       if (c.state !== 'open') return c;
-      return results.has(c.id) ? { ...c, state: 'picked', taskId: results.get(c.id) } : { ...c, state: 'skipped' };
+      if (!results.has(c.id)) return { ...c, state: 'skipped' };
+      const r = results.get(c.id);
+      const out = { ...c, state: 'picked', taskId: r.taskId };
+      if (r.note) out.note = cut(str(r.note), 500);
+      if (r.message) out.message = cut(str(r.message), 1000);
+      return out;
     });
     this.db.run('UPDATE tasks SET choices = ?, updated_at = ? WHERE id = ?', JSON.stringify(list), ev.at, id);
     this.pushTask(id);

@@ -18,8 +18,10 @@ import * as office from './views/office.js';
 import * as threads from './views/threads.js';
 import * as learn from './views/learn.js';
 import * as inbox from './views/inbox.js';
+import * as settings from './views/settings.js';
+import { getPref, applyPrefs, cycleTheme, onPrefs } from './prefs.js';
 
-const VIEW_MODS = { board, projects, office, threads, inbox, learn };
+const VIEW_MODS = { board, projects, office, threads, inbox, learn, settings };
 const VIEW_META = {
   board: { label: 'Board', icon: 'board' },
   projects: { label: 'Projects', icon: 'folder' },
@@ -27,6 +29,7 @@ const VIEW_META = {
   threads: { label: 'Threads', icon: 'threads' },
   inbox: { label: 'Inbox', icon: 'inbox' },
   learn: { label: 'Learn', icon: 'learn' },
+  settings: { label: 'Settings', icon: 'gear' },
 };
 
 const appEl = $('#app');
@@ -35,21 +38,16 @@ const topbar = $('#topbar');
 const viewEl = $('#view');
 
 /* ---------- theme + sidebar prefs ---------- */
-const THEMES = ['system', 'light', 'dark'];
-let theme = lsGet('helm.theme', 'system');
-if (!THEMES.includes(theme)) theme = 'system';
-function applyTheme() {
-  const root = document.documentElement;
-  if (theme === 'system') root.removeAttribute('data-theme'); else root.setAttribute('data-theme', theme);
-  lsSet('helm.theme', theme === 'system' ? null : theme);
-  if (themeBtn) {
-    themeBtn.textContent = '';
-    themeBtn.append(icon(theme === 'light' ? 'sun' : theme === 'dark' ? 'moon' : 'auto', 18));
-    themeBtn.title = `Theme: ${theme} (click to change)`;
-    themeBtn.setAttribute('aria-label', `Theme: ${theme}. Switch theme`);
-  }
+function paintThemeBtn() {
+  const theme = getPref('theme');
+  if (!themeBtn) return;
+  themeBtn.textContent = '';
+  themeBtn.append(icon(theme === 'light' ? 'sun' : theme === 'dark' ? 'moon' : 'auto', 18));
+  themeBtn.title = `Theme: ${theme} (click to change)`;
+  themeBtn.setAttribute('aria-label', `Theme: ${theme}. Switch theme`);
 }
-function cycleTheme() { theme = THEMES[(THEMES.indexOf(theme) + 1) % THEMES.length]; applyTheme(); }
+// the theme lives in prefs.js (shared with the Settings page); the sidebar button just mirrors it
+onPrefs((k) => { if (k === 'theme') paintThemeBtn(); });
 
 let collapsed = lsGet('helm.sidebar') === 'collapsed';
 function applySidebar() {
@@ -83,12 +81,14 @@ const projSwitch = h('button', { class: 'proj-switch', type: 'button', 'aria-has
 const searchBtn = h('button', { class: 'sb-search', type: 'button', 'aria-label': 'Search (Command K)', onclick: () => spotlight.open() },
   icon('search', 16), h('span', { class: 'sb-label' }, 'Search'), h('kbd', { class: 'kbd sb-label' }, '⌘K'));
 const navBadges = {};
-const navItems = VIEWS.map((v) => {
+const navItems = VIEWS.filter((v) => v !== 'settings').map((v) => {
   const badge = h('span', { class: 'nav-badge mono', hidden: true });
   navBadges[v] = badge;
   return h('a', { class: 'nav-item', href: `#/${v}`, 'data-view': v, title: VIEW_META[v].label },
     icon(VIEW_META[v].icon, 18), h('span', { class: 'nav-label sb-label' }, VIEW_META[v].label), badge);
 });
+const settingsLink = h('a', { class: 'nav-item sb-settings', href: '#/settings', 'data-view': 'settings', title: 'Settings' },
+  icon('gear', 18), h('span', { class: 'nav-label sb-label' }, 'Settings'));
 const themeBtn = h('button', { class: 'icon-btn', type: 'button', onclick: cycleTheme });
 const collapseBtn = h('button', { class: 'icon-btn collapse-btn', type: 'button', onclick: toggleSidebar }, icon('sidebar', 18));
 sidebar.append(
@@ -96,6 +96,7 @@ sidebar.append(
   h('div', { class: 'sb-top' }, projSwitch),
   searchBtn,
   h('nav', { class: 'sb-nav', 'aria-label': 'Views' }, navItems),
+  settingsLink,
   h('div', { class: 'sb-foot' }, themeBtn, h('span', { class: 'spacer' }), collapseBtn));
 
 function openProjectMenu() {
@@ -195,7 +196,7 @@ function applyRoute(r) {
   if (view && view.setRoute) view.setRoute(r);
   sheet.show(r.task);
   taskChat.show(r.chat ? r.task : null);
-  for (const a of navItems) {
+  for (const a of [...navItems, settingsLink]) {
     const on = a.getAttribute('data-view') === r.view;
     setClass(a, 'active', on);
     if (on) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
@@ -235,7 +236,8 @@ document.addEventListener('keydown', (e) => {
 });
 
 /* ---------- boot ---------- */
-applyTheme();
+applyPrefs();
+paintThemeBtn();
 applySidebar();
 renderChrome();
 applyRoute(route());

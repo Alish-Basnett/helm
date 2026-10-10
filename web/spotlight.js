@@ -3,6 +3,7 @@ import { h, bus, debounce, renderSnippet } from './dom.js';
 import { icon } from './icons.js';
 import { state, sel, setUI } from './store.js';
 import { api } from './api.js';
+import { setPref, codeOn } from './prefs.js';
 import { setStatus, startTask, canStart } from './actions.js';
 import { navigate, openTask } from './router.js';
 import { fmtAgo, truncate, STATUS_META } from './format.js';
@@ -83,6 +84,8 @@ export function createSpotlight(root) {
       for (const x of ct) cmds.push({ taskCmd: true, hay: `${x.id} ${x.title}`.toLowerCase(), title: `Review ${sel.openChoiceCount(x)} choices · ${x.id} ${truncate(x.title, 50)}`, sub: sel.projectName(x.projectId), icon: 'checklist', run: () => openTask(x.id) });
       if (!ct.length) cmds.push({ title: 'No choices waiting', sub: 'When an agent proposes options they appear here', icon: 'checklist', disabled: true });
     }
+    cmds.push({ title: 'Settings', sub: 'Theme, accent, text size, code mode…', icon: 'gear', run: () => navigate('settings') });
+    cmds.push({ title: 'Toggle code mode', sub: 'Make Talk look like source code', icon: 'code', run: () => setPref('code', codeOn() ? 'off' : 'on') });
     cmds.push({ title: 'Toggle theme', sub: 'System · Light · Dark', icon: 'sun', run: () => bus.emit('toggle-theme') });
     cmds.push({ title: 'Toggle sidebar', icon: 'sidebar', run: () => bus.emit('toggle-sidebar') });
     return cmds.map((c, i) => ({ ...c, kind: 'command', id: 'cmd' + i }));

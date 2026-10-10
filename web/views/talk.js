@@ -12,6 +12,8 @@ import { setLinked } from '../tasklinks.js';
 import { panelClose } from '../dock.js';
 import { cwdTail } from '../format.js';
 import { emptyState, modelBadge, updateModelBadge, toast } from '../ui.js';
+import { getPref, codeOn, onPrefs } from '../prefs.js';
+import { createCodeTurn, composerView } from '../code.js';
 
 const STATE_LABEL = { draft: 'Draft', queued: 'Queued', sending: 'Sending…', ran: 'Delivered', failed: 'Failed' };
 
@@ -37,13 +39,25 @@ export function createTalk(opts) {
   const cheapHint = isTask ? h('div', { class: 'note-hint note-hint-cheap mono' }, 'Questions are answered cheaply from the task record · start with ! to send to the agent') : null;
   const tray = createAttachTray({ onChange: () => setClass(composer, 'has-att', tray.count > 0) });
   const attachBtn = h('button', { class: 'icon-btn note-attach', type: 'button', 'aria-label': 'Attach files', title: 'Attach files (or drop / paste)', onclick: () => binding.pick() }, icon('paperclip', 18));
-  const composer = h('div', { class: 'note-composer talk-composer' }, tray.el, ta, attachBtn, send, hint, cheapHint);
+  // code mode: a highlighted layer sits under the (transparent-text) textarea, so typing is coloured live
+  const hl = h('pre', { class: 'cm-hl', 'aria-hidden': 'true' });
+  const inputWrap = h('div', { class: 'talk-inputwrap' }, hl, ta);
+  const composer = h('div', { class: 'note-composer talk-composer' }, tray.el, inputWrap, attachBtn, send, hint, cheapHint);
   const el = h('section', { class: ['talk', isTask && 'task-chat', opts.inline && 'inline'], 'aria-label': isTask ? 'Task chat' : 'Talk' }, list, empty, composer);
   const binding = bindAttachInput({ box: el, ta, tray, disabled: () => ta.disabled });
 
   const nearEnd = () => list.scrollHeight - list.scrollTop - list.clientHeight < 80;
   const scrollToEnd = () => { list.scrollTop = list.scrollHeight; };
-  const autosize = () => { ta.style.height = 'auto'; ta.style.height = Math.min(ta.scrollHeight, 140) + 'px'; };
+  function syncCode() {
+    if (!codeOn()) { ta.style.textIndent = ''; return; }
+    const v = composerView(ta.value, getPref('codestyle'), ta.getAttribute('placeholder') || '');
+    hl.textContent = '';
+    hl.append(...v.nodes);
+    ta.style.textIndent = `${v.prefixLen}ch`;
+    hl.scrollTop = ta.scrollTop;
+  }
+  const autosize = () => { ta.style.height = 'auto'; ta.style.height = Math.min(ta.scrollHeight, 140) + 'px'; syncCode(); };
+  ta.addEventListener('scroll', () => { hl.scrollTop = ta.scrollTop; });
 
   async function submit(run) {
     const text = ta.value.trim();
@@ -77,8 +91,9 @@ export function createTalk(opts) {
     const reply = createReply();
     const wait = createWaitLine({ typing: true });
     const claude = h('div', { class: 'tk-claude' }, reply.el, wait.el);
-    const li = h('li', { class: 'tk-turn' }, me, claude);
-    li.__r = { text, meta, atts, reply, wait, claude };
+    const std = h('div', { class: 'tk-std' }, me, claude);
+    const li = h('li', { class: 'tk-turn' }, std);
+    li.__r = { text, meta, atts, reply, wait, claude, std, cm: null };
     return li;
   }
 
@@ -86,6 +101,18 @@ export function createTalk(opts) {
     const r = li.__r;
     const cls = `tk-turn state-${n.state}${n.__pending ? ' pending' : ''}`;
     if (li.className !== cls) li.className = cls;
+    if (codeOn()) {
+      if (!r.cm) {
+        r.cm = createCodeTurn({ onSend: () => executeNotes(target), onDelete: (x) => deleteNote(x.id), onRetry: (x) => retryNote(x.id) });
+        li.append(r.cm.el);
+      }
+      setHidden(r.std, true);
+      setHidden(r.cm.el, false);
+      try { r.cm.update(n, getPref('codestyle')); } catch (e) { console.error('[helm] code render failed', e); }
+      return;
+    }
+    if (r.cm) setHidden(r.cm.el, true);
+    setHidden(r.std, false);
     setLinked(r.text, n.text);
     r.atts.update(n.attachments);
     const sig = `${n.state}|${n.ranAt}|${n.error || ''}|${n.__pending ? 1 : 0}`;
@@ -115,6 +142,7 @@ export function createTalk(opts) {
     const ended = !isTask && (!s || s.status === 'ended');
     ta.disabled = ended; send.disabled = ended; draftBtn.disabled = ended; attachBtn.disabled = ended;
     setAttr(ta, 'placeholder', ended ? 'This session has ended' : `Message ${who}…`);
+    syncCode();
     const notes = sel.notesFor(target.kind, sid);
     empty.hidden = notes.length > 0;
     list.hidden = notes.length === 0;
@@ -124,11 +152,18 @@ export function createTalk(opts) {
     firstRender = false;
   }
 
+  function applyMode() {
+    setClass(composer, 'cm-composer', codeOn());
+    setClass(el, 'cm-on', codeOn());
+    autosize();
+    render();
+  }
   startTicker();
-  render();
+  applyMode();
+  const offPrefs = onPrefs((k) => { if (k === 'code' || k === 'codestyle') applyMode(); });
   const off = subscribe((changed) => { if (changed.has('note') || changed.has('session') || changed.has('task')) render(); });
   requestAnimationFrame(scrollToEnd); // re-pin once the thread is attached and laid out
-  return { el, destroy() { off(); binding.destroy(); tray.destroy(); }, focus: () => ta.focus(), scrollToEnd, render };
+  return { el, destroy() { off(); offPrefs(); binding.destroy(); tray.destroy(); }, focus: () => ta.focus(), scrollToEnd, render };
 }
 export const createChat = createTalk;
 

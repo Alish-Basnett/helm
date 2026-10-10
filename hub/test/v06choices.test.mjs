@@ -140,3 +140,36 @@ test('seed includes a planning task with 6 open choices', async (t) => {
   assert.equal(plan.choices.length, 6);
   assert.ok(plan.choices.every((c) => c.state === 'open'));
 });
+
+test('apply with notes and a message: description composition, stored note, start note, validation, rebuild', async (t) => {
+  const h = await startTest(); t.after(h.stop);
+  const { t: pt } = await setup(h);
+  const bad = async (body) => (await h.api('POST', `/v1/tasks/${pt.id}/choices/apply`, { picked: ['a'], ...body })).status;
+  assert.equal(await bad({ notes: { a: 'x'.repeat(501) } }), 400);
+  assert.equal(await bad({ notes: 'no' }), 400);
+  assert.equal(await bad({ notes: { a: 5 } }), 400);
+  assert.equal(await bad({ message: 'm'.repeat(1001) }), 400);
+  assert.equal(task(h, pt.id).choices.every((c) => c.state === 'open'), true); // rejected requests change nothing
+  const r = await h.api('POST', `/v1/tasks/${pt.id}/choices/apply`, {
+    picked: ['a', 'b', 'c'], start: true, notes: { a: ' use the blue one ', c: 'quick' }, message: 'Ship by Friday',
+  });
+  assert.equal(r.status, 200);
+  const [ta, tb, tc] = r.json.tasks;
+  assert.equal(ta.description, `Do A\n\nNote: use the blue one\n\nMessage: Ship by Friday\n\nFrom ${pt.id}.`);
+  assert.equal(tb.description, `Do B\n\nMessage: Ship by Friday\n\nFrom ${pt.id}.`);
+  assert.equal(tc.description, `Note: quick\n\nMessage: Ship by Friday\n\nFrom ${pt.id}.`);
+  const cs = task(h, pt.id).choices;
+  assert.deepEqual(cs.map((c) => c.note ?? null), ['use the blue one', null, 'quick']);
+  assert.ok(cs.every((c) => c.message === 'Ship by Friday'));
+  const queued = h.state().notes.filter((n) => n.state === 'queued');
+  assert.ok(queued.some((n) => /Note: use the blue one/.test(n.text) && /Message: Ship by Friday/.test(n.text)));
+  // mod re-emitting the set keeps notes; reset clears them
+  h.send(h.ev('s1', 'task.choices', { taskId: pt.id, choices: C }));
+  assert.equal(task(h, pt.id).choices[0].note, 'use the blue one');
+  const before = h.hub.dump(), st = h.state();
+  h.hub.rebuild();
+  assert.deepEqual(h.hub.dump(), before);
+  assert.deepEqual({ ...h.state(), seq: 0 }, { ...st, seq: 0 });
+  await h.api('POST', `/v1/tasks/${pt.id}/choices/reset`);
+  assert.ok(task(h, pt.id).choices.every((c) => !('note' in c) && !('message' in c)));
+});

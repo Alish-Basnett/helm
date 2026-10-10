@@ -4,6 +4,20 @@ All notable changes to Helm are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/). Shapes and endpoints are defined in `CONTRACT.md`.
 
+## [0.7.0] - 2026-10-10
+
+### Added
+
+- Settings page (`#/settings`): theme, accent colour, text size, density, and Code mode with a live preview.
+- Code mode: Talk and Task chat render as syntax-highlighted code (JavaScript, TypeScript or Python). Your
+  messages appear as variables and replies as doc comments, task links as identifiers and attachments as
+  imports. The composer is highlighted live, and code mode can be switched off at any time.
+- Board: cards that need you (choices, questions, waiting agents, failed notes, review) glow amber with a
+  "Needs you · reason" pill and sort to the top of their column. Adds column counts, a "Needs me" filter
+  and a `y` key that jumps to the next one.
+- Choices: an optional note per choice and a message sent with the selection. Both go into each created
+  task's brief and stay visible on the card.
+
 ## [0.6.0] - 2026-10-10
 
 ### Added
