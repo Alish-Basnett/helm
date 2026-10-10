@@ -4,6 +4,16 @@ All notable changes to Helm are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/). Shapes and endpoints are defined in `CONTRACT.md`.
 
+## [0.15.0] - 2026-10-10
+
+### Added
+
+- Review queue (`#/review[/T-n]`, sidebar item with a count badge under Inbox, Spotlight "Review queue"): every task in Review in one two-pane workspace. Queue (oldest first or newest) with `+a −d`, recap line, time in review and run chip; per task the final report, recap, the diff (shared renderer, file tabs, unified/split, source badge), workflow shell checks plus the description's `Checks:` list as a local checklist, and Approve (A) / Request changes (R, a `!` task note) / Later (L) / J K skip / Enter opens the Diff panel / ? help. "Reviewed today: N". Web only, no hub change.
+
+### Changed
+
+- The diff row renderer moved from `views/diffpanel.js` to `diffview.js` so the Diff panel and the Review queue share it.
+
 ## [0.14.0] - 2026-10-10
 
 ### Added

@@ -219,6 +219,10 @@ export const sel = {
   scopedTasks() {
     return Array.from(state.tasks.values()).filter((t) => sel.inScope(t) && t.status !== 'archived');
   },
+  /** v0.12: tasks waiting in Review (unsorted; review.js orders them). */
+  reviewTasks(scoped = true) {
+    return Array.from(state.tasks.values()).filter((t) => t.status === 'review' && !String(t.id).startsWith('tmp-') && (!scoped || sel.inScope(t)));
+  },
   tasksOfProject(pid) {
     return Array.from(state.tasks.values()).filter((t) => t.projectId === pid && t.status !== 'archived');
   },

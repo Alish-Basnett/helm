@@ -67,6 +67,7 @@ export function createSpotlight(root) {
       { title: 'Go to Threads', icon: 'threads', run: () => navigate('threads') },
       { title: 'Go to Workflows', sub: 'Draw and run a flow of agents, checks and gates', icon: 'workflow', run: () => navigate('workflows') },
       { title: 'Go to Inbox', sub: 'Questions waiting for you', icon: 'inbox', run: () => navigate('inbox') },
+      { title: 'Review queue', sub: 'Diff, recap and Approve / Request changes for every task in Review', icon: 'review', run: () => navigate('review') },
       { title: 'Go to Learn', icon: 'learn', run: () => navigate('learn') },
       { title: 'Go to Templates', sub: 'Saved tasks you start in one click', icon: 'templates', run: () => navigate('templates') },
       { title: 'Switch project: All projects', sub: state.ui.projectId === 'all' ? 'current' : '', icon: 'folder', run: () => setUI({ projectId: 'all' }) },

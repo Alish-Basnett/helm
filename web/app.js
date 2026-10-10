@@ -24,10 +24,11 @@ import { createRunPanel } from './wf/runpanel.js';
 import * as learn from './views/learn.js';
 import * as templates from './views/templates.js';
 import * as inbox from './views/inbox.js';
+import * as review from './views/review.js';
 import * as settings from './views/settings.js';
 import { getPref, applyPrefs, cycleTheme, onPrefs } from './prefs.js';
 
-const VIEW_MODS = { board, projects, office, threads, workflows, inbox, learn, templates, settings };
+const VIEW_MODS = { board, projects, office, threads, workflows, inbox, review, learn, templates, settings };
 const VIEW_META = {
   board: { label: 'Board', icon: 'board' },
   projects: { label: 'Projects', icon: 'folder' },
@@ -35,6 +36,7 @@ const VIEW_META = {
   threads: { label: 'Threads', icon: 'threads' },
   workflows: { label: 'Workflows', icon: 'workflow' },
   inbox: { label: 'Inbox', icon: 'inbox' },
+  review: { label: 'Review', icon: 'review' },
   learn: { label: 'Learn', icon: 'learn' },
   templates: { label: 'Templates', icon: 'templates' },
   settings: { label: 'Settings', icon: 'gear' },
@@ -176,6 +178,8 @@ function renderChrome() {
   badge('office', running, 'accent', `${running} running`);
   const waiting = sel.openQuestions().length + sel.choiceTasks().length;
   badge('inbox', waiting, 'indigo', `${waiting} waiting for you`);
+  const inReview = sel.reviewTasks().length;
+  badge('review', inReview, 'accent', `${inReview} task${inReview === 1 ? '' : 's'} in review`);
   const liveRuns = sel.activeRuns().length;
   badge('workflows', liveRuns, 'accent', `${liveRuns} run${liveRuns === 1 ? '' : 's'} in progress`);
 }

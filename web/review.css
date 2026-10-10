@@ -1,0 +1,129 @@
+/* review.css — the Review queue (#/review). Two calm panes: a queue on the left, one task to read and decide on the
+   right. Tokens, spacing and density come from styles.css / settings.css, so dark, light, font size and compact density
+   all apply. The diff itself reuses the Diff panel's dp-* classes (components.css). */
+
+.view[data-view="review"] { overflow: hidden; }
+.rv { display: grid; grid-template-columns: minmax(280px, 340px) minmax(0, 1fr); height: 100%; min-height: 0; position: relative; }
+
+/* ---------- queue ---------- */
+.rv-queue { display: flex; flex-direction: column; min-height: 0; border-right: .5px solid var(--separator); background: var(--bg); }
+.rv-qhead { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2); padding: var(--sp-4) var(--sp-4) var(--sp-2); flex-wrap: wrap; }
+.rv-qtitle { display: inline-flex; align-items: center; gap: 8px; font-size: 15px; font-weight: 650; letter-spacing: -0.015em; }
+.rv-qtitle .icon { color: var(--accent); }
+.rv-today { padding: 0 var(--sp-4) var(--sp-3); font-size: 11.5px; color: var(--label-3); }
+.rv-list { flex: 1; min-height: 0; overflow-y: auto; padding: 0 var(--sp-3) var(--sp-4); display: flex; flex-direction: column; gap: 6px; }
+.rv-item { list-style: none; }
+.rv-row {
+  display: flex; flex-direction: column; gap: 6px; width: 100%; text-align: left; padding: 10px 12px; border: 0; border-radius: var(--r);
+  background: var(--bg-2); color: var(--label); box-shadow: var(--shadow-1);
+  transition: box-shadow var(--dur) var(--ease), background var(--dur) var(--ease);
+}
+.rv-row:hover { background: var(--bg-3); }
+.rv-row.on { box-shadow: 0 0 0 1.5px var(--accent), var(--shadow-2); }
+.rv-r1 { display: flex; align-items: center; gap: 8px; font-size: 11.5px; color: var(--label-3); }
+.rv-id { color: var(--label-2); font-weight: 700; }
+.rv-stat { display: inline-flex; gap: 5px; font-variant-numeric: tabular-nums; }
+.rv-wait { font-variant-numeric: tabular-nums; }
+.rv-rtitle { font-weight: 600; line-height: 1.3; overflow-wrap: anywhere; }
+.rv-r3 { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; min-height: 18px; }
+.rv-agent { font-size: 11.5px; color: var(--label-2); }
+.rv-recap { font-size: 12.5px; line-height: 1.4; color: var(--label-2); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.rv-chg { font-size: 11px; padding: 1px 7px; border-radius: 99px; background: var(--accent-soft); color: var(--accent); }
+.rv-chg.s-ran { color: var(--green); background: color-mix(in srgb, var(--green) 14%, transparent); }
+.rv-chg.s-failed { color: var(--red); background: color-mix(in srgb, var(--red) 14%, transparent); }
+.rv-seg .dp-seg { min-height: 24px; padding: 0 9px; }
+
+/* ---------- main ---------- */
+.rv-main { position: relative; min-width: 0; min-height: 0; display: flex; flex-direction: column; background: var(--bg-3); }
+.rv-slot { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.rv-empty { flex: 1; display: grid; place-items: center; }
+.rv-pane { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.rv-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: var(--sp-5) var(--sp-5) var(--sp-6); }
+.rv-content { max-width: 1120px; margin: 0 auto; display: flex; flex-direction: column; gap: var(--sp-5); }
+
+.rv-head { display: flex; flex-direction: column; gap: var(--sp-2); }
+.rv-head-top { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.rv-title { font-size: 22px; line-height: 1.2; font-weight: 700; letter-spacing: -0.022em; overflow-wrap: anywhere; }
+.rv-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; font-size: 12.5px; color: var(--label-2); }
+.rv-proj { display: inline-flex; align-items: center; gap: 5px; }
+.rv-waiting { color: var(--label-3); font-size: 11.5px; }
+.rv-report { border-radius: var(--r); background: var(--bg-2); box-shadow: var(--shadow-1); }
+.rv-report summary { display: flex; align-items: center; gap: 6px; padding: 9px 12px; cursor: pointer; font-size: 13px; font-weight: 600; color: var(--label-2); list-style: none; }
+.rv-report summary::-webkit-details-marker { display: none; }
+.rv-report[open] summary .rv-chev { transform: rotate(90deg); }
+.rv-chev { transition: transform var(--dur) var(--ease); }
+.rv-report-body { padding: 2px 14px 14px; font-size: 14px; line-height: 1.55; color: var(--label); white-space: pre-wrap; overflow-wrap: anywhere; max-width: 78ch; }
+
+.rv-sec { display: flex; flex-direction: column; gap: var(--sp-3); }
+.rv-sec-title { display: flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 650; text-transform: uppercase; letter-spacing: .06em; color: var(--label-2); }
+.rv-sec-title .icon { color: var(--label-3); }
+.rv-recap-body { display: flex; flex-direction: column; gap: 12px; padding: var(--sp-4) var(--sp-5); border-radius: var(--r-lg); background: var(--bg-2); box-shadow: var(--shadow-1); }
+.rv-recap-row { display: grid; grid-template-columns: 72px minmax(0, 1fr); gap: 14px; align-items: baseline; }
+.rv-recap-text { font-size: 14.5px; line-height: 1.55; max-width: 78ch; overflow-wrap: anywhere; }
+.rv-tags { margin-top: 2px; }
+
+/* diff: wide, with its own scroll so the page keeps moving */
+.rv-diffbox { display: flex; flex-direction: column; border-radius: var(--r-lg); overflow: hidden; background: var(--bg-2); box-shadow: var(--shadow-1); }
+.rv-diffbar { gap: 8px; }
+.rv-diff-body { height: clamp(300px, 62vh, 760px); flex: none; }
+.rv-diffbox .dp-tabs { background: var(--bg-2); }
+.rv-plain { padding: 8px 14px 14px; font-size: 12px; }
+.rv-plain li { display: flex; padding: 2px 0; }
+.rv-nofiles { font-size: 13.5px; padding: 2px 2px; }
+
+/* checks */
+.rv-checks { display: flex; flex-direction: column; gap: 4px; padding: 0; }
+.rv-checks:empty { display: none; }
+.rv-runchecks, .rv-ticks { border-radius: var(--r-lg); background: var(--bg-2); box-shadow: var(--shadow-1); padding: 6px; }
+.rv-check-sum { display: flex; align-items: center; gap: 10px; padding: 8px 10px; list-style: none; cursor: pointer; border-radius: 8px; font-size: 13px; }
+.rv-check-sum::-webkit-details-marker { display: none; }
+div > .rv-check-sum { cursor: default; }
+.rv-check-mark.ok { color: var(--green); } .rv-check-mark.bad { color: var(--red); }
+.rv-check-res { margin-left: auto; font-size: 11.5px; color: var(--label-3); }
+.rv-check-out { margin: 0 10px 8px 36px; padding: 10px 12px; max-height: 220px; overflow: auto; border-radius: 8px; background: var(--bg-3); font-size: 11.5px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--label-2); }
+.rv-tick label { display: flex; align-items: flex-start; gap: 10px; padding: 8px 10px; border-radius: 8px; cursor: pointer; font-size: 14px; line-height: 1.4; }
+.rv-tick label:hover { background: var(--fill-3); }
+.rv-tick input { margin-top: 2px; flex: none; }
+.rv-tick.done span { color: var(--label-3); text-decoration: line-through; text-decoration-color: var(--label-4); }
+.rv-hint { font-size: 11px; color: var(--label-3); }
+
+/* ---------- action bar + composer ---------- */
+.rv-foot { flex: none; border-top: .5px solid var(--separator); background: var(--vibrancy-strong); backdrop-filter: blur(24px) saturate(180%); -webkit-backdrop-filter: blur(24px) saturate(180%); }
+.rv-bar { display: flex; align-items: center; gap: 8px; padding: 10px var(--sp-5); max-width: 1160px; margin: 0 auto; flex-wrap: wrap; }
+.rv-bar .btn kbd { margin-left: 4px; background: color-mix(in srgb, currentColor 14%, transparent); box-shadow: none; color: inherit; opacity: .8; }
+.rv-approve { background: var(--green); color: #fff; }
+.rv-approve:hover { background: color-mix(in srgb, var(--green) 88%, black); }
+.rv-request.on { background: var(--accent-soft); color: var(--accent); }
+.rv-pos { font-size: 11.5px; color: var(--label-3); margin-right: 4px; }
+.rv-composer-slot { padding: 12px var(--sp-5) 0; max-width: 1160px; margin: 0 auto; }
+.rv-composer { position: relative; display: flex; flex-direction: column; gap: 10px; padding: 12px 14px; border-radius: var(--r-lg); background: var(--bg-2); box-shadow: var(--shadow-2); }
+.rv-comp-title { display: flex; align-items: center; gap: 8px; font-weight: 650; font-size: 13px; }
+.rv-comp-title .icon { color: var(--accent); }
+.rv-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.rv-chip { display: inline-flex; align-items: center; gap: 5px; min-height: 26px; padding: 0 10px; border: 0; border-radius: 99px; background: var(--fill-2); color: var(--label-2); font-size: 12px; font-weight: 600; }
+.rv-chip:hover { background: var(--accent-soft); color: var(--accent); }
+textarea.rv-ta {
+  width: 100%; min-height: 96px; max-height: 40vh; resize: vertical; border: 0; border-radius: 10px; padding: 10px 12px;
+  background: var(--fill-2); color: var(--label); box-shadow: inset 0 0 0 .5px var(--separator); line-height: 1.5;
+}
+textarea.rv-ta:focus { outline: none; box-shadow: inset 0 0 0 1.5px var(--accent), 0 0 0 4px var(--accent-soft); background: var(--bg-2); }
+.rv-comp-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+
+/* ---------- help ---------- */
+.rv-help-scrim { position: absolute; inset: 0; z-index: 20; display: grid; place-items: center; background: var(--scrim); }
+.rv-help { width: min(440px, calc(100% - 32px)); padding: 20px 22px; border-radius: var(--r-lg); background: var(--elevated); box-shadow: var(--shadow-3); display: flex; flex-direction: column; gap: 14px; }
+.rv-help h3 { font-size: 16px; font-weight: 650; }
+.rv-help dl { display: grid; grid-template-columns: auto 1fr; gap: 8px 16px; align-items: baseline; margin: 0; }
+.rv-help dt { white-space: nowrap; color: var(--label-2); font-size: 12px; }
+.rv-help dd { margin: 0; font-size: 13px; color: var(--label); }
+.rv-help .btn { align-self: flex-end; }
+
+/* ---------- narrow ---------- */
+@media (max-width: 900px) {
+  .rv { grid-template-columns: 1fr; grid-template-rows: minmax(120px, 34%) minmax(0, 1fr); }
+  .rv-queue { border-right: 0; border-bottom: .5px solid var(--separator); }
+  .rv-scroll { padding: var(--sp-4); }
+  .rv-recap-row { grid-template-columns: 1fr; gap: 2px; }
+}
+:root[data-density="compact"] .rv-row { padding: 8px 10px; gap: 4px; }
+:root[data-density="compact"] .rv-recap-body { padding: var(--sp-3) var(--sp-4); }

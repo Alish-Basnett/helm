@@ -5,6 +5,7 @@ const P = {
   office: '<rect x="3.5" y="5" width="17" height="11" rx="2.5"/><path d="M8.5 20h7M12 16v4"/>',
   threads: '<circle cx="6" cy="12" r="2.5"/><circle cx="18" cy="6.5" r="2.5"/><circle cx="18" cy="17.5" r="2.5"/><path d="M8.3 11l7.4-3.5M8.3 13l7.4 3.5"/>',
   learn: '<path d="M9 17.5h6M10 20.5h4"/><path d="M12 3.5a6 6 0 0 0-3.6 10.8c.7.6 1.1 1.3 1.1 2.2h5c0-.9.4-1.6 1.1-2.2A6 6 0 0 0 12 3.5z"/>',
+  review: '<rect x="4.5" y="4.5" width="15" height="15" rx="3.5"/><path d="M8.5 12.2l2.4 2.4 4.6-5"/><path d="M4.5 9h15" opacity=".35"/>',
   search: '<circle cx="10.5" cy="10.5" r="6"/><path d="M15 15l5 5"/>',
   plus: '<path d="M12 5v14M5 12h14"/>',
   check: '<path d="M5 12.5l4.5 4.5L19 7.5"/>',

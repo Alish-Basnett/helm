@@ -688,3 +688,9 @@ type TaskTemplate = {
 - Task details: a bookmark button opens "Save as template" (name, title, brief with `{{var}}` highlighted, checks, preferred agent, scope This project / All projects). The brief uses the Code mode editor when Code mode is on.
 - Board composer: a Templates button opens a searchable popover (most used, then most recent); blanks are asked inline, then Create or Create & start (a template without blanks has both buttons on its row).
 - `#/templates` (sidebar, under Learn): list, edit, duplicate, archive/restore, usage counts. Spotlight: `>template` (command "Start from template…") and template names in normal search.
+
+## Review queue (web only; no hub change)
+- `#/review[/T-n]`: tasks with `status: 'review'` in the project scope, ordered by when their agent finished (`Agent.endedAt`, else `Task.updatedAt`), oldest first by default.
+- Approve = `PATCH /v1/tasks/:id { status: 'done' }` (a workflow gate card uses `POST /v1/runs/:id/gates/:node` instead). Later = `{ status: 'later' }`.
+- Request changes = `POST /v1/notes { target: { kind: 'task', id }, text: '!Please change:\n- …', execute: true }`. The leading `!` skips the cheap-answer path (v0.4), so the live agent or a follow-up builder always gets it; the card leaves Review when that agent spawns.
+- Ticks on the `Checks:` list and the "Reviewed today" count are UI state in localStorage (`helm.review.checks.<T-n>`, `helm.review.today`), never sent to the hub.
