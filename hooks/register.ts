@@ -436,11 +436,17 @@ const JOB_MODEL: Record<string, { model: string; maxTokens: number }> = {
 }
 // Claimed jobs and model/shell steps are persisted while they run, so a hot reload (which drops the old
 // module's in-flight calls) re-runs them instead of leaving them stuck as "running" in the hub.
-async function trackInflight($: any, key: 'jobs' | 'steps', item: any, on: boolean) {
-  const k = `inflight-${key}:${sessionId}`
-  const list = ((await $.store.get(k).catch(() => [])) as any[] | undefined) ?? []
-  const next = on ? [...list.filter(x => x.id !== item.id), item] : list.filter(x => x.id !== item.id)
-  await $.store.set(k, next.slice(-20)).catch(() => {})
+// Read-modify-write on the store is serialised through one chain: concurrent steps would otherwise
+// overwrite each other's update (a finished step left behind would be re-run, and re-billed, after a reload).
+let inflightChain: Promise<void> = Promise.resolve()
+function trackInflight($: any, key: 'jobs' | 'steps', item: any, on: boolean): Promise<void> {
+  inflightChain = inflightChain.then(async () => {
+    const k = `inflight-${key}:${sessionId}`
+    const list = ((await $.store.get(k).catch(() => [])) as any[] | undefined) ?? []
+    const next = on ? [...list.filter(x => x.id !== item.id), item] : list.filter(x => x.id !== item.id)
+    await $.store.set(k, next.slice(-20)).catch(() => {})
+  }).catch(() => {})
+  return inflightChain
 }
 let jobsPolling = false
 let jobsMissingAt = 0

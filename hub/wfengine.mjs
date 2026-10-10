@@ -761,6 +761,14 @@ export class WfEngine {
       const n = graph.nodes.find((x) => x.id === id);
       const o = outputs.get(id);
       if (!n || !o || n.type === 'note') continue;
+      if (n.type === 'gate' && typeof o.approved === 'boolean') {
+        // a decided gate: the reviewer must see what the user ruled (and why), not an empty section
+        const when = getRunNode(this.db, run.id, id)?.ended_at;
+        lines.push('', `## ${n.label} (gate): ${o.approved ? 'approved' : 'rejected'} by the user${when ? ` at ${new Date(when).toISOString()}` : ''}`);
+        if (o.comment) lines.push(`Comment: ${cut(o.comment, 1000)}`);
+        if (o.gate?.message) lines.push(`Gate message: ${cut(o.gate.message, 1000)}`);
+        continue;
+      }
       lines.push('', `## ${n.label} (${n.type}${o.ok === false ? ', failed' : ''})`);
       if (want.has('text') && o.text) lines.push(cut(o.text, 3000));
       if (want.has('files') && o.filesChanged?.length) lines.push('Files changed:', ...o.filesChanged.slice(0, 60).map((f) => `- ${f}`));

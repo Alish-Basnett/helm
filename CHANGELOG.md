@@ -4,6 +4,19 @@ All notable changes to Helm are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/). Shapes and endpoints are defined in `CONTRACT.md`.
 
+## [0.19.1] - 2026-10-10
+
+### Fixed
+
+- Workflow review steps now see each gate's decision, time, comment and message (the first real review
+  reported the gate section empty).
+- Saving in-flight jobs and steps is serialised, so steps finishing together no longer drop each other
+  (which could re-run a shell step or re-bill a review after a reload).
+
+### Added
+
+- 16 mod tests for the workflow step runner (agent, shell and review steps, cost, resume after reload).
+
 ## [0.19.0] - 2026-10-10
 
 ### Added

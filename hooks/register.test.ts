@@ -28,7 +28,8 @@ function fakeHub(sessionId: string, opts: HubOpts = {}) {
   const calls: { method: string; path: string; body?: any }[] = []
   const inbox: any[] = []
   const jobs: any[] = []
-  const state = { up: opts.up ?? true }
+  const steps: any[] = []
+  const state = { up: opts.up ?? true, stepsStatus: 200 }
   const tasks = opts.tasks ?? []
 
   const json = (body: unknown, status = 200) => ({ ok: status < 400, status, headers: {}, text: JSON.stringify(body) })
@@ -46,6 +47,7 @@ function fakeHub(sessionId: string, opts: HubOpts = {}) {
     }
     if (method === 'GET' && path === `/v1/sessions/${sessionId}/inbox`) return json({ notes: inbox.splice(0) })
     if (method === 'GET' && path === `/v1/sessions/${sessionId}/jobs`) return json({ jobs: jobs.splice(0) })
+    if (method === 'GET' && path === `/v1/sessions/${sessionId}/steps`) return state.stepsStatus === 200 ? json({ steps: steps.splice(0) }) : json({ error: 'not found' }, state.stepsStatus)
     if (method === 'GET' && path === `/v1/sessions/${sessionId}/agents`) return json({ agents: opts.agents ?? [] })
     if (method === 'GET' && path === `/v1/sessions/${sessionId}/project`) return json({ project: { id: 'P-1', name: 'proj' } })
     if (method === 'GET' && path.startsWith('/v1/tasks?')) return json({ tasks })
@@ -67,6 +69,7 @@ function fakeHub(sessionId: string, opts: HubOpts = {}) {
     calls,
     inbox,
     jobs,
+    steps,
     state,
     handle,
     ofType: (type: string) => events.filter(e => e.type === type),
@@ -81,12 +84,14 @@ type World = {
   sent: any[]
   submitted: any[]
   modelCalls: any[]
+  processCalls: any[]
   toolCalls: any[]
   toolRegistered: any[]
   storeSets: { key: string; value: any }[]
   storeSeed: Record<string, any>
   agentList: { value: any[] }
-  engine: { submitResult: any; sendResult: any; modelResult: any; spawnResult: any; toolResult: (e: any) => any }
+  sessionId?: string
+  engine: { submitResult: any; sendResult: any; modelResult: any; spawnResult: any; processRun: (e: any) => any; toolResult: (e: any) => any }
 }
 
 let counter = 0
@@ -105,6 +110,7 @@ async function boot($: any, on: any, opts: HubOpts & { start?: boolean } = {}): 
     sent: [],
     submitted: [],
     modelCalls: [],
+    processCalls: [],
     toolCalls: [],
     toolRegistered: [],
     storeSets: [],
@@ -115,6 +121,7 @@ async function boot($: any, on: any, opts: HubOpts & { start?: boolean } = {}): 
       sendResult: { isDelivered: true },
       modelResult: { isAnswered: true, text: '  ## What happened\nIt works.  ', usage: {} },
       spawnResult: undefined,
+      processRun: () => ({ exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false }),
       toolResult: () => ({ result: 'ok' }),
     },
   }
@@ -133,7 +140,7 @@ async function boot($: any, on: any, opts: HubOpts & { start?: boolean } = {}): 
   on('ui.status', () => v(undefined))
   on('fs.exists', () => v(false))
   on('fs.write', () => v(undefined))
-  on('process.run', () => v({ exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false }))
+  on('process.run', (_$: any, e: any) => { w.processCalls.push(e); const r = w.engine.processRun(e); return r?.deny ? r : v(r) })
   on('command.register', (_$: any, e: any) => v({ command: e.name }))
   on('tool.register', (_$: any, e: any) => (w.toolRegistered.push(e), v({ tool: `mcp__helm__${e.name}` })))
   on('agent.register', (_$: any, e: any) => v({ agent: `helm:${e.name}` }))
@@ -1069,5 +1076,228 @@ describe('v0.4: usage meter', () => {
     expect(cost('N-94')).toBe(12.2)
     expect(cost('N-95')).toBe(0.61)
     expect(cost('N-96')).toBe(0.01)
+  })
+})
+
+describe('v0.9: workflow step runner', () => {
+  const MTOK = 1_000_000
+  const turn = (extra: Record<string, unknown>) => ({ turnId: 't', durationMs: 5, isAborted: false, answer: '', reason: 'answer', ...extra })
+  const results = (w: World, stepId?: string) => asEvent('wf.step.result', w).filter(e => !stepId || e.data.stepId === stepId)
+  const stepsCalls = (w: World) => w.hub.calls.filter(c => c.path === `/v1/sessions/${w.sessionId}/steps`)
+  const base = { runId: 'R-1', nodeId: 'n', attempt: 1, label: 'step' }
+  // A plugin's own $.agent.spawn does not pass through the mod's agent.spawn hook in the kit (and returns no agentId), so
+  // the tagged spawn the engine then raises for the same agent is simulated by a call from the test, which does.
+  const engineSpawn = ($: any, w: World, agentId: string, description: string) => {
+    w.engine.spawnResult = { agentId, model: 'sonnet' }
+    return $.agent.spawn({ tool_use_id: `tu-${agentId}`, prompt: 'p', description, subagentType: 'helm:builder', provider: { plugin: 'x', tier: 'user' }, parentModel: 'opus', background: true, fork: false } as any)
+  }
+
+  test('an agent step spawns with prompt/description/subagentType/model and reports once when the agent completes', async ($, on) => {
+    const w = await boot($, on)
+    w.hub.steps.push({ id: 'R-1:build:1', kind: 'agent', input: { ...base, prompt: 'build it', description: '[helm:T-9] Build', subagentType: 'helm:builder', model: 'sonnet', taskId: 'T-9' } })
+    await tick(w)
+    const sp = w.spawned.at(-1)
+    expect(sp).toMatchObject({ prompt: 'build it', description: '[helm:T-9] Build', subagent_type: 'helm:builder', model: 'sonnet' })
+    expect(results(w)).toHaveLength(0) // nothing is reported until the agent finishes
+    await engineSpawn($, w, 'ag-step-1', '[helm:T-9] Build')
+    const answer = 'DONE: built\nHOW: x\nFILES: /r/a.ts, `/r/b.ts`\nLEARNED: y'
+    await $.turn.complete(turn({ agentId: 'ag-step-1', answer, usage: { model: 'claude-sonnet-5-5', input_tokens: MTOK, output_tokens: MTOK } }) as any)
+    await tick(w)
+    const r = results(w, 'R-1:build:1')
+    expect(r).toHaveLength(1)
+    expect(r[0]!.data).toMatchObject({ stepId: 'R-1:build:1', ok: true, agentId: 'ag-step-1', text: answer, filesChanged: ['/r/a.ts', '/r/b.ts'] })
+    // sonnet: 1M input * $2 + 1M output * $10
+    expect(r[0]!.data.usage).toMatchObject({ model: 'claude-sonnet-5-5', inputTokens: MTOK, outputTokens: MTOK, costUsd: 12 })
+  })
+
+  test('the agent.spawn hook binds the agent to the step through the [helm:T-n] tag (stepByTask → stepByAgent)', async ($, on) => {
+    const w = await boot($, on)
+    // the step run itself gets no agentId back, as with a plugin spawn in the kit ...
+    w.engine.spawnResult = undefined
+    w.hub.steps.push({ id: 'R-1:tag:1', kind: 'agent', input: { ...base, prompt: 'p', description: '[helm:T-71] Tagged', taskId: 'T-71' } })
+    await tick(w)
+    await $.turn.complete(turn({ agentId: 'ag-tag-0', answer: 'DONE: x' }) as any)
+    await tick(w)
+    expect(results(w, 'R-1:tag:1')).toHaveLength(0)
+    // ... later the engine's spawn for the tagged description carries the id, and the hook binds it
+    await engineSpawn($, w, 'ag-tag-1', '[helm:T-71] Tagged')
+    await $.turn.complete(turn({ agentId: 'ag-tag-1', answer: 'DONE: ok\nFILES: none', usage: { input_tokens: 10, output_tokens: 10 } }) as any)
+    await tick(w)
+    const r = results(w, 'R-1:tag:1')
+    expect(r).toHaveLength(1)
+    expect(r[0]!.data).toMatchObject({ ok: true, agentId: 'ag-tag-1', filesChanged: [] })
+  })
+
+  test('a failed agent (reason is not answer) reports ok:false with the reason', async ($, on) => {
+    const w = await boot($, on)
+    w.hub.steps.push({ id: 'R-1:fail:1', kind: 'agent', input: { ...base, prompt: 'p', description: '[helm:T-72] F', taskId: 'T-72' } })
+    await tick(w)
+    await engineSpawn($, w, 'ag-step-f', '[helm:T-72] F')
+    await $.turn.complete(turn({ agentId: 'ag-step-f', reason: 'max_turns', answer: '' }) as any)
+    await tick(w)
+    const d = results(w, 'R-1:fail:1')[0]!.data
+    expect(d.ok).toBe(false)
+    expect(d.error).toContain('ended: max_turns')
+  })
+
+  test('a second completion for the same agent does not emit a second result', async ($, on) => {
+    const w = await boot($, on)
+    w.hub.steps.push({ id: 'R-1:idem:1', kind: 'agent', input: { ...base, prompt: 'p', description: '[helm:T-73] I', taskId: 'T-73' } })
+    await tick(w)
+    await engineSpawn($, w, 'ag-step-2', '[helm:T-73] I')
+    await $.turn.complete(turn({ agentId: 'ag-step-2', answer: 'DONE: a' }) as any)
+    await $.turn.complete(turn({ agentId: 'ag-step-2', answer: 'DONE: again' }) as any)
+    await tick(w)
+    await tick(w)
+    expect(results(w, 'R-1:idem:1')).toHaveLength(1)
+  })
+
+  test('a shell step runs process.run with argv, cwd and timeoutMs and reports the raw check', async ($, on) => {
+    const w = await boot($, on)
+    w.engine.processRun = () => ({ exitCode: 0, stdout: 'all green', stderr: 'warn', isStdoutTruncated: false, isStderrTruncated: false })
+    w.hub.steps.push({ id: 'R-1:sh:1', kind: 'shell', input: { ...base, argv: ['npm', 'test'], cwd: '/work/proj', timeoutMs: 5000 } })
+    await tick(w)
+    const call = w.processCalls.find(c => JSON.stringify(c).includes('"npm"'))
+    expect(JSON.stringify(call)).toContain('"npm","test"')
+    expect(JSON.stringify(call)).toContain('"cwd":"/work/proj"')
+    expect(JSON.stringify(call)).toContain('"timeoutMs":5000')
+    const d = results(w, 'R-1:sh:1')[0]!.data
+    expect(d).toMatchObject({ ok: true, check: { exitCode: 0, stdout: 'all green', stderr: 'warn' } })
+  })
+
+  test('a shell script runs as sh -c; a non-zero exit is still ok:true (the hub decides pass/fail)', async ($, on) => {
+    const w = await boot($, on)
+    w.engine.processRun = () => ({ exitCode: 3, stdout: '', stderr: 'boom', isStdoutTruncated: false, isStderrTruncated: false })
+    w.hub.steps.push({ id: 'R-1:sh:2', kind: 'shell', input: { ...base, script: 'exit 3', timeoutMs: 1000 } })
+    await tick(w)
+    expect(JSON.stringify(w.processCalls.find(c => JSON.stringify(c).includes('exit 3')))).toContain('"sh","-c","exit 3"')
+    const d = results(w, 'R-1:sh:2')[0]!.data
+    expect(d.ok).toBe(true)
+    expect(d.check).toMatchObject({ exitCode: 3, stderr: 'boom' })
+    expect(d.text).toBe('boom')
+  })
+
+  test('a process.run rejection: timeout-like errors give exitCode 124 + timedOut, others exitCode 1', async ($, on) => {
+    const w = await boot($, on)
+    let msg = 'command timed out after 1000ms'
+    w.engine.processRun = (e: any) => {
+      if (JSON.stringify(e).includes('sleep 99') || JSON.stringify(e).includes('crash')) return { deny: msg }
+      return { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false }
+    }
+    w.hub.steps.push({ id: 'R-1:sh:3', kind: 'shell', input: { ...base, script: 'sleep 99', timeoutMs: 1000 } })
+    await tick(w)
+    let d = results(w, 'R-1:sh:3')[0]!.data
+    expect(d.ok).toBe(true)
+    expect(d.check).toMatchObject({ exitCode: 124, timedOut: true, stdout: '' })
+    expect(d.check.stderr).toContain('timed out')
+    msg = 'spawn ENOENT'
+    w.hub.steps.push({ id: 'R-1:sh:4', kind: 'shell', input: { ...base, script: 'crash', timeoutMs: 1000 } })
+    await tick(w)
+    d = results(w, 'R-1:sh:4')[0]!.data
+    expect(d.check).toMatchObject({ exitCode: 1, timedOut: false })
+  })
+
+  test('a review step calls model.complete on opus and reports verdict pass, priced as opus', async ($, on) => {
+    const w = await boot($, on)
+    w.engine.modelResult = { isAnswered: true, text: '- fine\nVERDICT: PASS', usage: { input_tokens: MTOK, output_tokens: MTOK } }
+    w.hub.steps.push({ id: 'R-1:rv:1', kind: 'review', input: { ...base, model: 'opus', system: 'be strict', prompt: 'the work', maxTokens: 4096, timeoutMs: 90000 } })
+    await tick(w)
+    expect(w.modelCalls.at(-1)).toMatchObject({ model: 'opus', system: 'be strict', prompt: 'the work', maxTokens: 4096, timeoutMs: 90000 })
+    const d = results(w, 'R-1:rv:1')[0]!.data
+    expect(d).toMatchObject({ ok: true, verdict: 'pass', text: '- fine\nVERDICT: PASS' })
+    // opus: 1M * $4 + 1M * $20
+    expect(d.usage).toMatchObject({ model: 'opus', costUsd: 24 })
+  })
+
+  test('the last VERDICT: line decides; anything but PASS is changes', async ($, on) => {
+    const w = await boot($, on)
+    const verdictFor = async (id: string, text: string) => {
+      w.engine.modelResult = { isAnswered: true, text, usage: {} }
+      w.hub.steps.push({ id, kind: 'review', input: { ...base, system: 's', prompt: 'p' } })
+      await tick(w)
+      return results(w, id)[0]!.data.verdict
+    }
+    expect(await verdictFor('R-1:rv:2', 'VERDICT: PASS\nactually no\nVERDICT: CHANGES')).toBe('changes')
+    expect(await verdictFor('R-1:rv:3', 'VERDICT: CHANGES\nfixed\nVERDICT: PASS')).toBe('pass')
+    expect(await verdictFor('R-1:rv:4', 'no verdict line at all')).toBe('changes')
+  })
+
+  test('an unanswered review model call gives ok:false with the reason', async ($, on) => {
+    const w = await boot($, on)
+    w.engine.modelResult = { isAnswered: false, reason: 'api-error' }
+    w.hub.steps.push({ id: 'R-1:rv:5', kind: 'review', input: { ...base, system: 's', prompt: 'p' } })
+    await tick(w)
+    const d = results(w, 'R-1:rv:5')[0]!.data
+    expect(d.ok).toBe(false)
+    expect(d.error).toContain('api-error')
+  })
+
+  test('an unknown step kind gives ok:false', async ($, on) => {
+    const w = await boot($, on)
+    w.hub.steps.push({ id: 'R-1:x:1', kind: 'mystery', input: base })
+    await tick(w)
+    const d = results(w, 'R-1:x:1')[0]!.data
+    expect(d.ok).toBe(false)
+    expect(d.error).toContain('unknown step kind mystery')
+  })
+
+  test('a 404 from /steps stops polling for 60 s of ticks, while the other polls carry on', async ($, on) => {
+    const w = await boot($, on)
+    w.hub.state.stepsStatus = 404
+    await tick(w)
+    const n = stepsCalls(w).length
+    expect(n).toBeGreaterThan(0)
+    const jobsBefore = w.hub.calls.filter(c => c.path === `/v1/sessions/${w.sessionId}/jobs`).length
+    // 40 ticks = 60 s on the mocked clock: not one more request to /steps ...
+    for (let i = 0; i < 40; i++) await tick(w)
+    expect(stepsCalls(w)).toHaveLength(n)
+    // ... and a step the hub would hand out is not claimed, while jobs are still polled
+    expect(w.hub.calls.filter(c => c.path === `/v1/sessions/${w.sessionId}/jobs`).length).toBeGreaterThan(jobsBefore + 30)
+    // (the 60 s expiry itself is not tested: the mod reads Date.now(), which mock.clock does not move)
+  })
+
+  test('resume: a review step left in inflight-steps is re-run on session.start, and cleared', async ($, on) => {
+    const w = await boot($, on, { start: false })
+    w.storeSeed[`inflight-steps:${w.sessionId}`] = [{ id: 'R-1:re:1', kind: 'review', input: { ...base, system: 's', prompt: 'redo me' } }]
+    await $.session.start({ cwd: '/work/proj', surface: null, isInteractive: true })
+    await w.clock.settle()
+    await tick(w)
+    expect(w.modelCalls.some(c => c.prompt === 'redo me')).toBe(true)
+    expect(results(w, 'R-1:re:1')[0]!.data).toMatchObject({ ok: true, verdict: 'changes' })
+    expect(w.storeSeed[`inflight-steps:${w.sessionId}`]).toEqual([])
+  })
+
+  test('resume: a shell step left in inflight-steps is re-run on session.start, and cleared', async ($, on) => {
+    const w = await boot($, on, { start: false })
+    w.storeSeed[`inflight-steps:${w.sessionId}`] = [{ id: 'R-1:re:2', kind: 'shell', input: { ...base, argv: ['true'], timeoutMs: 1000 } }]
+    await $.session.start({ cwd: '/work/proj', surface: null, isInteractive: true })
+    await w.clock.settle()
+    await tick(w)
+    expect(w.processCalls.some(c => JSON.stringify(c).includes('"true"'))).toBe(true)
+    expect(results(w, 'R-1:re:2')[0]!.data).toMatchObject({ ok: true, check: { exitCode: 0 } })
+    expect(w.storeSeed[`inflight-steps:${w.sessionId}`]).toEqual([])
+  })
+
+  test('resume: an inflight-jobs job is re-run on session.start', async ($, on) => {
+    const w = await boot($, on, { start: false })
+    w.storeSeed[`inflight-jobs:${w.sessionId}`] = [{ id: 'J-90', kind: 'explain', input: { title: 'Resumed' } }]
+    await $.session.start({ cwd: '/work/proj', surface: null, isInteractive: true })
+    await w.clock.settle()
+    await tick(w)
+    expect(w.modelCalls.some(c => String(c.prompt).includes('Resumed'))).toBe(true)
+    expect(asEvent('job.result', w).find(e => e.data.jobId === 'J-90')!.data.ok).toBe(true)
+    expect(w.storeSeed[`inflight-jobs:${w.sessionId}`]).toEqual([])
+  })
+
+  test('review and shell steps are tracked in inflight-steps while running; agent steps are not', async ($, on) => {
+    const w = await boot($, on)
+    w.engine.spawnResult = { agentId: 'ag-step-3', model: 'sonnet' }
+    w.hub.steps.push({ id: 'R-1:tr:1', kind: 'review', input: { ...base, system: 's', prompt: 'p' } })
+    w.hub.steps.push({ id: 'R-1:tr:2', kind: 'agent', input: { ...base, prompt: 'p', description: '[helm:T-74] A', taskId: 'T-74' } })
+    await tick(w)
+    const key = `inflight-steps:${w.sessionId}`
+    const sets = w.storeSets.filter(s => s.key === key)
+    expect(sets.some(s => s.value.some((x: any) => x.id === 'R-1:tr:1'))).toBe(true)
+    expect(sets.some(s => s.value.some((x: any) => x.id === 'R-1:tr:2'))).toBe(false)
   })
 })

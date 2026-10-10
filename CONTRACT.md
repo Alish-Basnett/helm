@@ -543,6 +543,8 @@ to `running` (`claimedAt` set) and returns them oldest first. Poll in the existi
 | `shell` | `argv?: string[]` **or** `script?: string`, `cwd?`, `timeoutMs`, `passIf: 'exit0'\|'regex'`, `pattern?` | `$.process.run(argv or ['sh','-c',script], { cwd, timeoutMs })`. CLI only: in the desktop app degrade to a `helm:scout` agent told to run it and report the exit code (flag it, it costs tokens). Report raw `check`; the hub decides pass/fail. |
 | `review` | `model: 'opus'`, `system`, `prompt`, `maxTokens` (4096), `timeoutMs`, `rubric` | `$.model.complete({ model, system, prompt, maxTokens, timeoutMs })`; send the answer as `text` (it ends with `VERDICT: PASS` or `VERDICT: CHANGES`) and the exact `usage`. `isAnswered` false → `ok:false` with the reason as `error`. |
 
+**Review prompt and gates** — for every decided `gate` before a `review` node, `Step.input.prompt` carries a section `## <gate label> (gate): approved|rejected by the user at <ISO time>`, then `Comment: …` (if the user wrote one) and `Gate message: …`.
+
 **Result** — mod event `wf.step.result` (the **only** `wf.*` type a mod may send; every other `wf.*` and `hub.*` type is rejected at ingest):
 ```ts
 { stepId: string; ok: boolean;                      // ok:false = the step failed (error says why)

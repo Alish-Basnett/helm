@@ -225,6 +225,10 @@ test('state machine, happy path: build -> test -> gate -> review -> merge, cards
   assert.match(steps[0].input.system, /VERDICT: PASS/);
   assert.match(steps[0].input.prompt, /Add a login page/);
   assert.match(steps[0].input.prompt, /login\.ts/);
+  // the reviewer sees the gate decision, the user's comment and the gate message
+  assert.match(steps[0].input.prompt, /## Safety check \(gate\): approved by the user at 2027-/);
+  assert.match(steps[0].input.prompt, /Comment: looks fine/);
+  assert.match(steps[0].input.prompt, /Gate message: Tests are done/);
   finish(h, 's1', 'R-1:review:1', { text: '- fine\nVERDICT: PASS', usage: { model: 'opus', inputTokens: 4000, outputTokens: 300, costUsd: 0.5 } });
   st = await states(h, 'R-1');
   assert.equal(st.review, 'ok');
