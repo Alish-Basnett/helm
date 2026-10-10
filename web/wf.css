@@ -451,3 +451,46 @@ button.run-chip:hover { background: color-mix(in srgb, var(--accent) 24%, transp
 .q-row.k-approval { box-shadow: inset 3px 0 var(--green); }
 .q-approve-box { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; max-width: 520px; }
 .q-approve-row { display: flex; gap: 8px; flex-wrap: wrap; }
+
+/* ============================================================ v0.10: drafting sheets, gallery, banner */
+.wf-sheet-wrap { position: fixed; inset: 0; z-index: 95; display: grid; place-items: center; padding: 24px 16px; background: color-mix(in srgb, #000 32%, transparent); opacity: 0; transition: opacity 140ms var(--ease); }
+.wf-sheet-wrap.in { opacity: 1; }
+.wf-sheet { width: min(520px, 100%); max-height: calc(100vh - 48px); overflow: auto; border-radius: 18px; background: var(--elevated); box-shadow: var(--shadow-3); transform: translateY(6px) scale(.985); transition: transform 160ms var(--ease); }
+.wf-sheet.wide { width: min(940px, 100%); }
+.wf-sheet-wrap.in .wf-sheet { transform: none; }
+.wf-sheet-head { display: flex; align-items: center; justify-content: space-between; padding: 16px 18px 4px; }
+.wf-sheet-head h2 { font-size: 17px; font-weight: 700; letter-spacing: -.01em; margin: 0; }
+.wf-sheet-body { padding: 8px 18px 18px; display: flex; flex-direction: column; gap: 12px; }
+.wf-field { display: flex; align-items: center; gap: 10px; font-size: 12.5px; color: var(--label-2); }
+.wf-compose { min-height: 120px; font-size: 14px; line-height: 1.5; resize: vertical; }
+.wf-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.wf-chip-ex { border: 0; border-radius: 99px; padding: 6px 12px; font-size: 12.5px; color: var(--label-2); background: var(--fill-2); text-align: left; }
+.wf-chip-ex:hover { background: var(--accent-soft); color: var(--accent); }
+.wf-draft-err { border-radius: 12px; padding: 10px 12px; font-size: 12.5px; color: var(--red); background: color-mix(in srgb, var(--red) 10%, transparent); }
+.wf-draft-err ul { list-style: none; margin: 6px 0 0; padding: 0; display: flex; flex-direction: column; gap: 4px; color: var(--label-2); }
+.wf-draft-err li { display: flex; gap: 6px; align-items: flex-start; }
+.wf-shimmer { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 22px 0 10px; text-align: center; }
+.wf-shimmer-bars { width: 100%; display: flex; flex-direction: column; gap: 8px; margin-bottom: 8px; }
+.wf-shimmer-bars i { display: block; height: 14px; border-radius: 7px; background: linear-gradient(90deg, var(--fill-2) 25%, var(--accent-soft) 50%, var(--fill-2) 75%); background-size: 200% 100%; animation: wf-shim 1.4s linear infinite; }
+.wf-shimmer-bars i:nth-child(2) { width: 82%; } .wf-shimmer-bars i:nth-child(3) { width: 58%; }
+.wf-shimmer-t { font-weight: 650; font-size: 14px; margin: 0; background: linear-gradient(90deg, var(--label-2) 30%, var(--accent) 50%, var(--label-2) 70%); background-size: 200% 100%; -webkit-background-clip: text; background-clip: text; color: transparent; animation: wf-shim 1.8s linear infinite; }
+.wf-shimmer-s { margin: 0; }
+@keyframes wf-shim { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+@media (prefers-reduced-motion: reduce) { .wf-shimmer-bars i, .wf-shimmer-t { animation: none; } }
+.wf-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
+.wf-card { display: flex; flex-direction: column; gap: 8px; text-align: left; padding: 12px; border: 0; border-radius: 14px; background: var(--fill-3); color: var(--label); transition: background 120ms var(--ease), transform 120ms var(--ease); }
+.wf-card:hover, .wf-card:focus-visible { background: var(--fill-2); transform: translateY(-1px); }
+.wf-card.busy { opacity: .5; pointer-events: none; }
+.wf-card p { margin: 0; font-size: 12.5px; line-height: 1.45; color: var(--label-2); }
+.wf-card-t { display: flex; align-items: center; gap: 8px; font-size: 14px; }
+.wf-card-ic { color: var(--accent); }
+.wf-mini { width: 100%; height: 110px; border-radius: 10px; background: var(--fill-3); }
+.wf-mini .mini-e { fill: none; stroke: var(--label-3); stroke-width: 1.2; }
+.wf-mini .mini-e.bad { stroke: var(--red); stroke-dasharray: 3 2; }
+.wf-mini .mini-n { fill: var(--accent); opacity: .8; }
+.wf-mini .t-shell { fill: var(--label-2); } .wf-mini .t-gate { fill: var(--orange); }
+.wf-mini .t-review { fill: var(--purple, var(--accent-hi)); } .wf-mini .t-note { fill: var(--fill); opacity: .6; }
+.wf-banner { position: absolute; top: 12px; left: 50%; transform: translateX(-50%); z-index: 20; display: flex; align-items: center; gap: 8px; padding: 4px 6px 4px 12px; border-radius: 99px; font-size: 12.5px; color: var(--label); background: var(--elevated); box-shadow: var(--shadow-2, var(--shadow-3)); }
+.wf-banner[hidden] { display: none; }
+.wf-banner svg:first-child { color: var(--accent); }
+.wf-node[data-drafted] { box-shadow: 0 0 0 2px var(--accent), 0 0 18px color-mix(in srgb, var(--accent) 35%, transparent); }

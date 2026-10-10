@@ -620,3 +620,31 @@ version history with restore, undo/redo, tidy, problems, Runs, Save with a summa
 (per-type forms with inline validation, connection editor, run inputs, problems). Run mode shows the exact version a run started on, read-only, with node states, flowing/pulsing
 edges, a ticking cost, inline Approve/Reject on gates and Retry/Skip on failures; the **Dock `run` panel** (order 0.7) is the timeline. Files: `web/views/workflows.js`,
 `web/wf/{graph,canvas,palette,inspector,results,runpanel,rundata,labels,pop}.js`, `web/wf.css`.
+
+## v0.10 additions — workflows by prompt, templates
+
+The hub still never calls a model. Drafting is a Job (the v0.2 mechanism): the mod claims it from `GET /v1/sessions/:id/jobs` and answers with a `job.result` event.
+
+### Endpoints
+- `GET /v1/workflows/templates` → `{ templates: [{ id, title, description, icon, name, graph }] }`. Ids: `build-test-review`, `fix-bug`, `research-build`, `parallel-refactor`, `safe-migration`. `POST /v1/workflows { projectId, template: <id> }` creates any of them. `parallel-refactor` is sequential (no parallel or join node yet); `fix-bug` unrolls its retry loop (fail goes to a second and third fix step, at most 2 loop-backs).
+- `POST /v1/workflows/draft { projectId, prompt, workflowId? }` → `{ job }`. `prompt` is 1..4000 chars. 404 unknown project/workflow, 400 workflow of another project, 409 `no live session` (same session rule as explain/digest). With `workflowId` the job asks for a modified version of that workflow.
+
+### `wf_draft` job
+`Job.kind = 'wf_draft'`, `Job.projectId` set, `Job.taskId` null. `Job.input`:
+```
+{ prompt, projectName, attempt: 1 | 2,
+  schema,      // text: compact description of helm.workflow/1 (node types, config fields, edge kinds, params, positions, rules)
+  nodeTypes,   // [{ type, summary, config, outputs }]
+  examples,    // two complete example graphs (JSON objects)
+  workflowId?, current?,   // modify mode: the current graph of that workflow
+  fixIssues?, previousText? // attempt 2 only: validator errors [{ level, code, message, nodeId?, edgeId? }] and the previous reply }
+```
+**What the mod must send:** `{ sessionId, seq, type: 'job.result', data: { jobId, ok: true, text } }` where `text` is the model's reply containing exactly one JSON object, the complete graph (`{ "schema": "helm.workflow/1", "name", "nodes", "edges", "params"? }`), optionally inside one ``` fence or with a sentence around it. On attempt 2 the model must return the corrected full graph. For modify requests it returns the complete modified graph, not a patch. `position` and edge `id` may be omitted (the hub lays out left to right and numbers edges); the `schema` tag may be omitted. If the model call fails: `{ jobId, ok: false, error }` (the job fails, no retry). Suggested model: Sonnet (Haiku for small edits), `maxTokens` generous (8k+).
+
+### What the hub does with the reply
+The reply is stored on the job (still `running`), then judged right after the commit (`hub/wfengine.mjs finishDraft`), recorded as events:
+- extract JSON, fill positions/ids, `wfgraph` validate.
+- **valid**: `wf.created` (new workflow, `author: 'model'`) or `wf.saved` (new version of `workflowId`, name kept, `parentVersion` = previous) with `summary` = the prompt shortened to 80 chars; then `hub.job.finish`: `Job.state = 'done'`, `Job.result = JSON '{"workflowId","version"}'`. If the graph equals the current version in modify mode, no version is made and `result` has `"unchanged": true`.
+- **invalid, attempt 1**: a follow-up `wf_draft` job (same session if live) with `attempt: 2`, `fixIssues`, `previousText`; the first job ends `done` with `result = '{"retryJobId","issues"}'`.
+- **invalid, attempt 2**: `Job.state = 'failed'`, `Job.error` = first issue (+N more), `Job.result = '{"issues":[...]}'`. No third attempt.
+New event type `hub.job.finish { jobId, state, result?, error? }` (hub only). `job.result` for a `wf_draft` job no longer completes the job by itself. `helmd --rebuild` replays all of it without deciding again.

@@ -113,9 +113,30 @@ test('no double-start while the start note is queued or sending, or delivered le
   h.send(h.ev('s1', 'note.result', { noteId: nid, ok: true, via: 'prompt' }, clock.t));
   h.hub.sweep(clock.t + MIN);
   assert.equal(autoEvents(h).length, 1);
+  // delivered but not answered yet (the session is still busy with an earlier turn): still starting
   clock.t += 4 * MIN;
   h.hub.sweep(clock.t);
-  assert.equal(autoEvents(h).length, 2, 'after 3 minutes with no agent it moves on');
+  assert.equal(autoEvents(h).length, 1, 'no re-start while the delivered start note has no reply');
+  // the session answered but no agent came up: now it may try again
+  h.send(h.ev('s1', 'note.reply', { noteId: nid, text: 'ok' }, clock.t));
+  clock.t += 1000;
+  h.hub.sweep(clock.t);
+  assert.equal(autoEvents(h).length, 2, 'after the reply with no agent it moves on');
+});
+
+test('a delivered start note with no reply stops counting as starting after 30 minutes', async (t) => {
+  const h = await startTest(); t.after(h.stop);
+  const { pid, ids, clock } = await setup(h);
+  await setAuto(h, pid, true);
+  const nid = task(h, ids[0]).startNoteId;
+  await h.get('/v1/sessions/s1/inbox');
+  h.send(h.ev('s1', 'note.result', { noteId: nid, ok: true, via: 'prompt' }, clock.t));
+  clock.t += 29 * MIN;
+  h.hub.sweep(clock.t);
+  assert.equal(autoEvents(h).length, 1);
+  clock.t += 2 * MIN;
+  h.hub.sweep(clock.t);
+  assert.equal(autoEvents(h).length, 2);
 });
 
 test('no live session: nothing starts; it starts once a session appears', async (t) => {

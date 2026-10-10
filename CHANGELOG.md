@@ -4,6 +4,16 @@ All notable changes to Helm are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/). Shapes and endpoints are defined in `CONTRACT.md`.
 
+## [0.13.0] - 2026-10-10
+
+### Added
+
+- Create workflows by describing them (a Sonnet draft opens on the canvas), Change with words, five templates.
+
+### Fixed
+
+- Auto mode double starts; in-flight jobs and steps resumed after a mod reload; Workflows screen crash on load.
+
 ## [0.12.0] - 2026-10-10
 
 ### Added

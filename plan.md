@@ -224,3 +224,8 @@ via a follow-up spawn that continues from the task's context.
   `add()` → shell `node --test` passed → gate approved from the canvas → Opus review VERDICT: PASS, $0.017.
   Fixes from the run: agent step cost now booked to the run; opening a workflow auto-selects its live run.
   Follow-ups: mod tests for the step runner; review prompt should include the gate decision.
+- 2026-10-10 — **v0.13: describe a workflow (T-29).** Real draft: "investigate a bug with a scout, builder fixes,
+  npm test, approve before an Opus review" → W-2 (6 nodes incl. a fail-path fixer) on the first try, $0.02.
+  Fixes: Auto mode re-sent T-29's start 3× because a delivered note only counted as starting for 3 min → now
+  until replied (30 min cap); hot reload dropped a claimed draft job → in-flight jobs/steps persisted + resumed;
+  Workflows screen TDZ crash from the T-29 web change.

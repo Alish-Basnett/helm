@@ -19,8 +19,8 @@ import { openPop, closePop } from '../wf/pop.js';
 import { ensureDetail, detailOf, onDetail } from '../wf/rundata.js';
 import { noteGraph } from '../wf/labels.js';
 import { RUN_LABEL } from '../wf/runpanel.js';
+import { openGallery, openComposer, closeSheet } from '../wf/draft.js';
 
-const TEMPLATE = { key: 'build-test-review', label: 'Build → Test → Gate → Review → Merge', hint: 'Build, run the tests (a failure goes to a fix step), wait for you, get an Opus review, then merge.' };
 const LIVE = new Set(['running', 'waiting', 'paused']);
 /** Unsaved edits per workflow, kept across navigation within the page: id -> { base, graph }. */
 const drafts = new Map();
@@ -42,7 +42,7 @@ export function mount(container, route) {
 
   /* ------------------------------------------------------------------ left list */
   const listEl = h('div', { class: 'wf-list-items', role: 'list', 'aria-label': 'Workflows' });
-  const newBtn = h('button', { class: 'btn btn-primary btn-sm', type: 'button', onclick: () => openNew(newBtn) }, icon('plus', 14), 'New');
+  const newBtn = h('button', { class: 'btn btn-primary btn-sm', type: 'button', 'aria-haspopup': 'menu', onclick: () => openNewMenu(newBtn) }, icon('plus', 14), 'New');
   const archToggle = h('button', { class: 'wf-list-toggle', type: 'button', onclick: () => { showArchived = !showArchived; lsSet('helm.wf.archived', showArchived ? '1' : '0'); renderList(); } });
   const runsHead = h('h3', { class: 'wf-list-h' }, icon('history', 13), 'Runs');
   const runsEl = h('div', { class: 'wf-list-runs', role: 'list', 'aria-label': 'Runs of this workflow' });
@@ -59,13 +59,14 @@ export function mount(container, route) {
   const redoBtn = tbtn('redo', 'Redo (⇧⌘Z)', () => redo());
   const tidyBtn = tbtn('tidy', 'Tidy the layout', () => canvas.tidy());
   const issuesBtn = h('button', { class: 'wf-issues-btn', type: 'button', hidden: true, onclick: () => openIssues() }, icon('warning', 14), h('span', {}));
+  const wordsBtn = h('button', { class: 'btn btn-quiet btn-sm', type: 'button', title: 'Describe a change and let Sonnet draft a new version', onclick: () => describeCurrent() }, icon('sparkle', 14), h('span', { class: 'wf-lbl' }, 'Change with words'));
   const runsBtn = h('button', { class: 'btn btn-quiet btn-sm', type: 'button', 'aria-haspopup': 'dialog', title: 'Runs of this workflow', onclick: () => openRunsPop(runsBtn) }, icon('history', 14), h('span', { class: 'wf-lbl' }, 'Runs'));
   const saveBtn = h('button', { class: 'btn btn-sm wf-save', type: 'button', title: 'Save a new version (⌘S)', onclick: () => openSave() }, icon('check', 14), h('span', {}, 'Saved'));
   const runBtn = h('button', { class: 'btn btn-primary btn-sm', type: 'button', 'aria-haspopup': 'dialog', title: 'Run this workflow', onclick: () => openRun() }, icon('play', 14), 'Run');
   const bar = h('header', { class: 'wf-bar' },
     h('div', { class: 'wf-bar-l' }, nameBtn, verBtn, dirtyDot),
     h('span', { class: 'wf-bar-sep' }), undoBtn, redoBtn, tidyBtn,
-    h('span', { class: 'spacer' }), issuesBtn, runsBtn, saveBtn, runBtn);
+    h('span', { class: 'spacer' }), issuesBtn, wordsBtn, runsBtn, saveBtn, runBtn);
 
   /* --------------------------------------------------------------------- canvas */
   const canvas = createCanvas({
@@ -83,7 +84,8 @@ export function mount(container, route) {
   });
 
   const runBar = h('div', { class: 'wf-runbar', hidden: true });
-  const stage = h('div', { class: 'wf-stage' }, canvas.el, palette.el, runBar);
+  const banner = h('div', { class: 'wf-banner', role: 'status', hidden: true });
+  const stage = h('div', { class: 'wf-stage' }, canvas.el, palette.el, runBar, banner);
   const main = h('section', { class: 'wf-main' }, bar, stage);
   const emptyPane = h('div', { class: 'wf-none', hidden: true });
   const root = h('div', { class: 'wf-view' }, listPane, main, inspector.el, emptyPane);
@@ -213,6 +215,94 @@ export function mount(container, route) {
     if (remembered && ps.some((p) => p.id === remembered)) return remembered;
     return ps[0] ? ps[0].id : null;
   }
+  /** "New" is a menu: Blank, From template (gallery sheet), Describe it (composer sheet). */
+  function openNewMenu(anchor) {
+    const ps = sel.projects();
+    if (!ps.length) { toast('Create a project first', { kind: 'error' }); navigate('projects'); return; }
+    openMenu(anchor, [
+      { label: 'Blank', sub: 'An empty canvas', icon: 'plus', onSelect: () => openNew(anchor) },
+      { label: 'From template…', sub: 'Pick a ready-made flow', icon: 'workflow', onSelect: () => openGallery({
+        projects: ps, projectId: defaultProjectId(),
+        onCreate: async (template, projectId) => {
+          try {
+            const res = await api.createWorkflow({ projectId, template });
+            upsert('workflow', res.workflow);
+            navigate('workflows', [res.workflow.id]);
+          } catch (e) { toastError(e, 'Could not create workflow'); throw e; }
+        },
+      }) },
+      { label: 'Describe it…', sub: 'Sonnet drafts it from your words', icon: 'sparkle', onSelect: () => openDescribe(null) },
+    ], { align: anchor === newBtn ? 'left' : 'left', minWidth: 250 });
+  }
+  /** Open the composer; with a workflow it changes that workflow (a new version), otherwise it drafts a new one. */
+  function openDescribe(workflow) {
+    const ps = sel.projects();
+    let prevGraph = null, prevVersion = null;
+    if (workflow) { const v = savedGraph(); prevGraph = v ? clone(v) : null; prevVersion = workflow.currentVersion; }
+    openComposer({
+      projects: ps, projectId: defaultProjectId(), workflow,
+      onDone: async (r) => {
+        try {
+          const d = await api.workflow(r.workflowId);
+          upsert('workflow', d.workflow);
+          if (r.unchanged) { toast('The model suggested no changes', { duration: 2400 }); return; }
+          pendingDraft = { workflowId: r.workflowId, version: r.version, prevGraph, prevVersion, isNew: !workflow };
+          if (r.workflowId === wfId) { await loadWorkflow(wfId, { keepDoc: true }); }
+          else navigate('workflows', [r.workflowId]);
+        } catch (e) { toastError(e, 'Could not open the drafted workflow'); }
+      },
+    });
+  }
+  let pendingDraft = null;
+  // (banner is declared above the stage that mounts it)
+  function clearBanner() {
+    setHidden(banner, true); banner.textContent = '';
+    for (const el of canvas.el.querySelectorAll('[data-drafted]')) el.removeAttribute('data-drafted');
+  }
+  /** After a drafted workflow / version is loaded: the "Drafted from your description · Undo" banner and changed-node highlights. */
+  function showDraftBanner() {
+    const pd = pendingDraft;
+    if (!pd || pd.workflowId !== wfId || !detail || detail.workflow.currentVersion !== pd.version || viewRunId) return;
+    pendingDraft = null;
+    clearBanner();
+    const changed = [];
+    if (pd.prevGraph && doc) {
+      const before = new Map(pd.prevGraph.nodes.map((n) => [n.id, canon(n)]));
+      for (const n of doc.graph.nodes) if (before.get(n.id) !== canon(n)) changed.push(n.id);
+    }
+    const undo = h('button', { class: 'btn btn-quiet btn-sm', type: 'button' }, 'Undo');
+    undo.addEventListener('click', async () => {
+      undo.disabled = true;
+      try {
+        if (pd.isNew) {
+          const r = await api.patchWorkflow(pd.workflowId, { archived: true });
+          upsert('workflow', r.workflow);
+          clearBanner();
+          navigate('workflows', []);
+          toast('Draft removed (archived)', { duration: 2400 });
+        } else {
+          const res = await api.restoreWorkflow(pd.workflowId, pd.prevVersion);
+          upsert('workflow', res.workflow);
+          clearBanner();
+          await loadWorkflow(pd.workflowId, { keepDoc: true });
+          toast(`Went back to v${pd.prevVersion} as v${res.version.version}`, { kind: 'success', duration: 2600 });
+        }
+      } catch (e) { undo.disabled = false; toastError(e, 'Could not undo'); }
+    });
+    const msg = pd.isNew ? 'Drafted from your description' : `Changed from your description${changed.length ? ` · ${plural(changed.length, 'step')} highlighted` : ''}`;
+    banner.append(icon('sparkle', 14), h('span', {}, msg), h('span', { class: 'dim' }, '·'), undo,
+      h('button', { class: 'icon-btn sm', type: 'button', 'aria-label': 'Dismiss', onclick: () => clearBanner() }, icon('close', 14)));
+    setHidden(banner, false);
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      for (const id of changed) { const el = canvas.nodeEl(id); if (el) el.setAttribute('data-drafted', ''); }
+    }));
+  }
+  function describeCurrent() {
+    if (!detail || viewRunId) return;
+    if (doc && doc.dirty) { toast('Save your edits first, then change the workflow with words', { kind: 'error' }); return; }
+    openDescribe(state.workflows.get(detail.workflow.id) || detail.workflow);
+  }
+
   function openNew(anchor) {
     const ps = sel.projects();
     if (!ps.length) { toast('Create a project first', { kind: 'error' }); navigate('projects'); return; }
@@ -236,10 +326,9 @@ export function mount(container, route) {
     };
     nameIn.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); make(null); } });
     const body = h('div', { class: 'wf-pop-body' },
-      h('h3', { class: 'wf-pop-h' }, 'New workflow'),
+      h('h3', { class: 'wf-pop-h' }, 'New blank workflow'),
       nameIn, multi ? projSel : null,
-      h('button', { class: 'wf-pop-opt', type: 'button', onclick: () => make(null) }, icon('plus', 16), h('span', {}, h('strong', {}, 'Blank workflow'), h('em', {}, 'Start with an empty canvas'))),
-      h('button', { class: 'wf-pop-opt', type: 'button', onclick: () => make(TEMPLATE.key) }, icon('sparkle', 16), h('span', {}, h('strong', {}, TEMPLATE.label), h('em', {}, TEMPLATE.hint))));
+      h('button', { class: 'wf-pop-opt', type: 'button', onclick: () => make(null) }, icon('plus', 16), h('span', {}, h('strong', {}, 'Blank workflow'), h('em', {}, 'Start with an empty canvas'))));
     openPop(anchor, body, { width: 340, align: anchor === newBtn ? 'left' : 'left' });
   }
 
@@ -266,7 +355,7 @@ export function mount(container, route) {
       doc = new Doc(draft && draft.version === latest.version ? draft.base : latest.graph);
       doc.__wf = id;
       if (draft && draft.version === latest.version) { doc.graph = clone(draft.graph); toast('Restored your unsaved edits', { duration: 2200 }); }
-      doc.on((kind) => { renderBar(); syncInspector(true); if (kind !== 'saved') validateSoon(); });
+      doc.on((kind) => { if (kind === 'change') clearBanner(); renderBar(); syncInspector(true); if (kind !== 'saved') validateSoon(); });
     } else if (canon(doc.graph) === canon(latest.graph)) {
       doc.markSaved(latest.graph); // our own save (or someone else's identical one): clean, history kept
     } else if (!doc.dirty) {
@@ -277,13 +366,14 @@ export function mount(container, route) {
     validateSoon();
     renderList();
     renderBar();
+    showDraftBanner();
   }
 
   function showEmpty(title, body) {
     emptyShown = true;
     setHidden(main, true); setHidden(inspector.el, true); setHidden(emptyPane, false);
     emptyPane.textContent = '';
-    const create = h('button', { class: 'btn btn-primary', type: 'button', onclick: () => openNew(create) }, icon('plus', 15), 'New workflow');
+    const create = h('button', { class: 'btn btn-primary', type: 'button', 'aria-haspopup': 'menu', onclick: () => openNewMenu(create) }, icon('plus', 15), 'New workflow');
     emptyPane.append(emptyState({ iconName: 'workflow', title, body }), h('div', { class: 'wf-none-actions' }, create));
   }
   function showWorkspace() { setHidden(main, false); setHidden(inspector.el, false); setHidden(emptyPane, true); }
@@ -373,6 +463,7 @@ export function mount(container, route) {
     undoBtn.disabled = runMode || !doc || !doc.canUndo;
     redoBtn.disabled = runMode || !doc || !doc.canRedo;
     tidyBtn.disabled = runMode;
+    wordsBtn.disabled = runMode || !w;
     const errs = issueList.filter((i) => i.level === 'error').length;
     setHidden(issuesBtn, runMode || issueList.length === 0);
     setClass(issuesBtn, 'bad', errs > 0);
@@ -648,6 +739,7 @@ export function mount(container, route) {
     // a run link names its workflow's run: make sure we are on that workflow
     if (id !== wfId) {
       stashDraft();
+      if (!pendingDraft || pendingDraft.workflowId !== id) clearBanner();
       wfId = id; detail = null; doc = null; runDoc = null; issues = new Map(); issueList = [];
       lsSet('helm.wf.last', id);
       viewRunId = runId;
@@ -684,7 +776,7 @@ export function mount(container, route) {
       document.removeEventListener('keydown', onKey);
       stashDraft();
       offFocus(); offDetail(); offBusy();
-      closePop(false);
+      closePop(false); closeSheet();
       bus.emit('wf-run-panel', { runId: null, want: false });
       canvas.destroy(); inspector.destroy();
       root.remove();

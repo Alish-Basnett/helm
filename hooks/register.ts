@@ -419,6 +419,21 @@ Plain words, no hype. Never invent facts that are not in the input.`,
 ## In flight — omit if none
 ## 3 concepts you picked up today (each: name — one plain-words line)
 Only use what is in the input.`,
+  wf_draft: `You design Helm workflows. The input has the user's request ("prompt"), the graph schema ("schema"), the allowed node types, example graphs, and optionally the current graph to modify ("current") and validation issues to fix ("fixIssues").
+Reply with exactly ONE JSON object: a complete graph that follows the schema, in a single \`\`\`json fenced block, and nothing else.
+Keep it as small as the request allows, give every node a short clear label, use gates before anything risky, and only use node types and fields from the schema.`,
+}
+// Which model writes each job: drafting a workflow needs judgement, the rest are cheap Haiku calls.
+const JOB_MODEL: Record<string, { model: string; maxTokens: number }> = {
+  wf_draft: { model: 'sonnet', maxTokens: 8000 },
+}
+// Claimed jobs and model/shell steps are persisted while they run, so a hot reload (which drops the old
+// module's in-flight calls) re-runs them instead of leaving them stuck as "running" in the hub.
+async function trackInflight($: any, key: 'jobs' | 'steps', item: any, on: boolean) {
+  const k = `inflight-${key}:${sessionId}`
+  const list = ((await $.store.get(k).catch(() => [])) as any[] | undefined) ?? []
+  const next = on ? [...list.filter(x => x.id !== item.id), item] : list.filter(x => x.id !== item.id)
+  await $.store.set(k, next.slice(-20)).catch(() => {})
 }
 let jobsPolling = false
 let jobsMissingAt = 0
@@ -441,16 +456,19 @@ async function pollJobs($: any) {
 }
 
 async function runJob($: any, job: any) {
+  await trackInflight($, 'jobs', job, true)
   try {
     const system = JOB_SYSTEM[job.kind]
     if (!system) throw new Error(`unknown job kind ${job.kind}`)
-    const r = await $.model.complete({ model: 'haiku', system, maxTokens: 900, timeoutMs: 60000, prompt: JSON.stringify(job.input, null, 1).slice(0, 12000) })
-    meter(job.kind, 'haiku', r.usage, { taskId: job.taskId ?? undefined })
+    const pick = JOB_MODEL[job.kind] ?? { model: 'haiku', maxTokens: 900 }
+    const r = await $.model.complete({ model: pick.model, system, maxTokens: pick.maxTokens, timeoutMs: 120000, prompt: JSON.stringify(job.input, null, 1).slice(0, 40000) })
+    meter(job.kind === 'wf_draft' ? 'wf_draft' : job.kind, pick.model, r.usage, { taskId: job.taskId ?? undefined })
     if (!r.isAnswered) throw new Error(`model: ${r.reason ?? 'no answer'}`)
     emit('job.result', { jobId: job.id, ok: true, text: r.text.trim() })
   } catch (err) {
     emit('job.result', { jobId: job.id, ok: false, error: clip(String(err), 300) })
   }
+  await trackInflight($, 'jobs', job, false)
   void flush($)
 }
 
@@ -493,6 +511,7 @@ async function pollSteps($: any) {
 
 async function runStep($: any, step: any) {
   const input = step.input ?? {}
+  if (step.kind !== 'agent') await trackInflight($, 'steps', step, true)
   try {
     if (step.kind === 'agent') {
       // The hub already created the card; the [helm:T-n] tag binds this agent to it.
@@ -530,6 +549,7 @@ async function runStep($: any, step: any) {
   } catch (err) {
     emit('wf.step.result', { stepId: step.id, ok: false, error: clip(String(err), 400) })
   }
+  if (step.kind !== 'agent') await trackInflight($, 'steps', step, false)
   void flush($)
 }
 
@@ -852,6 +872,9 @@ export const register: Register = (on, options) => {
       await $.agent.register({ name: 'builder', description: 'Sonnet builder for one Helm task: writes code, refactors, runs tests, fixes bugs, and reports DONE/HOW/FILES/LEARNED.', prompt: BUILDER_PROMPT, model: 'sonnet' }).catch(err => probe('agent.register.error', String(err)))
       await $.agent.register({ name: 'scout', description: 'Haiku scout for one narrow Helm question: search, read, list, check. Never edits.', prompt: SCOUT_PROMPT, model: 'haiku', disallowedTools: ['Edit', 'Write', 'NotebookEdit'] }).catch(err => probe('agent.register.error', String(err)))
 
+      // resume claimed work a previous module instance left in flight (see trackInflight)
+      for (const job of ((await $.store.get(`inflight-jobs:${sessionId}`)) as any[] | undefined) ?? []) void runJob($, job)
+      for (const step of ((await $.store.get(`inflight-steps:${sessionId}`)) as any[] | undefined) ?? []) void runStep($, step)
       timers.push($.clock.every(1500, () => void tick($)))
       // Persist the outbox on its own timer, so events survive a reload even if a tick is stuck.
       let savedLen = -1

@@ -326,9 +326,28 @@ export function topoOrder(graph) {
   return order;
 }
 
-/** The hard-coded phase 1 template: Build -> Test -> Gate -> Review -> Merge, with a Fix step on the fail edge. */
+/**
+ * Built-in templates (CONTRACT v0.10). Each is `() => ({ name, title, description, icon, graph })`; the graph is an ordinary
+ * `helm.workflow/1` graph that is validated like any other (a test checks all of them). Phase 1 has no loops, so a "loop back"
+ * is unrolled with the fail edge going to a fresh step.
+ */
+const st = (id, label, x, y, argv, over = {}) => ({
+  id, type: 'shell', label, position: { x, y }, config: { argv, timeoutMs: 300000, passIf: 'exit0' }, retry: { max: 0, backoffMs: 0 }, ...over,
+});
+const ag = (id, label, x, y, agent, prompt, over = {}) => ({
+  id, type: 'agent', label, position: { x, y }, config: { agent, prompt }, retry: { max: 0, backoffMs: 0 }, ...over,
+});
+const gt = (id, label, x, y, message, show = 'files') => ({ id, type: 'gate', label, position: { x, y }, config: { message, show } });
+const ed = (n, from, to, when) => ({ id: `e${n}`, from, to, when });
+const BRIEF = { key: 'brief', label: 'What to build', type: 'text', required: true };
+
+const part = (id, label, x, prompt) => ag(id, label, x, 160, 'builder', prompt, { config: { agent: 'builder', prompt, isolation: 'worktree' } });
+
 export const TEMPLATES = {
   'build-test-review': () => ({
+    title: 'Build, test gate, review, merge',
+    description: 'Build it, run the tests, pause for your OK, get an Opus review, then merge.',
+    icon: '▣',
     name: 'Build → Test → Gate → Review → Merge',
     graph: {
       schema: SCHEMA,
@@ -363,4 +382,225 @@ export const TEMPLATES = {
       ],
     },
   }),
+  'fix-bug': () => ({
+    title: 'Fix a bug',
+    description: 'A scout reproduces it, a builder fixes it, the tests check. A failing test loops back to the builder, at most 2 more times.',
+    icon: '✱',
+    name: 'Fix a bug',
+    graph: {
+      schema: SCHEMA, name: 'Fix a bug',
+      params: [{ key: 'bug', label: 'What is broken', type: 'text', required: true }],
+      nodes: [
+        ag('repro', 'Reproduce the bug', 80, 160, 'scout', 'Reproduce this bug and report the exact steps, the failing behaviour and the files most likely involved. Do not change any code.\n\nBug: {{params.bug}}'),
+        ag('fix', 'Fix it', 400, 160, 'builder', 'Fix this bug and add a test that would have caught it.\n\nBug: {{params.bug}}\n\nReproduction report:\n{{inputs.repro.text}}', { retry: { max: 1, backoffMs: 5000 } }),
+        st('test', 'Run tests', 720, 160, ['npm', 'test']),
+        ag('fix2', 'Fix again (try 2)', 720, 340, 'builder', 'The tests still fail after your fix. Fix them.\n\nBug: {{params.bug}}\n\nTest output:\n{{inputs.test.text}}'),
+        st('test2', 'Run tests again', 1040, 340, ['npm', 'test']),
+        ag('fix3', 'Fix again (last try)', 1040, 520, 'builder', 'The tests still fail on the second try. This is the last attempt. Fix them.\n\nBug: {{params.bug}}\n\nTest output:\n{{inputs.test2.text}}'),
+        st('test3', 'Final test run', 1360, 520, ['npm', 'test']),
+        { id: 'note1', type: 'note', label: 'About this flow', position: { x: 80, y: 340 },
+          config: { text: 'Loops are unrolled: a failing test sends the work back to a builder, at most 2 times. If the last run still fails, the run stops red.' } },
+      ],
+      edges: [
+        ed(1, 'repro', 'fix', 'ok'), ed(2, 'fix', 'test', 'ok'),
+        ed(3, 'test', 'fix2', 'fail'), ed(4, 'fix2', 'test2', 'ok'),
+        ed(5, 'test2', 'fix3', 'fail'), ed(6, 'fix3', 'test3', 'ok'),
+      ],
+    },
+  }),
+  'research-build': () => ({
+    title: 'Research, then build',
+    description: 'A scout reports on how to do it, you approve the plan, then a builder does the work.',
+    icon: '◎',
+    name: 'Research, then build',
+    graph: {
+      schema: SCHEMA, name: 'Research, then build',
+      params: [BRIEF],
+      nodes: [
+        ag('research', 'Research and plan', 80, 160, 'scout', 'Investigate the codebase for this task and write a short plan: the files to touch, the approach, and any risks. Do not change any code.\n\nTask: {{params.brief}}'),
+        gt('approve', 'Approve the plan', 400, 160, 'Read the scout\'s plan. Approve to let the builder start.', 'text'),
+        ag('build', 'Build it', 720, 160, 'builder', 'Do this task, following the approved plan.\n\nTask: {{params.brief}}\n\nPlan:\n{{inputs.research.text}}'),
+      ],
+      edges: [ed(1, 'research', 'approve', 'ok'), ed(2, 'approve', 'build', 'approved')],
+    },
+  }),
+  'parallel-refactor': () => ({
+    title: 'Parallel refactor',
+    description: 'Three builders refactor one area each, then tests and a review. Runs one builder after another for now, because parallel branches and a join step are not available yet.',
+    icon: '⫴',
+    name: 'Parallel refactor',
+    graph: {
+      schema: SCHEMA, name: 'Parallel refactor',
+      params: [{ key: 'goal', label: 'What to refactor', type: 'text', required: true }],
+      nodes: [
+        part('part1', 'Refactor part 1', 80, 'Refactor the first third of this change. Keep behaviour identical and stay inside your part.\n\nGoal: {{params.goal}}'),
+        part('part2', 'Refactor part 2', 400, 'Refactor the second third of this change. Keep behaviour identical and stay inside your part.\n\nGoal: {{params.goal}}'),
+        part('part3', 'Refactor part 3', 720, 'Refactor the last third of this change. Keep behaviour identical and stay inside your part.\n\nGoal: {{params.goal}}'),
+        st('test', 'Run tests', 1040, 160, ['npm', 'test']),
+        { id: 'review', type: 'review', label: 'Opus review', position: { x: 1360, y: 160 },
+          config: { rubric: 'Behaviour unchanged, no scope creep, no half-finished moves between files.', inputs: ['text', 'files', 'check'] },
+          retry: { max: 0, backoffMs: 0 } },
+        { id: 'note1', type: 'note', label: 'Sequential for now', position: { x: 80, y: 340 },
+          config: { text: 'Parallel branches and a join step are not available yet, so the three builders run one after another. Reshape this when they arrive.' } },
+      ],
+      edges: [ed(1, 'part1', 'part2', 'ok'), ed(2, 'part2', 'part3', 'ok'), ed(3, 'part3', 'test', 'ok'), ed(4, 'test', 'review', 'ok')],
+    },
+  }),
+  'safe-migration': () => ({
+    title: 'Safe migration',
+    description: 'A builder writes the migration, you check it, a dry run proves it, you confirm again, then it is applied.',
+    icon: '⛨',
+    name: 'Safe migration',
+    graph: {
+      schema: SCHEMA, name: 'Safe migration',
+      params: [{ key: 'change', label: 'What should change in the data', type: 'text', required: true }],
+      nodes: [
+        ag('write', 'Write the migration', 80, 160, 'builder', 'Write a migration for this change. Do not run it.\n\nChange: {{params.change}}'),
+        gt('review1', 'Check the migration', 400, 160, 'Read the migration before anything runs against data.', 'diff'),
+        st('dryrun', 'Dry run', 720, 160, ['npm', 'run', 'migrate:dry-run']),
+        gt('review2', 'Confirm apply', 1040, 160, 'The dry run passed. Approve to apply the migration for real.', 'text'),
+        ag('apply', 'Apply it', 1360, 160, 'builder', 'Apply the migration that was written and checked, then confirm it ran cleanly.\n\nDry run output:\n{{inputs.dryrun.text}}'),
+      ],
+      edges: [ed(1, 'write', 'review1', 'ok'), ed(2, 'review1', 'dryrun', 'approved'), ed(3, 'dryrun', 'review2', 'ok'), ed(4, 'review2', 'apply', 'approved')],
+    },
+  }),
 };
+
+/** Public list for GET /v1/workflows/templates: [{ id, title, description, icon, name, graph }]. */
+export function listTemplates() {
+  return Object.entries(TEMPLATES).map(([id, fn]) => {
+    const t = fn();
+    return { id, title: t.title, description: t.description, icon: t.icon, name: t.name, graph: t.graph };
+  });
+}
+
+// ============================================================ drafting by prompt (CONTRACT v0.10)
+
+/** Left-to-right layered layout. Fills `position` for nodes that lack a valid one (all nodes, if any is missing). */
+export function layoutGraph(input) {
+  if (!isObj(input) || !Array.isArray(input.nodes)) return input;
+  const nodes = input.nodes.filter(isObj);
+  const hasPos = (n) => isObj(n.position) && isNum(n.position.x) && isNum(n.position.y);
+  if (nodes.every(hasPos)) return input;
+  const exec = nodes.filter((n) => n.type !== 'note' && typeof n.id === 'string');
+  const ids = new Set(exec.map((n) => n.id));
+  const edges = (Array.isArray(input.edges) ? input.edges : []).filter((e) => isObj(e) && ids.has(e.from) && ids.has(e.to) && e.from !== e.to);
+  // longest-path depth, capped so a stray cycle can never loop forever (validation reports cycles separately)
+  const depth = new Map(exec.map((n) => [n.id, 0]));
+  for (let pass = 0; pass < exec.length; pass++) {
+    let changed = false;
+    for (const e of edges) {
+      const d = depth.get(e.from) + 1;
+      if (d > depth.get(e.to) && d <= exec.length) { depth.set(e.to, d); changed = true; }
+    }
+    if (!changed) break;
+  }
+  const rows = new Map();
+  const pos = new Map();
+  for (const n of exec) {
+    const d = depth.get(n.id), r = rows.get(d) || 0;
+    rows.set(d, r + 1);
+    pos.set(n.id, { x: 80 + d * 320, y: 160 + r * 180 });
+  }
+  const bottom = 160 + Math.max(0, ...rows.values()) * 180;
+  let noteRow = 0;
+  const out = nodes.map((n) => {
+    if (typeof n.id !== 'string') return n;
+    if (n.type === 'note') return { ...n, position: { x: 80 + (noteRow++) * 320, y: bottom } };
+    return { ...n, position: pos.get(n.id) };
+  });
+  return { ...input, nodes: out };
+}
+
+/**
+ * Pull one JSON object out of a model reply (plain, or inside ``` fences, or surrounded by prose).
+ * Returns { value } or { error }.
+ */
+export function extractJson(text) {
+  if (!isStr(text) || !text.trim()) return { error: 'the reply was empty' };
+  const tries = [];
+  for (const m of text.matchAll(/```[A-Za-z]*\s*\n?([\s\S]*?)```/g)) tries.push(m[1].trim());
+  tries.push(text.trim());
+  // balanced-brace scan of the whole reply, for prose around a bare object
+  for (let i = text.indexOf('{'); i !== -1 && tries.length < 40; i = text.indexOf('{', i + 1)) {
+    let depth = 0, inStr = false, esc = false, end = -1;
+    for (let j = i; j < text.length; j++) {
+      const c = text[j];
+      if (inStr) { if (esc) esc = false; else if (c === '\\') esc = true; else if (c === '"') inStr = false; continue; }
+      if (c === '"') inStr = true;
+      else if (c === '{') depth++;
+      else if (c === '}' && --depth === 0) { end = j; break; }
+    }
+    if (end !== -1) { tries.push(text.slice(i, end + 1)); i = end; }
+  }
+  let firstObj = null;
+  for (const t of tries) {
+    try {
+      const v = JSON.parse(t);
+      if (isObj(v) && (Array.isArray(v.nodes) || v.schema)) return { value: v };
+      if (isObj(v) && !firstObj) firstObj = v;
+    } catch { /* try the next candidate */ }
+  }
+  if (firstObj) return { value: firstObj };
+  return { error: 'the reply did not contain a JSON object' };
+}
+
+/**
+ * Turn a model's JSON into a stored-quality graph: fill the `schema` tag, edge ids and positions it left out, then validate.
+ * Returns { ok, issues, graph }.
+ */
+export function prepareDraft(raw) {
+  if (!isObj(raw)) return validateGraph(raw);
+  let g = { ...raw };
+  if (g.schema === undefined) g.schema = SCHEMA;
+  if (Array.isArray(g.edges)) {
+    const used = new Set(g.edges.filter(isObj).map((e) => e.id).filter(isStr));
+    let n = 0;
+    g.edges = g.edges.map((e) => {
+      if (!isObj(e) || e.id !== undefined) return e;
+      let id; do { id = `e${++n}`; } while (used.has(id));
+      used.add(id);
+      return { ...e, id };
+    });
+  }
+  g = layoutGraph(g);
+  return validateGraph(g);
+}
+
+/** The node types as the model sees them. */
+export const NODE_CATALOGUE = [
+  { type: 'agent', summary: 'A Claude Code agent does a piece of work.', config: { agent: '"builder" (edits code, default) or "scout" (read only research)', prompt: 'string, required; may use {{params.key}} and {{inputs.nodeId.key}}', isolation: '"worktree" to work in a separate git worktree (optional)', cwd: 'string (optional)' }, outputs: OUTPUT_KEYS.agent },
+  { type: 'shell', summary: 'Runs a command; fails on a non-zero exit.', config: { argv: 'array of strings, e.g. ["npm","test"] (or "script": a shell string; give one, not both)', timeoutMs: '1000 to 600000, default 30000', passIf: '"exit0" (default) or "regex" with "pattern"', cwd: 'string (optional)' }, outputs: OUTPUT_KEYS.shell },
+  { type: 'gate', summary: 'Stops and waits for the person to approve or reject.', config: { message: 'string, required', show: '"diff" | "files" | "text" | "none"' }, outputs: OUTPUT_KEYS.gate },
+  { type: 'review', summary: 'A strong model reviews the work against a rubric and answers pass or changes.', config: { rubric: 'string, required', inputs: 'subset of ["text","files","check"]' }, outputs: OUTPUT_KEYS.review },
+  { type: 'note', summary: 'A sticky note on the canvas. Never runs, has no edges.', config: { text: 'string' }, outputs: [] },
+];
+
+/** A compact text description of `helm.workflow/1` for the drafting prompt. */
+export const DRAFT_SCHEMA_TEXT = [
+  `A workflow is ONE JSON object with schema "${SCHEMA}". Reply with that JSON and nothing else (a single \`\`\`json fence is fine).`,
+  '',
+  '{ "schema": "helm.workflow/1", "name": "short title", "params": [...], "nodes": [...], "edges": [...] }',
+  '',
+  'nodes[]: { "id": unique [A-Za-z0-9_-]{1,40}, "type": "agent"|"shell"|"gate"|"review"|"note", "label": "short name",',
+  '           "position": { "x": number, "y": number }, "config": {...per type...},',
+  '           "retry": { "max": 0-5, "backoffMs": 0-600000 } (optional, not for notes), "timeoutMs": 1000-21600000 (optional) }',
+  'Config fields: agent { agent: "builder"|"scout", prompt, isolation?: "worktree", cwd? }; shell { argv: [..] or script, timeoutMs?, passIf?: "exit0"|"regex", pattern?, cwd? };',
+  '  gate { message, show?: "diff"|"files"|"text"|"none" }; review { rubric, inputs?: ["text","files","check"] }; note { text }.',
+  'Positions: x grows to the right (about 320 per step), y about 160 per row. You may omit "position" and Helm will lay the graph out left to right.',
+  '',
+  'edges[]: { "id": unique, "from": nodeId, "to": nodeId, "when": kind }. Work nodes (agent, shell, review) leave on "ok" or "fail"; gates leave on "approved" or "rejected".',
+  '  Omit "when" for the default (ok, or approved for a gate). Notes have no edges. No self edges. At least one entry node (no incoming edge).',
+  '  The graph must NOT contain cycles: there are no loops yet. To retry after a failure, add a new fix step on the "fail" edge (unrolled), or use retry on the node.',
+  '',
+  'params[]: { "key": [A-Za-z][A-Za-z0-9_]*, "label": "shown to the person", "type": "text"|"line", "default"?: string, "required"?: boolean }.',
+  'Templates inside prompt, message, rubric, argv: {{params.key}} (must be declared) and {{inputs.nodeId.key}}, where nodeId runs BEFORE this node (is an ancestor).',
+  `Output keys: agent ${OUTPUT_KEYS.agent.join(', ')}; shell ${OUTPUT_KEYS.shell.join(', ')}; review ${OUTPUT_KEYS.review.join(', ')}; gate ${OUTPUT_KEYS.gate.join(', ')}.`,
+  'Defaults to prefer: a build step is an agent "builder"; research is an agent "scout"; tests are a shell step ["npm","test"]; ask the person before anything risky (merge, migration, deploy) with a gate.',
+  'If a current workflow is given, return the COMPLETE modified graph (keep ids of unchanged nodes), not a patch.',
+].join('\n');
+
+/** The two example graphs sent with every draft job. */
+export function draftExamples() {
+  return ['build-test-review', 'research-build'].map((id) => TEMPLATES[id]().graph);
+}

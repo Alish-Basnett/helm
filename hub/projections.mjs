@@ -549,6 +549,7 @@ export class Projector {
       case 'hub.question.dismiss': return this.hQuestionDismiss(ev);
       case 'hub.job.create': return this.hJobCreate(ev);
       case 'hub.job.claim': return this.hJobClaim(ev);
+      case 'hub.job.finish': return this.hJobFinish(ev);
       case 'hub.sweep': return this.hSweep(ev);
       case 'hub.task.diff': return this.hTaskDiff(ev);
       case 'hub.task.diffstat': return this.hTaskDiffStat(ev);
@@ -933,6 +934,12 @@ export class Projector {
         this.upd('tasks', t.id, { explainer: cut(text, 20000) });
         this.indexTask(this.getTask(t.id));
       }
+    } else if (j.kind === 'wf_draft') {
+      // v0.10: keep the raw reply on a still-running job; the workflow engine judges it right after this commit
+      // (hub/wfengine.mjs finishDraft) and ends the job with a hub.job.finish event.
+      this.upd('jobs', j.id, { state: 'running', claimed_at: j.claimed_at ?? at, result: cut(text, 20000), error: null, done_at: null });
+      this.pushJob(j.id);
+      return;
     } else if (j.kind === 'digest') {
       this.createDigest({ date: str(parse(j.input, {}).date), projectId: j.project_id, text: cut(text, 20000), at });
     }
@@ -1351,6 +1358,19 @@ export class Projector {
       out.push(toJob(this.getJob(id)));
     }
     return out;
+  }
+  /** hub.job.finish (v0.10): the hub ends a job it judged itself (wf_draft). */
+  hJobFinish(ev) {
+    const d = ev.data;
+    const j = this.getJob(str(d.jobId));
+    if (!j) return null;
+    this.upd('jobs', j.id, {
+      state: d.state === 'done' ? 'done' : 'failed', result: d.result == null ? null : str(d.result),
+      error: d.state === 'done' ? null : cut(str(d.error) || 'job failed', 500), done_at: ev.at,
+    });
+    this.noteJobState(j.id);
+    this.pushJob(j.id);
+    return toJob(this.getJob(j.id));
   }
   hSweep(ev) {
     const d = ev.data, at = ev.at;

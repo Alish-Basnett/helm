@@ -3,7 +3,9 @@
 // ever calling this file's planner. The engine reads the projection, picks the next action, records it, and repeats until
 // nothing is left to decide ("settles"). It holds no timers: waits live in the data and the sweep re-evaluates.
 import { HttpError } from './errors.mjs';
-import { validateGraph, TEMPLATES, SCHEMA } from './wfgraph.mjs';
+import {
+  validateGraph, TEMPLATES, SCHEMA, listTemplates, prepareDraft, extractJson, NODE_CATALOGUE, DRAFT_SCHEMA_TEXT, draftExamples,
+} from './wfgraph.mjs';
 import {
   toWorkflow, toVersion, toRun, toStep, getWorkflow, getVersion, getRun, runNodeRows, getRunNode, getStep, runRow,
   RUN_TERMINAL, NODE_TERMINAL,
@@ -18,6 +20,7 @@ const parse = (s, d) => { try { return s == null ? d : JSON.parse(s); } catch { 
 const cut = (s, n) => { s = s == null ? '' : String(s); return s.length > n ? s.slice(0, n - 1) + '…' : s; };
 const tailStr = (s, n) => (s.length > n ? '…' + s.slice(s.length - n + 1) : s);
 
+const DRAFT_PROMPT_MAX = 4000;
 const ACTIVE_NODE = ['ready', 'queued', 'running', 'waiting_gate'];
 const UNCLAIMED_ERROR = 'not picked up by a live session';
 const REF_RE = /\{\{\s*([A-Za-z0-9_.-]+)\s*\}\}/g;
@@ -161,6 +164,91 @@ export class WfEngine {
       data.archived = body.archived;
     }
     return this.hub.tx(() => ({ workflow: this.cmd('wf.updated', data, at) }));
+  }
+
+  // ===================================================================== drafting
+  templates() { return { templates: listTemplates() }; }
+
+  /**
+   * POST /v1/workflows/draft: queue a `wf_draft` Job for the project's live session (the hub never calls a model).
+   * The mod answers with job.result { text }; `finishDraft` (run from tick) validates it and creates the workflow / version.
+   */
+  draftWorkflow(body, at = this.now()) {
+    if (!isObj(body)) throw bad('body must be an object');
+    const project = isStr(body.projectId) ? this.p.getProject(body.projectId) : null;
+    if (!project) throw notFound('project not found');
+    if (!isStr(body.prompt) || !body.prompt.trim()) throw bad('prompt must be a non-empty string');
+    if (body.prompt.length > DRAFT_PROMPT_MAX) throw bad(`prompt is longer than ${DRAFT_PROMPT_MAX} characters`);
+    let current;
+    let workflowId = null;
+    if (body.workflowId !== undefined && body.workflowId !== null) {
+      const w = isStr(body.workflowId) ? getWorkflow(this.db, body.workflowId) : null;
+      if (!w) throw notFound('workflow not found');
+      if (w.project_id !== project.id) throw bad('workflow belongs to another project');
+      workflowId = w.id;
+      current = parse(getVersion(this.db, w.id, w.current_version)?.graph, null) || undefined;
+    }
+    const sessionId = this.hub.pickJobSession(null, project.id); // 409 when there is no live session
+    const input = {
+      prompt: body.prompt.trim(), projectName: project.name, schema: DRAFT_SCHEMA_TEXT, nodeTypes: NODE_CATALOGUE,
+      examples: draftExamples(), attempt: 1,
+    };
+    if (workflowId) { input.workflowId = workflowId; input.current = current; }
+    return this.hub.tx(() => ({
+      job: this.cmd('hub.job.create', { kind: 'wf_draft', sessionId, taskId: null, projectId: project.id, input }, at),
+    }));
+  }
+
+  /** Jobs whose reply has arrived (`job.result` keeps them `running` with the raw text) but is not yet judged. */
+  pendingDrafts() {
+    return this.db.all(`SELECT * FROM jobs WHERE kind = 'wf_draft' AND state = 'running' AND result IS NOT NULL ORDER BY rowid`);
+  }
+
+  /**
+   * Judge one reply: extract the JSON, lay it out, validate. Valid -> create the workflow (or a new version) and link it in
+   * Job.result. Invalid -> one automatic fix-up job (attempt 2) with the issues; still invalid -> the job fails with the issues.
+   * Everything is recorded as hub.job.* / wf.* events, so a rebuild replays it without deciding again.
+   */
+  finishDraft(j, at = this.now()) {
+    const input = parse(j.input, {});
+    const attempt = Number(input.attempt) || 1;
+    const fail = (error, extra = {}) => this.cmd('hub.job.finish', { jobId: j.id, state: 'failed', error: cut(error, 500), result: JSON.stringify(extra) }, at);
+    const w = input.workflowId ? getWorkflow(this.db, input.workflowId) : null;
+    if (input.workflowId && !w) return this.hub.tx(() => fail('the workflow no longer exists'));
+
+    const ex = extractJson(j.result);
+    let r;
+    if (ex.error) r = { ok: false, issues: [{ level: 'error', code: 'json', message: ex.error }] };
+    else r = prepareDraft(w ? { ...ex.value, name: w.name } : ex.value);
+
+    return this.hub.tx(() => {
+      if (r.ok) {
+        const graph = r.graph;
+        const summary = cut(String(input.prompt || '').replace(/\s+/g, ' ').trim(), 80) || 'Drafted';
+        if (w) {
+          const cur = getVersion(this.db, w.id, w.current_version);
+          if (cur && cur.graph === JSON.stringify(graph)) {
+            return this.cmd('hub.job.finish', { jobId: j.id, state: 'done', result: JSON.stringify({ workflowId: w.id, version: w.current_version, unchanged: true }) }, at);
+          }
+          const version = this.cmd('wf.saved', { workflowId: w.id, graph, author: 'model', summary }, at);
+          return this.cmd('hub.job.finish', { jobId: j.id, state: 'done', result: JSON.stringify({ workflowId: w.id, version: version.version }) }, at);
+        }
+        const name = (graph.name || '').trim().slice(0, 200) || 'Drafted workflow';
+        graph.name = name;
+        const workflow = this.cmd('wf.created', { projectId: j.project_id, name, graph, author: 'model', summary }, at);
+        return this.cmd('hub.job.finish', { jobId: j.id, state: 'done', result: JSON.stringify({ workflowId: workflow.id, version: workflow.currentVersion }) }, at);
+      }
+      const errors = r.issues.filter((i) => i.level === 'error').slice(0, 20);
+      const brief = `${errors[0]?.message || 'invalid workflow'}${errors.length > 1 ? ` (+${errors.length - 1} more)` : ''}`;
+      if (attempt >= 2) return fail(`The model's workflow was invalid after a retry: ${brief}`, { issues: errors });
+      let sessionId;
+      try { sessionId = this.hub.pickJobSession(j.session_id, j.project_id); } catch { return fail(`Invalid workflow and no live session to retry: ${brief}`, { issues: errors }); }
+      const retry = this.cmd('hub.job.create', {
+        kind: 'wf_draft', sessionId, taskId: null, projectId: j.project_id,
+        input: { ...input, attempt: attempt + 1, fixIssues: errors, previousText: cut(j.result, 8000) },
+      }, at);
+      return this.cmd('hub.job.finish', { jobId: j.id, state: 'done', result: JSON.stringify({ retryJobId: retry.id, issues: errors }) }, at);
+    });
   }
 
   // ====================================================================== runs
@@ -364,10 +452,17 @@ export class WfEngine {
    */
   tick(now = this.now()) {
     if (this.ticking || this.hub.closed || this.hub.replaying) return;
+    const drafts = this.pendingDrafts();
     const live = this.db.all(`SELECT id FROM runs WHERE status IN ('running','waiting','paused') ORDER BY rowid`);
-    if (!live.length) return;
+    if (!live.length && !drafts.length) return;
     this.ticking = true;
     try {
+      for (const j of drafts) {
+        try { this.finishDraft(j, now); } catch (e) {
+          this.hub.log?.error('workflow draft failed', e);
+          this.hub.tx(() => this.cmd('hub.job.finish', { jobId: j.id, state: 'failed', error: 'could not process the reply', result: null }, now));
+        }
+      }
       const stale = this.staleSteps(now);
       if (stale.length) {
         this.hub.tx(() => { for (const s of stale) this.cmd('wf.step.failed', { stepId: s.id, error: s.error }, now); });

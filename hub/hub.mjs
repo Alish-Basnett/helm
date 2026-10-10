@@ -311,6 +311,9 @@ export class Hub {
       if (!n || n.state === 'failed') continue;
       if (n.state === 'queued' || n.state === 'sending') return null;   // a start is in flight
       if (now - n.created_at < autoStartingMs) return null;              // delivered, agent not up yet
+      // Delivered but not answered yet: the session only reads prompts when its current turn ends, which can
+      // take longer than autoStartingMs. Until it replies (or 30 min pass), the start is still in flight.
+      if (n.state === 'ran' && !n.replied_at && now - (n.ran_at ?? n.created_at) < 30 * 60_000) return null;
     }
     const top = next[0];
     const n = top.start_note_id ? this.p.getNote(top.start_note_id) : null;
