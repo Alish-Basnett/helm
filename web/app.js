@@ -1,5 +1,6 @@
 // app.js — shell: sidebar, topbar telemetry, router wiring, theme, shortcuts.
 import { h, $, setText, setClass, setHidden, bus, startTicker } from './dom.js';
+import { userIsBusy } from './drafts.js';
 import { icon } from './icons.js';
 import { state, sel, subscribe, connect, setUI, lsGet, lsSet } from './store.js';
 import { fmtTokens, fmtUsd, fmtUsdSmall, fmtClock, plural } from './format.js';
@@ -243,16 +244,30 @@ renderChrome();
 applyRoute(route());
 connect().catch((e) => console.error(e));
 
-/* ---------- self-update: reload when the hub serves newer web files ---------- */
+/* ---------- self-update: pick up newer web files without ever reloading under the user's hands ---------- */
 let loadedBuild = null;
+let seenBuild = null;
+let seenAt = 0;
+let updatePill = null;
+function showUpdatePill() {
+  if (updatePill) return;
+  updatePill = h('button', { class: 'update-pill', type: 'button', title: 'Helm was updated. Your typed drafts are kept.', onclick: () => location.reload() },
+    icon('retry', 13), 'Helm updated · Reload');
+  document.body.append(updatePill);
+}
 async function checkBuild() {
   try {
     const { webBuild } = await fetch('/v1/health', { cache: 'no-store' }).then((r) => r.json());
     if (!webBuild) return;
-    if (loadedBuild === null) loadedBuild = webBuild;
-    else if (webBuild !== loadedBuild) location.reload();
+    if (loadedBuild === null) { loadedBuild = webBuild; return; }
+    if (webBuild === loadedBuild) return;
+    // wait until the files have been stable for 15 s, so a build in progress never half-loads
+    if (webBuild !== seenBuild) { seenBuild = webBuild; seenAt = Date.now(); return; }
+    if (Date.now() - seenAt < 15000) return;
+    if (userIsBusy() || document.querySelector('.dock-panel:focus-within')) showUpdatePill();
+    else location.reload();
   } catch { /* hub briefly down: try again next time */ }
 }
 checkBuild();
-setInterval(checkBuild, 30000);
+setInterval(checkBuild, 10000);
 document.addEventListener('visibilitychange', () => { if (!document.hidden) checkBuild(); });

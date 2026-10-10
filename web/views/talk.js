@@ -3,6 +3,7 @@
 // target — a session (Talk panel, Threads) or a task (Task chat panel); `createTalkSheet` is the Talk panel in the
 // Dock, with a session picker.
 import { h, reconcile, setText, setHidden, setAttr, setClass, startTicker } from '../dom.js';
+import { bindDraft, clearDraft } from '../drafts.js';
 import { icon } from '../icons.js';
 import { state, sel, subscribe, lsGet, lsSet } from '../store.js';
 import { addNote, deleteNote, executeNotes, retryNote } from '../actions.js';
@@ -33,6 +34,8 @@ export function createTalk(opts) {
     ? 'Ask about this task or tell its agent what to do. ↵ sends it right away, and the reply lands here.'
     : 'Say something to this session. ↵ sends it right away, and Claude’s reply lands here.'));
   const ta = h('textarea', { class: 'note-input talk-input', rows: '1', placeholder: `Message ${who}…`, 'aria-label': `Message ${who}`, 'data-autofocus': '' });
+  const draftKey = `talk:${target.kind}:${sid}`;
+  bindDraft(ta, draftKey); // restores after the listeners below are attached (microtask)
   const send = h('button', { class: 'icon-btn note-send', type: 'button', 'aria-label': 'Send now', title: 'Send now (↵)', onclick: () => submit(true) }, icon('send', 18));
   const draftBtn = h('button', { class: 'link-btn talk-draft', type: 'button', onclick: () => submit(false), title: 'Keep it as a draft; run it later with Execute' }, 'Save as draft');
   const hint = h('div', { class: 'note-hint mono talk-hint' }, h('span', {}, '↵ send now · ⇧↵ new line'), draftBtn);
@@ -67,6 +70,7 @@ export function createTalk(opts) {
     const atts = attsOf(taken);
     if (!text && !atts.length) { tray.restore(taken); return; }
     ta.value = '';
+    clearDraft(draftKey);
     autosize();
     const p = addNote(target, text, { execute: !!run, attachments: atts });
     scrollToEnd();

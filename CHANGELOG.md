@@ -4,6 +4,15 @@ All notable changes to Helm are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/). Shapes and endpoints are defined in `CONTRACT.md`.
 
+## [0.7.1] - 2026-10-10
+
+### Fixed
+
+- The dashboard no longer reloads under you. A newer web build waits until its files have been stable
+  for 15 seconds. It then reloads only if you're idle; otherwise a "Helm updated · Reload" pill appears.
+- What you type in Talk, Task chat and notes is saved as a draft per target and restored after any
+  reload or re-render, until you send it.
+
 ## [0.7.0] - 2026-10-10
 
 ### Added

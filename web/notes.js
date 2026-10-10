@@ -1,5 +1,6 @@
 // notes.js — reusable Notes panel (task or session target). Colour on text = state, nothing else.
 import { h, reconcile, setText, setClass, setHidden, startTicker } from './dom.js';
+import { bindDraft, clearDraft } from './drafts.js';
 import { icon } from './icons.js';
 import { state, sel, subscribe } from './store.js';
 import { createReply, createWaitLine } from './replies.js';
@@ -35,6 +36,8 @@ export function createNotesPanel(opts) {
     placeholder: opts.placeholder || (prompt ? 'Prompt this task…' : 'Add a note…'),
     disabled: opts.disabled,
   });
+  const draftKey = `notes:${target.kind}:${target.id}:${prompt ? 'p' : 'n'}`;
+  bindDraft(ta, draftKey); // restores after the listeners below are attached (microtask)
   const hint = h('div', { class: 'note-hint mono' }, prompt ? '↵ send · ⇧↵ new line' : '↵ add draft · ⌘↵ add & run');
   const sendBtn = h('button', { class: 'icon-btn note-send', type: 'button', 'aria-label': prompt ? 'Send prompt' : 'Add note', title: prompt ? 'Send' : 'Add draft', onclick: () => submit(prompt), disabled: opts.disabled }, icon('send', 18));
   const taskHint = target.kind === 'task'
@@ -62,6 +65,7 @@ export function createNotesPanel(opts) {
     const atts = attsOf(taken);
     if (!text && !atts.length) { tray.restore(taken); return; }
     ta.value = '';
+    clearDraft(draftKey);
     autosize();
     const p = addNote(target, text, { execute: run, attachments: atts });
     list.scrollTop = list.scrollHeight;

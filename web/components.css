@@ -711,3 +711,14 @@ ul.md-list li::marker { color: var(--accent); }
 .choices-chip:hover { background: color-mix(in srgb, var(--accent) 24%, transparent); }
 .q-row.k-choices { box-shadow: 0 0 0 1px var(--accent-line), var(--shadow-1); }
 .q-row.k-choices .q-kind { color: var(--accent); }
+
+/* "Helm updated" pill: shown instead of reloading while you are typing */
+.update-pill {
+  position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); z-index: 90;
+  display: inline-flex; align-items: center; gap: 6px; padding: 7px 14px; border-radius: 999px;
+  font: 500 12px/1 var(--font-mono, ui-monospace, monospace); color: var(--accent);
+  background: color-mix(in srgb, var(--elevated, #1c1c1e) 88%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  backdrop-filter: blur(20px) saturate(180%); box-shadow: 0 6px 24px rgb(0 0 0 / .25); cursor: pointer;
+}
+.update-pill:hover { border-color: var(--accent); }
