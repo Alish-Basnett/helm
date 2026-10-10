@@ -4,10 +4,21 @@ All notable changes to Helm are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/). Shapes and endpoints are defined in `CONTRACT.md`.
 
+## [0.11.0] - 2026-10-10
+
+### Added
+
+- Notes before Start: on a task that hasn't started, an "Add details before starting" box collects draft
+  notes, listed as "Will be sent with Start (N notes)". Starting the task (from the panel, the board card,
+  Create & start, Choices or Auto mode) folds them into the start brief and marks them sent. Start reads
+  "Start with N notes", and the card's Start button shows the count.
+
 ## [0.10.0] - 2026-10-10
 
 ### Added
 
+- Cost and usage analytics: `GET /v1/usage/breakdown` totals spend per day, project, model and task from `helm.usage`
+  (plus each project's session cost), and the cost meter popover gains Day / Project / Model / Task tabs.
 - Auto mode for Up next (per project, kept in the hub): when nothing is in progress, the top Up next task starts
   by itself, one at a time, with a 5-minute backoff after a failed start. Adds a Manual | Auto switch, a
   "Next up" marker, "Auto-started" in the activity log and an "Auto-start failed" needs-you reason.

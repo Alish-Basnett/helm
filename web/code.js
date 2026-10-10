@@ -203,13 +203,15 @@ function stateComment(n, style, ctx) {
   const act = (label, fn) => h('button', { class: 'cm-act', type: 'button', onclick: (e) => { e.stopPropagation(); fn(n); } }, label);
   if (n.__pending || n.state === 'sending') kids.push('… sending');
   else if (n.state === 'queued') kids.push('… queued');
-  else if (n.state === 'ran') kids.push('✓ delivered ', h('span', { 'data-ago': n.ranAt || n.createdAt || Date.now() }, ''));
+  else if (n.state === 'ran') kids.push(n.via === 'start' ? '✓ sent with Start ' : '✓ delivered ', h('span', { 'data-ago': n.ranAt || n.createdAt || Date.now() }, ''));
   else if (n.state === 'failed') {
     kids.push('✗ failed');
     if (n.error) kids.push(' — ', h('span', { class: 'cm-err', title: n.error }, n.error));
     kids.push(' ', act('retry()', ctx.onRetry));
   } else if (n.state === 'draft') {
-    kids.push('✎ draft ', act('send()', ctx.onSend), ' ');
+    kids.push('✎ draft ');
+    if (ctx.holdSend && ctx.holdSend(n)) kids.push('will be sent when you press Start ');
+    else kids.push(act('send()', ctx.onSend), ' ');
     if (ctx.onEdit) kids.push(act('edit()', ctx.onEdit), ' ');
     kids.push(act('delete()', ctx.onDelete));
   }
@@ -380,7 +382,7 @@ function createReplyBlock() {
  *  to draft lines and makes a click on a draft's code start editing it. */
 export function createCodeTurn(ctx = {}) {
   const noop = () => {};
-  const c = { onSend: ctx.onSend || noop, onDelete: ctx.onDelete || noop, onRetry: ctx.onRetry || noop, onEdit: ctx.onEdit || null };
+  const c = { holdSend: ctx.holdSend || null, onSend: ctx.onSend || noop, onDelete: ctx.onDelete || noop, onRetry: ctx.onRetry || noop, onEdit: ctx.onEdit || null };
   let sig = '';
   let cur = null;
   const me = h('div', { class: 'cm-me' });
@@ -396,7 +398,7 @@ export function createCodeTurn(ctx = {}) {
   function update(n, style) {
     cur = n;
     const st = styleOf(style);
-    const s = [style, n.id, n.text, n.state, n.ranAt, n.error || '', n.__pending ? 1 : 0, taskLinkSig(n.text), (n.attachments || []).map((a) => a.id).join(',')].join('\u0001');
+    const s = [style, n.id, n.text, n.state, n.ranAt, n.error || '', n.__pending ? 1 : 0, n.via || '', c.holdSend ? (c.holdSend(n) ? 1 : 0) : 0, taskLinkSig(n.text), (n.attachments || []).map((a) => a.id).join(',')].join('\u0001');
     if (s !== sig) {
       sig = s;
       me.textContent = '';

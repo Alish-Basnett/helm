@@ -148,7 +148,7 @@ export function createNotesPanel(opts) {
       meta.textContent = '';
       if (n.state === 'ran') {
         meta.appendChild(h('span', { 'data-ago': n.ranAt || n.createdAt, 'data-ago-prefix': 'ran ' }, ''));
-        if (n.via) meta.appendChild(h('span', { class: 'note-via' }, `via ${n.via.replace('_', ' ')}`));
+        if (n.via) meta.appendChild(h('span', { class: 'note-via' }, n.via === 'start' ? 'sent with Start' : `via ${n.via.replace('_', ' ')}`));
       } else if (n.state === 'failed') {
         meta.appendChild(h('span', {}, 'Failed'));
         if (n.error) meta.appendChild(h('span', { class: 'note-err', title: n.error }, n.error));

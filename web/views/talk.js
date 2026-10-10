@@ -6,7 +6,7 @@ import { h, reconcile, setText, setHidden, setAttr, setClass, startTicker, bus }
 import { bindDraft, clearDraft } from '../drafts.js';
 import { icon } from '../icons.js';
 import { state, sel, subscribe, lsGet, lsSet } from '../store.js';
-import { addNote, deleteNote, executeNotes, retryNote } from '../actions.js';
+import { addNote, deleteNote, executeNotes, retryNote, canStart } from '../actions.js';
 import { createAttachTray, createAttachmentList, bindAttachInput, attsOf } from '../attachments.js';
 import { createReply, createWaitLine } from '../replies.js';
 import { setLinked } from '../tasklinks.js';
@@ -93,13 +93,15 @@ export function createTalk(opts) {
     return li;
   }
 
+  /** Drafts on a task that has not started wait for Start; on a running task Execute still sends them. */
+  const holdSend = (n) => isTask && n.state === 'draft' && canStart(state.tasks.get(target.id));
   function updateTurn(li, n) {
     const r = li.__r;
     const cls = `tk-turn state-${n.state}${n.__pending ? ' pending' : ''}`;
     if (li.className !== cls) li.className = cls;
     if (codeOn()) {
       if (!r.cm) {
-        r.cm = createCodeTurn({ onSend: () => executeNotes(target), onDelete: (x) => deleteNote(x.id), onRetry: (x) => retryNote(x.id) });
+        r.cm = createCodeTurn({ holdSend, onSend: () => executeNotes(target), onDelete: (x) => deleteNote(x.id), onRetry: (x) => retryNote(x.id) });
         li.append(r.cm.el);
       }
       setHidden(r.std, true);
@@ -111,15 +113,17 @@ export function createTalk(opts) {
     setHidden(r.std, false);
     setLinked(r.text, n.text);
     r.atts.update(n.attachments);
-    const sig = `${n.state}|${n.ranAt}|${n.error || ''}|${n.__pending ? 1 : 0}`;
+    const hold = holdSend(n);
+    const sig = `${n.state}|${n.ranAt}|${n.error || ''}|${n.__pending ? 1 : 0}|${n.via || ''}|${hold ? 1 : 0}`;
     if (r.meta.__sig !== sig) {
       r.meta.__sig = sig;
       r.meta.textContent = '';
-      r.meta.append(h('span', {}, STATE_LABEL[n.state] || n.state));
+      r.meta.append(h('span', {}, n.state === 'ran' && n.via === 'start' ? 'Sent with Start' : STATE_LABEL[n.state] || n.state));
       if (n.state === 'ran') r.meta.append(h('span', { 'data-ago': n.ranAt || n.createdAt }, ''));
       if (n.state === 'draft' && !n.__pending) {
         r.meta.append(
-          h('button', { class: 'link-btn', type: 'button', onclick: () => executeNotes(target) }, 'Send'),
+          hold ? h('span', { class: 'prestart-hint' }, 'Will be sent when you press Start')
+            : h('button', { class: 'link-btn', type: 'button', onclick: () => executeNotes(target) }, 'Send'),
           h('button', { class: 'link-btn', type: 'button', onclick: () => deleteNote(n.id) }, 'Delete'));
       }
       if (n.state === 'failed') {

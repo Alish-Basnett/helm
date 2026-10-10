@@ -68,6 +68,8 @@ export const api = {
   taskDiff: (id, refresh = false) => request('GET', `/v1/tasks/${enc(id)}/diff${refresh ? '?refresh=1' : ''}`),
   // v0.4
   usage: (days = 7) => request('GET', `/v1/usage${q({ days })}`),
+  // cost analytics: spend per day / project / model / task (404 on hubs that predate it)
+  usageBreakdown: (days = 7) => request('GET', `/v1/usage/breakdown${q({ days })}`),
   attachmentUrl: (id) => `/v1/attachments/${enc(id)}`,
   /** Raw-body upload with progress. Resolves { attachment }; rejects with err.status (404/405 = hub too old). */
   uploadAttachment(file, { onProgress, signal } = {}) {

@@ -3,7 +3,8 @@ import { h, setText, setAttr, setClass, setHidden, reconcile, startTicker } from
 import { icon } from '../icons.js';
 import { state, sel, subscribe, upsert, ingestActivity, setUI } from '../store.js';
 import { api } from '../api.js';
-import { patchTask, quickActions, runQuickAction, startTask, canStart } from '../actions.js';
+import { patchTask, quickActions, runQuickAction, startTask, canStart, startDrafts, startLabel } from '../actions.js';
+import { createPreStart } from '../prestart.js';
 import { createStartStatus } from '../replies.js';
 import { fmtTokens, fmtElapsed, fmtAgo, STATUS_META, ALL_STATUSES, agentLabel, truncate, cwdTail } from '../format.js';
 import { toast, toastError, avatar, updateAvatar, modelBadge, updateModelBadge, nowDoingLine, statusDot } from '../ui.js';
@@ -36,6 +37,7 @@ export function createSheet(dock) {
     ctx.timeline = null;
     ctx.replay && ctx.replay.destroy();
     ctx.files && ctx.files.destroy();
+    ctx.prestart && ctx.prestart.destroy();
     ctx = null;
     sheet.textContent = '';
   }
@@ -58,7 +60,8 @@ export function createSheet(dock) {
       },
     });
     c.blocked = h('div', { class: 'banner banner-red', role: 'status', hidden: true }, icon('blocked', 16), h('span', {}));
-    c.startBtn = h('button', { class: 'btn btn-primary btn-sm sheet-start', type: 'button', hidden: true, title: 'Start this task in a live session', onclick: () => startTask(id) }, icon('play', 13), 'Start');
+    c.startBtn = h('button', { class: 'btn btn-primary btn-sm sheet-start', type: 'button', hidden: true, title: 'Start this task in a live session', onclick: () => startTask(id) }, icon('play', 13), h('span', { class: 'start-label' }, 'Start'));
+    c.prestart = createPreStart({ taskId: id });
     c.startStatus = createStartStatus({ full: true });
     // status control
     c.select = h('select', { class: 'select', 'aria-label': 'Status', onchange: () => patchTask(id, { status: c.select.value }, 'Could not change status') },
@@ -118,7 +121,7 @@ export function createSheet(dock) {
       h('div', { class: 'sheet-head-top' }, c.id, c.pill, h('span', { class: 'spacer' }), c.startBtn, c.chatBtn, c.min, c.close),
       c.title);
     const body = h('div', { class: 'sheet-body' },
-      c.choices.el, c.blocked, c.startStatus.el,
+      c.choices.el, c.blocked, c.startStatus.el, c.prestart.el,
       h('section', { class: 'sheet-section status-row' }, h('label', { class: 'field-label' }, 'Status', c.select), c.quick),
       c.agentWrap, c.conflictsWrap, c.descWrap, c.recapWrap, c.files.el, c.depsWrap, c.tlWrap);
     sheet.append(head, body);
@@ -197,6 +200,9 @@ export function createSheet(dock) {
     if (document.activeElement !== c.select && c.select.value !== t.status) c.select.value = t.status;
 
     setHidden(c.startBtn, !canStart(t));
+    const nDrafts = startDrafts(t.id).length;
+    setText(c.startBtn.querySelector('.start-label'), startLabel(nDrafts));
+    c.startBtn.title = nDrafts ? `Start this task and send its ${nDrafts} draft note${nDrafts === 1 ? '' : 's'} with it` : 'Start this task in a live session';
     c.startStatus.update(t);
 
     // quick actions

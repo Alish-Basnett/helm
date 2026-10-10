@@ -83,7 +83,7 @@ export const toDigest = (r) => ({
 });
 
 export const USAGE_KINDS = ['recap', 'answer', 'explain', 'digest', 'note_turn'];
-export const NOTE_VIAS = ['prompt', 'send_message', 'followup_spawn', 'answer'];
+export const NOTE_VIAS = ['prompt', 'send_message', 'followup_spawn', 'answer', 'start'];
 export const MAX_NOTE_ATTACHMENTS = 10;
 const pad2 = (n) => String(n).padStart(2, '0');
 /** Local calendar date (YYYY-MM-DD) of an epoch-ms time. */
@@ -1272,6 +1272,14 @@ export class Projector {
     const { id, sessionId, text } = ev.data;
     const t = this.getTask(id);
     if (!t) throw new Error('task not found');
+    // Draft notes folded into the start text (v0.8): ran, via start, in this same event.
+    for (const fid of Array.isArray(ev.data.noteIds) ? ev.data.noteIds : []) {
+      const dn = this.getNote(fid);
+      if (!dn || dn.state !== 'draft') continue;
+      this.upd('notes', fid, { state: 'ran', ran_at: ev.at, via: 'start', error: null });
+      this.indexNote(this.getNote(fid));
+      this.pushNote(fid);
+    }
     const nid = this.nextId('N');
     this.db.run(
       `INSERT INTO notes(id, target_kind, target_id, session_id, text, state, created_at, queued_at, ran_at, via, error, sending_at)

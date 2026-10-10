@@ -42,6 +42,43 @@ export function sparkline(days) {
   return svg;
 }
 
+const BREAKDOWN_TABS = [
+  { id: 'perDay', label: 'Day', name: (r) => dayLabel(r.date) + ' ' + String(r.date).slice(5) },
+  { id: 'perProject', label: 'Project', name: (r) => r.name || (r.projectId ? r.projectId : 'No project') },
+  { id: 'perModel', label: 'Model', name: (r) => r.model },
+  { id: 'perTask', label: 'Task', name: (r) => (r.title ? `${r.taskId} ${r.title}` : r.taskId) },
+];
+
+/** Spend analytics: one tabbed list (day / project / model / task) over the last 7 days. */
+export function breakdownView(data) {
+  let tab = 'perProject';
+  const list = h('ul', { class: 'meter-kinds meter-break' });
+  const tabs = h('div', { class: 'meter-tabs', role: 'tablist' });
+  const render = () => {
+    const def = BREAKDOWN_TABS.find((x) => x.id === tab);
+    const rows = (data && Array.isArray(data[tab])) ? data[tab] : [];
+    const max = Math.max(...rows.map((r) => Number(r.costUsd) || 0), 0.0001);
+    list.textContent = '';
+    if (!rows.length) list.append(h('li', { class: 'meter-none' }, 'Nothing recorded yet.'));
+    for (const r of rows.slice(0, 8)) {
+      const c = Number(r.costUsd) || 0;
+      list.append(h('li', { title: def.name(r) },
+        h('span', { class: 'meter-k meter-break-name' }, def.name(r)),
+        h('span', { class: 'meter-v mono' }, fmtUsdSmall(c)),
+        h('span', { class: 'meter-break-bar', style: { width: `${Math.round((c / max) * 100)}%` } })));
+    }
+    if (rows.length > 8) list.append(h('li', { class: 'meter-none' }, `+${rows.length - 8} more`));
+    tabs.querySelectorAll('button').forEach((b) => b.setAttribute('aria-selected', String(b.dataset.tab === tab)));
+  };
+  for (const x of BREAKDOWN_TABS) {
+    tabs.append(h('button', { type: 'button', role: 'tab', class: 'meter-tab', 'data-tab': x.id, onclick: () => { tab = x.id; render(); } }, x.label));
+  }
+  render();
+  return h('div', { class: 'meter-week' },
+    h('div', { class: 'meter-title' }, `Spend, last 7 days: ${fmtUsdSmall(Number(data && data.totalUsd) || 0)}`),
+    tabs, list);
+}
+
 function body(data) {
   const t = (data && data.today) || {};
   const over = Number(t.overheadUsd) || 0;
@@ -99,10 +136,11 @@ export function toggleMeter(anchor) {
   anchor.setAttribute('aria-expanded', 'true');
   requestAnimationFrame(() => el.classList.add('in'));
   const mine = open;
-  api.usage(7).then((data) => {
+  Promise.all([api.usage(7), api.usageBreakdown(7).catch(() => null)]).then(([data, brk]) => {
     if (open !== mine) return;
     content.textContent = '';
     content.append(...body(data));
+    if (brk) content.append(breakdownView(brk));
     place();
   }).catch((e) => {
     if (open !== mine) return;

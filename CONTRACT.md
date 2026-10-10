@@ -270,6 +270,8 @@ Opening a v0.1 database adds the new tables/columns in place. Old events are not
 - No new endpoints: Talk is the session's notes (target kind `session`) shown as a thread with replies.
   `POST /v1/notes` with `{ target, text, execute: true }` creates and queues in one call → `{ note }`.
 
+- v0.8 (T-38): Start (manual, create with `start`, Choices, auto) folds the task's **draft** notes into the start text after Brief as `Notes from the user:` + `- <text>` lines (attachment paths appended), marks them `ran` with `via: 'start'` (`NoteVia` gains `'start'`) and carries `noteIds` + final `text` in `hub.task.start` / `hub.task.autostart`.
+
 (Clarified, v0.3: `POST /v1/tasks/:id/start` answers 200; `POST /v1/tasks` with `start: true` answers 201 and, when the start is refused (no live session, or a status Start does not allow), still creates the task and returns `{ task, error }` with no `note`; `POST /v1/notes` with `execute: true` answers 201 with the queued note and creates nothing on 409 `no session available…`; restarting a `next` task is allowed and replaces `startNoteId`; the start note's `target` is the chosen session. Pre-v0.3 databases are migrated in place; run `--rebuild` to back-fill replies from history.)
 
 ## v0.4 additions — attachments, cost meter, cheap answers
@@ -293,6 +295,10 @@ Opening a v0.1 database adds the new tables/columns in place. Old events are not
   `{ today: { overheadUsd, requestedUsd, byKind: { [kind]: { calls, costUsd } } }, days: [{ date, overheadUsd, requestedUsd }] }`
   (local dates). In `/v1/state` as `usageToday: { overheadUsd, requestedUsd }`; SSE entity `usage`
   (row = the new usageToday) on each event.
+- Cost analytics: `GET /v1/usage/breakdown?days=7` (days clamped 1-90, local days) →
+  `{ totalUsd, perDay: [{ date, costUsd }], perProject: [{ projectId|null, name|null, sessionCostUsd, calls, costUsd, inputTokens, outputTokens, cacheReadTokens }], perModel: [{ model, calls, costUsd, ...tokens }], perTask: [{ taskId, title|null, calls, costUsd, ...tokens }] }`.
+  Lists are sorted by `costUsd` descending; `perDay` is oldest first with empty days included. Project comes from the usage
+  row's session; `sessionCostUsd` is the session projection's own cost for sessions started in the window. The web meter popover shows it as tabs.
 - Price table lives in the mod (USD per MTok, input/output/cache read): opus-5-5 4/20/0.20,
   sonnet-5-5 2/10/0.20, haiku-5-5 0.10/0.50/0.01, fable 10/50/0.25; cache writes at 1.25× input; unknown models price as Opus.
 

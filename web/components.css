@@ -550,7 +550,7 @@ ul.md-list li::marker { color: var(--accent); }
 .tele-helm { border: 0; background: transparent; padding: 2px 6px; margin: -2px -6px; border-radius: 8px; font: inherit; color: inherit; cursor: pointer; }
 .tele-helm:hover, .tele-helm[aria-expanded="true"] { background: var(--fill-3); }
 .tele-helm .tele-v { color: var(--label-2); }
-.meter-pop { position: fixed; z-index: 120; width: 280px; padding: 14px; border-radius: var(--r); background: var(--bg-2); color: var(--label); box-shadow: var(--shadow-2), inset 0 0 0 .5px var(--separator); font-size: 12.5px; opacity: 0; transform: translateY(-4px); transition: opacity 120ms var(--ease), transform 120ms var(--ease); }
+.meter-pop { position: fixed; z-index: 120; width: 300px; padding: 14px; border-radius: var(--r); background: var(--bg-2); color: var(--label); box-shadow: var(--shadow-2), inset 0 0 0 .5px var(--separator); font-size: 12.5px; opacity: 0; transform: translateY(-4px); transition: opacity 120ms var(--ease), transform 120ms var(--ease); }
 .meter-pop.in { opacity: 1; transform: none; }
 .meter-title { font-weight: 650; font-size: 13px; }
 .meter-sub { margin: 2px 0 10px; color: var(--label-3); font-size: 11.5px; line-height: 1.4; }
@@ -565,6 +565,12 @@ ul.md-list li::marker { color: var(--accent); }
 .meter-kinds li.requested .meter-k, .meter-kinds li.requested .meter-v { color: var(--label-3); }
 .meter-none { color: var(--label-3); font-size: 12px; padding: 4px 0; }
 .meter-week { margin-top: 12px; padding-top: 10px; border-top: .5px solid var(--separator); }
+.meter-tabs { display: flex; gap: 2px; margin: 8px 0; padding: 2px; border-radius: 7px; background: var(--fill-3); }
+.meter-tab { flex: 1; border: 0; padding: 3px 0; border-radius: 5px; background: transparent; color: var(--label-2); font: inherit; font-size: 11.5px; cursor: pointer; }
+.meter-tab[aria-selected="true"] { background: var(--bg-2); color: var(--label); box-shadow: 0 0 0 .5px var(--separator); }
+.meter-break li { position: relative; flex-wrap: wrap; }
+.meter-break-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.meter-break-bar { flex-basis: 100%; height: 2px; border-radius: 99px; background: var(--accent); opacity: .5; }
 .meter-spark { display: block; width: 100%; height: auto; }
 .spark-bar { fill: var(--label-3); opacity: .55; }
 .spark-bar.today { fill: var(--accent); opacity: .9; }
@@ -880,3 +886,17 @@ html.float-gesture, html.float-gesture * { user-select: none !important; -webkit
 .shelf-x:hover { color: var(--red); }
 .dock { right: calc(8px + var(--shelf-w, 0px)); }
 @media (prefers-reduced-motion: reduce) { .shelf { transition: none; } .shelf-item.pending .shelf-dot { animation: none; } }
+
+/* v0.8: draft notes that ride along with Start */
+.prestart { display: flex; flex-direction: column; gap: 6px; }
+.prestart-input { width: 100%; resize: none; min-height: 36px; max-height: 98px; padding: 8px 12px; line-height: 1.4; overflow-y: auto; }
+.prestart-keys { font-size: 11px; color: var(--label-3); }
+.prestart-title { font-size: 12px; font-weight: 600; color: var(--label-2); margin: 4px 0; }
+.prestart-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.prestart-note { display: flex; align-items: flex-start; gap: 6px; padding: 6px 8px; border-radius: 8px; background: color-mix(in srgb, var(--label-3) 10%, transparent); }
+.prestart-note.pending { opacity: .6; }
+.prestart-body { flex: 1; min-width: 0; }
+.prestart-text { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--label-2); cursor: text; }
+.prestart-hint { color: var(--label-3); font-style: italic; }
+.qa-badge { min-width: 16px; height: 16px; padding: 0 4px; margin-left: 2px; border-radius: 8px; background: var(--on-accent); color: var(--accent); font-size: 10.5px; font-weight: 700; line-height: 16px; text-align: center; }
+.qa-badge[hidden] { display: none; }

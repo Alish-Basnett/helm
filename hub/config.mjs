@@ -4,7 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const HUB_DIR = path.dirname(fileURLToPath(import.meta.url));
-export const VERSION = '0.10.0';
+export const VERSION = '0.11.0';
 
 const int = (v, d) => {
   if (v === undefined || v === null || v === '') return d;

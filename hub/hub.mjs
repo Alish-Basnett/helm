@@ -318,7 +318,7 @@ export class Hub {
       if (e instanceof HttpError) return null;  // no live session: retry when one appears
       throw e;
     }
-    return { taskId: top.id, sessionId: plan.sessionId, text: plan.text, reason: 'nothing in progress' };
+    return { taskId: top.id, sessionId: plan.sessionId, text: plan.text, noteIds: plan.noteIds, reason: 'nothing in progress' };
   }
 
   // ---------------------------------------------------------------- sweep
@@ -515,11 +515,20 @@ export class Hub {
   startPlan(t) {
     if (!START_FROM.includes(t.status)) throw new HttpError(409, `cannot start a task that is ${t.status}`);
     const sessionId = this.pickJobSession(t.session_id, t.project_id);
-    const text = `Start Helm task ${t.id} \u201c${t.title}\u201d.\n\nBrief:\n${t.description}\n\n`
+    // Draft notes on the task ride along with Start (v0.8): folded after the Brief, marked ran by the same event.
+    const drafts = this.db.all(
+      `SELECT * FROM notes WHERE target_kind = 'task' AND target_id = ? AND state = 'draft' ORDER BY created_at, rowid`, t.id);
+    const folded = drafts.map((n) => {
+      const files = JSON.parse(n.attachments || '[]');
+      const att = files.length ? `\n  Attached files (open them with the Read tool):\n${files.map((f) => `  - ${f.path}`).join('\n')}` : '';
+      return `- ${n.text}${att}`;
+    });
+    const notesBlock = folded.length ? `Notes from the user:\n${folded.join('\n')}\n\n` : '';
+    const text = `Start Helm task ${t.id} \u201c${t.title}\u201d.\n\nBrief:\n${t.description}\n\n${notesBlock}`
       + `Create nothing new: delegate this existing task now with the Agent tool (description starting with [helm:${t.id}]), `
       + 'choosing helm:builder for code changes or helm:scout for read-only work, run it in the background, '
       + 'then reply in one line with what you started.';
-    return { sessionId, text };
+    return { sessionId, text, noteIds: drafts.map((n) => n.id) };
   }
   startTask(id, at = this.now()) {
     const t = this.p.getTask(id);

@@ -260,6 +260,9 @@ export function isStarting(t) {
   const n = state.notes.get(id);
   return !!n && (n.state === 'queued' || n.state === 'sending');
 }
+/** Draft notes on a task: they ride along with Start (v0.8). */
+export const startDrafts = (id) => sel.notesFor('task', id).filter((n) => n.state === 'draft' && !n.__pending);
+export const startLabel = (n) => (n > 0 ? `Start with ${n} note${n === 1 ? '' : 's'}` : 'Start');
 export const canStart = (t) => !!t && !t.__pending && STARTABLE.has(t.status) && !isStarting(t);
 export const NO_SESSION_MSG = 'No live session for this project — open a Claude Code session in it';
 
@@ -275,6 +278,9 @@ export async function startTask(id) {
   if (!before || !canStart(before)) return null;
   const optimistic = { ...before, status: 'next', startNoteId: tmpId('N') };
   upsert('task', optimistic);
+  const folded = startDrafts(id); // the hub marks these ran (via start) in the same transaction
+  const now = Date.now();
+  folded.forEach((n) => upsert('note', { ...n, state: 'ran', ranAt: now, via: 'start' }));
   try {
     const res = await api.startTask(id);
     if (res && res.note) upsert('note', res.note);
@@ -282,6 +288,7 @@ export async function startTask(id) {
     return res;
   } catch (e) {
     if (state.tasks.get(id) === optimistic) upsert('task', before);
+    folded.forEach((n) => upsert('note', n));
     toast(startErrorMessage(e), { kind: 'error' });
     return null;
   }

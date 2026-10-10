@@ -2,7 +2,7 @@
 import { h, reconcile, setText, setClass, setHidden, setAttr, bus, startTicker } from '../dom.js';
 import { icon } from '../icons.js';
 import { state, sel, lsGet, lsSet, setUI } from '../store.js';
-import { patchTask, createTask, quickActions, runQuickAction, startTask, canStart, setAutoStart, autoTarget } from '../actions.js';
+import { patchTask, createTask, quickActions, runQuickAction, startTask, canStart, startDrafts, setAutoStart, autoTarget } from '../actions.js';
 import { createStartStatus } from '../replies.js';
 import { fmtElapsed, fmtTokens, truncate, agentLabel, STATUS_META, MAIN_COLUMNS, LANES, plural } from '../format.js';
 import { avatar, updateAvatar, modelBadge, updateModelBadge, nowDoingLine, statusDot, toast, openMenu } from '../ui.js';
@@ -326,9 +326,17 @@ export function mount(container) {
       const isStart = a.key === 'start';
       const b = h('button', { class: `qa qa-${a.key}`, type: 'button', title: isStart ? 'Start (S)' : a.label, 'aria-label': `${a.label} ${t.id}`,
         onclick: (e) => { e.stopPropagation(); if (isStart) startTask(el.__task.id); else runQuickAction(el.__task, b.__a); } },
-      icon(a.icon, isStart ? 13 : 15), isStart ? h('span', { class: 'qa-label' }, 'Start') : null);
+      icon(a.icon, isStart ? 13 : 15), isStart ? h('span', { class: 'qa-label' }, 'Start') : null, isStart ? h('span', { class: 'qa-badge', hidden: true }) : null);
       return b;
-    }, (b, a) => { b.__a = a; });
+    }, (b, a) => {
+      b.__a = a;
+      if (a.key !== 'start') return;
+      const k = startDrafts(t.id).length;
+      const badge = b.querySelector('.qa-badge');
+      setText(badge, k ? String(k) : '');
+      setHidden(badge, !k);
+      b.title = k ? `Start (S) — sends ${k} draft note${k === 1 ? '' : 's'} with it` : 'Start (S)';
+    });
   }
 
   function onCardKey(e, el) {
