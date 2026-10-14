@@ -208,6 +208,24 @@ CREATE TABLE IF NOT EXISTS session_samples (
 );
 CREATE INDEX IF NOT EXISTS session_samples_session ON session_samples(session_id, at);
 
+-- v0.15: Studio documents (projections of hub.doc.* events; see hub/docs.mjs). blocks = JSON block tree; doc_versions are snapshots
+-- (edits coalesce into one snapshot per 5 minutes); doc_comments anchor to a block + quote.
+CREATE TABLE IF NOT EXISTS docs (
+  id TEXT PRIMARY KEY, project_id TEXT NOT NULL, title TEXT NOT NULL, kind TEXT NOT NULL DEFAULT 'document',
+  blocks TEXT NOT NULL DEFAULT '[]', version INTEGER NOT NULL DEFAULT 0, next_block INTEGER NOT NULL DEFAULT 1,
+  session_id TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, archived INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS docs_project ON docs(project_id);
+CREATE TABLE IF NOT EXISTS doc_versions (
+  doc_id TEXT NOT NULL, n INTEGER NOT NULL, blocks TEXT NOT NULL, cause TEXT NOT NULL, job_id TEXT, at INTEGER NOT NULL,
+  PRIMARY KEY (doc_id, n)
+);
+CREATE TABLE IF NOT EXISTS doc_comments (
+  id TEXT PRIMARY KEY, doc_id TEXT NOT NULL, block_id TEXT, anchor TEXT, text TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'open',
+  created_at INTEGER NOT NULL, applied_version INTEGER, job_id TEXT, reason TEXT
+);
+CREATE INDEX IF NOT EXISTS doc_comments_doc ON doc_comments(doc_id, state);
+
 CREATE TABLE IF NOT EXISTS changes (
   seq INTEGER PRIMARY KEY AUTOINCREMENT, entity TEXT NOT NULL, op TEXT NOT NULL, row TEXT NOT NULL
 );
@@ -278,6 +296,8 @@ export class Db {
     if (!has('tasks', 'parent_task_id')) this.raw.exec('ALTER TABLE tasks ADD COLUMN parent_task_id TEXT');
     // v0.7 (T-41): Up next auto mode. Additive + defaulted, safe on a live database; `helmd --rebuild` back-fills.
     if (!has('projects', 'auto_start')) this.raw.exec('ALTER TABLE projects ADD COLUMN auto_start INTEGER NOT NULL DEFAULT 0');
+    // T-71: per-project auto concurrency (1-5). Additive + defaulted; `helmd --rebuild` back-fills.
+    if (!has('projects', 'auto_concurrency')) this.raw.exec('ALTER TABLE projects ADD COLUMN auto_concurrency INTEGER NOT NULL DEFAULT 1');
     if (!has('tasks', 'auto_started_at')) this.raw.exec('ALTER TABLE tasks ADD COLUMN auto_started_at INTEGER');
     // v0.9: Workflows. The workflow tables come from SCHEMA; tasks, questions and usage learn which run/node they belong to.
     // Additive + nullable, safe on a live database; `helmd --rebuild` back-fills nothing (no old events mention runs).
@@ -304,6 +324,20 @@ export class Db {
     if (!has('sessions', 'health_reasons')) this.raw.exec("ALTER TABLE sessions ADD COLUMN health_reasons TEXT NOT NULL DEFAULT '[]'");
     if (!has('sessions', 'cost_day')) this.raw.exec('ALTER TABLE sessions ADD COLUMN cost_day TEXT');
     if (!has('sessions', 'cost_base')) this.raw.exec('ALTER TABLE sessions ADD COLUMN cost_base REAL NOT NULL DEFAULT 0');
+    // T-66: paths a task's own tool calls mentioned (attribution for git-derived files) and the label of how filesChanged was derived.
+    if (!has('tasks', 'mentions')) this.raw.exec("ALTER TABLE tasks ADD COLUMN mentions TEXT NOT NULL DEFAULT '[]'");
+    if (!has('tasks', 'files_note')) this.raw.exec('ALTER TABLE tasks ADD COLUMN files_note TEXT');
+    // T-76: the agent's full final report (agent.completed data.report), so a recap can be rebuilt from it. Additive + nullable.
+    if (!has('agents', 'report')) this.raw.exec('ALTER TABLE agents ADD COLUMN report TEXT');
+    if (!has('late_completions', 'report')) this.raw.exec('ALTER TABLE late_completions ADD COLUMN report TEXT');
+    // T-53: who set a task's block: 'user' (PATCH) or null (agent failure, stall, workflow). Additive + nullable.
+    if (!has('tasks', 'blocked_by')) this.raw.exec('ALTER TABLE tasks ADD COLUMN blocked_by TEXT');
+    // T-70: the task's latest agent ended without success (killed, stopped, failed) and nothing has run since.
+    if (!has('tasks', 'interrupted')) {
+      this.raw.exec('ALTER TABLE tasks ADD COLUMN interrupted INTEGER NOT NULL DEFAULT 0');
+      this.raw.exec(`UPDATE tasks SET interrupted = 1 WHERE agent_id IN (SELECT id FROM agents WHERE status = 'failed')
+        AND status NOT IN ('done','archived')`);
+    }
   }
   prep(sql) {
     let s = this.cache.get(sql);

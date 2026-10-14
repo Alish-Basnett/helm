@@ -248,3 +248,105 @@ test('a database from before v0.7 gains projects.auto_start / tasks.auto_started
   assert.ok(hub.state().tasks.find((x) => x.id === tk.id).autoStartedAt);
   hub.close();
 });
+
+// ---- T-71: auto concurrency (1-5 tasks at once)
+const setConc = (h, pid, n) => h.api('PATCH', `/v1/projects/${pid}`, { autoConcurrency: n });
+
+test('autoConcurrency defaults to 1, validates 1-5, and is exposed on the project', async (t) => {
+  const h = await startTest(); t.after(h.stop);
+  const { pid } = await setup(h, { tasks: 0 });
+  assert.equal(h.state().projects[0].autoConcurrency, 1);
+  for (const bad of [0, 6, 2.5, '3', null]) assert.equal((await setConc(h, pid, bad)).status, 400, String(bad));
+  const ok = await setConc(h, pid, 4);
+  assert.equal(ok.status, 200);
+  assert.equal(ok.json.project.autoConcurrency, 4);
+  assert.equal((await h.get(`/v1/projects/${pid}`)).json.project.autoConcurrency, 4);
+});
+
+test('N=1 keeps one-at-a-time behaviour even with many tasks waiting', async (t) => {
+  const h = await startTest(); t.after(h.stop);
+  const { pid, ids, clock } = await setup(h, { tasks: 4 });
+  await setAuto(h, pid, true);
+  h.hub.sweep(clock.t + 1000);
+  assert.deepEqual(autoEvents(h).map((e) => e.taskId), [ids[0]]);
+});
+
+test('N=3 starts three at once, and another when one finishes', async (t) => {
+  const h = await startTest(); t.after(h.stop);
+  const { pid, ids, clock } = await setup(h, { tasks: 5 });
+  await setConc(h, pid, 3);
+  const on = await setAuto(h, pid, true);
+  assert.deepEqual(on.json.autoStarted, [ids[0], ids[1], ids[2]]);
+  assert.equal(task(h, ids[3]).startNoteId, null);
+  // agents come up for all three: still full
+  for (let i = 0; i < 3; i++) await h.api('PATCH', `/v1/tasks/${ids[i]}`, { status: 'in_progress' });
+  h.hub.sweep(clock.t + 1000);
+  assert.equal(autoEvents(h).length, 3);
+  // one finishes -> exactly one more starts
+  await h.api('PATCH', `/v1/tasks/${ids[1]}`, { status: 'review' });
+  assert.deepEqual(autoEvents(h).map((e) => e.taskId), [ids[0], ids[1], ids[2], ids[3]]);
+  h.hub.sweep(clock.t + 2000);
+  assert.equal(autoEvents(h).length, 4);
+  assert.equal(task(h, ids[4]).startNoteId, null);
+});
+
+test('raising N on a running auto project starts more; lowering it starts none until below the limit', async (t) => {
+  const h = await startTest(); t.after(h.stop);
+  const { pid, ids } = await setup(h, { tasks: 4 });
+  await setAuto(h, pid, true);
+  assert.equal(autoEvents(h).length, 1);
+  const up = await setConc(h, pid, 2);
+  assert.deepEqual(up.json.autoStarted, [ids[1]]);
+  const down = await setConc(h, pid, 1);
+  assert.deepEqual(down.json.autoStarted, []);
+  assert.equal(autoEvents(h).length, 2);
+});
+
+test('dependencies are respected: a task waits for its dependencies to be done', async (t) => {
+  const h = await startTest(); t.after(h.stop);
+  const { pid, ids, clock } = await setup(h, { tasks: 3 });
+  await h.api('PATCH', `/v1/tasks/${ids[1]}`, { dependsOn: [ids[0]] });
+  await setConc(h, pid, 3);
+  await setAuto(h, pid, true);
+  assert.deepEqual(autoEvents(h).map((e) => e.taskId), [ids[0], ids[2]], 'the dependent task is skipped');
+  await h.api('PATCH', `/v1/tasks/${ids[0]}`, { status: 'in_progress' });
+  await h.api('PATCH', `/v1/tasks/${ids[2]}`, { status: 'in_progress' });
+  h.hub.sweep(clock.t + 1000);
+  assert.equal(task(h, ids[1]).startNoteId, null, 'dependency in progress is not done');
+  await h.api('PATCH', `/v1/tasks/${ids[0]}`, { status: 'done' });
+  assert.deepEqual(autoEvents(h).map((e) => e.taskId), [ids[0], ids[2], ids[1]]);
+});
+
+test('no double-starts across sweeps with N=3 (30-minute no-reply guard still applies)', async (t) => {
+  const h = await startTest(); t.after(h.stop);
+  const { pid, ids, clock } = await setup(h, { tasks: 5 });
+  await setConc(h, pid, 2);
+  await setAuto(h, pid, true);
+  assert.equal(autoEvents(h).length, 2);
+  for (let i = 1; i <= 5; i++) h.hub.sweep(clock.t + i * MIN);
+  assert.equal(autoEvents(h).length, 2, 'queued starts hold their slots');
+  // deliver the first, no reply: still holds its slot for 30 minutes
+  const nid = task(h, ids[0]).startNoteId;
+  await h.get('/v1/sessions/s1/inbox');
+  h.send(h.ev('s1', 'note.result', { noteId: nid, ok: true, via: 'prompt' }, clock.t));
+  h.send(h.ev('s1', 'note.result', { noteId: task(h, ids[1]).startNoteId, ok: true, via: 'prompt' }, clock.t));
+  clock.t += 10 * MIN;
+  h.hub.sweep(clock.t);
+  assert.equal(autoEvents(h).length, 2);
+  clock.t += 19 * MIN; // 29 minutes after delivery: still in flight
+  h.hub.sweep(clock.t);
+  assert.equal(autoEvents(h).length, 2, 'no new start while delivered notes await a reply');
+});
+
+test('autoConcurrency survives --rebuild', async (t) => {
+  const h = await startTest(); t.after(h.stop);
+  const { pid } = await setup(h, { tasks: 4 });
+  await setConc(h, pid, 3);
+  await setAuto(h, pid, true);
+  const before = h.hub.dump(), st = h.state();
+  h.hub.rebuild();
+  assert.deepEqual(h.hub.dump(), before);
+  assert.deepEqual({ ...h.state(), seq: 0 }, { ...st, seq: 0 });
+  assert.equal(h.state().projects[0].autoConcurrency, 3);
+  assert.equal(autoEvents(h).length, 3);
+});

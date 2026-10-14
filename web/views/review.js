@@ -19,6 +19,7 @@ import { codeEditor, blockView } from '../code.js';
 import { createAttachTray, bindAttachInput, attsOf } from '../attachments.js';
 import { createGitPanel } from '../gitpanel.js';
 import * as R from '../review.js';
+import { bindTaskMenu } from '../taskmenu.js';
 import { conceptTag } from '../concepts.js';
 
 const SHORTCUTS = [
@@ -117,6 +118,7 @@ export function mount(container, route0) {
       h('div', { class: 'rv-r3' }, r.agent, r.model, r.run, r.changes),
       r.recap);
     btn.__r = r;
+    bindTaskMenu(btn, () => state.tasks.get(btn.__id)); // right-click / Shift+F10: the same actions as the board card
     return h('li', { class: 'rv-item' }, btn);
   }
   function updateRow(li, t) {
@@ -650,7 +652,7 @@ export function mount(container, route0) {
 
   /* ---------- keyboard ---------- */
   function onKey(e) {
-    if (!alive || e.metaKey || e.ctrlKey || e.altKey) return;
+    if (!alive || !e.key || e.metaKey || e.ctrlKey || e.altKey) return; // key-less keydown: browser autofill dispatches them
     const tg = e.target;
     if (tg && (/^(INPUT|TEXTAREA|SELECT)$/.test(tg.tagName) || tg.isContentEditable)) return;
     if (document.querySelector('.spotlight-scrim:not([hidden]), .git-scrim')) return; // a dialog is open: its keys are its own

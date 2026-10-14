@@ -615,3 +615,18 @@ test('--demo-live occasionally asks a question and makes two agents edit the sam
   assert.ok(h.hub.db.get('SELECT COUNT(*) AS n FROM events').n > before);
   assert.ok(h.state().questions.length >= 4, 'live question joined the three seeded ones');
 });
+
+test('reconcile: a discovered agent tagged [helm:T-n] binds to that card, even after it was found untagged', async (t) => {
+  const h = await startTest(); t.after(h.stop);
+  world(h, 1);
+  // a spawn the mod made itself: no agent.spawned, only reconcile reports it (with its description)
+  h.send(h.ev('s1', 'reconcile', { agents: [{ agentId: 'a1', status: 'running' }, { agentId: 'f1', status: 'running', description: '[helm:T-1] follow-up', type: 'helm:builder' }] }, T0 + 1000));
+  assert.equal(agent(h, 'f1').task_id ?? agent(h, 'f1').taskId, 'T-1');
+  assert.equal(agent(h, 'f1').description, 'follow-up');
+  // a row an older hub created untagged gets bound on the next report
+  h.hub.db.run("UPDATE agents SET task_id = NULL, status = 'stalled' WHERE id = 'f1'");
+  h.send(h.ev('s1', 'reconcile', { agents: [{ agentId: 'f1', status: 'running', description: '[helm:T-1] follow-up', type: 'helm:builder' }] }, T0 + 70_000));
+  const f = agent(h, 'f1');
+  assert.equal(f.task_id ?? f.taskId, 'T-1');
+  assert.equal(f.status, 'running');
+});

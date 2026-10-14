@@ -448,11 +448,15 @@ ul.md-list li::marker { color: var(--accent); }
 .composer-start .kbd { margin-left: 2px; opacity: .8; }
 
 /* ---------- Talk ---------- */
-.talk-head { display: flex; flex-direction: column; gap: 8px; }
-.talk-head .sheet-head-top { margin-bottom: 0; }
-.talk-title { display: inline-flex; align-items: center; gap: 8px; font-size: 18px; font-weight: 700; letter-spacing: -0.02em; }
-.talk-picker { width: 100%; }
-.talk-sub { font-size: 11.5px; color: var(--label-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.talk-head { display: flex; flex-direction: column; container-type: inline-size; padding: 10px 12px; }
+.talk-head .sheet-head-top { margin-bottom: 0; gap: 6px; flex-wrap: nowrap; min-width: 0; }
+.talk-head .sheet-head-top > * { flex: none; }
+.talk-head .sheet-head-top > .talk-label { flex: 1 1 0; min-width: 0; font-size: 14px; font-weight: 600; letter-spacing: -0.01em; text-overflow: ellipsis; white-space: nowrap; overflow: hidden; cursor: inherit; user-select: none; -webkit-user-select: none; }
+.talk-head .icon-btn { width: 30px; height: 30px; }
+.talk-switch[aria-expanded="true"] { background: var(--accent-soft); }
+.talk-head.is-busy .talk-switch { color: var(--accent); }
+@container (max-width: 330px) { .talk-head .badge { display: none; } }
+.talk-title { display: inline-flex; align-items: center; gap: 6px; margin: 0; font-size: 15px; font-weight: 700; letter-spacing: -0.02em; }
 .talk-body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .talk-body .empty { margin: auto; }
 .talk { display: flex; flex-direction: column; min-height: 0; flex: 1; }
@@ -826,7 +830,7 @@ ul.md-list li::marker { color: var(--accent); }
 .float-win.compact .talk-body { display: none; }
 .float-win.compact .talk-head { border-bottom: 0; }
 html.float-gesture, html.float-gesture * { user-select: none !important; -webkit-user-select: none !important; cursor: var(--float-cursor, move) !important; }
-.float-talk .talk-head { padding: 12px 14px 10px; }
+.float-talk .talk-head { padding: 10px 12px; }
 @media (prefers-reduced-motion: reduce) { .float-win, .float-win.enter { animation: none; transition: none; } }
 
 /* ---------- Talk pill (floating.js createBubble): the minimised Talk, a draggable circle ---------- */
@@ -900,3 +904,49 @@ html.float-gesture, html.float-gesture * { user-select: none !important; -webkit
 .prestart-hint { color: var(--label-3); font-style: italic; }
 .qa-badge { min-width: 16px; height: 16px; padding: 0 4px; margin-left: 2px; border-radius: 8px; background: var(--on-accent); color: var(--accent); font-size: 10.5px; font-weight: 700; line-height: 16px; text-align: center; }
 .qa-badge[hidden] { display: none; }
+
+/* ---------- context menu (contextmenu.js) ---------- */
+.cm {
+  position: fixed; z-index: 120; min-width: 208px; max-width: min(340px, calc(100vw - 16px)); padding: 5px; border-radius: 12px; overflow-y: auto; overscroll-behavior: contain;
+  background: var(--vibrancy-strong); backdrop-filter: blur(24px) saturate(180%); -webkit-backdrop-filter: blur(24px) saturate(180%);
+  box-shadow: var(--shadow-3), inset 0 0 0 .5px var(--separator-strong); opacity: 0; transform: scale(.97); transform-origin: top left;
+  transition: opacity 120ms var(--ease), transform 150ms var(--ease);
+}
+.cm.in { opacity: 1; transform: none; }
+.cm.leaving { opacity: 0; transition-duration: 90ms; pointer-events: none; }
+.cm-item { display: flex; align-items: center; gap: 9px; width: 100%; min-height: 30px; padding: 4px 9px; border: 0; border-radius: 7px; background: none; color: var(--label); font-size: 13px; text-align: left; cursor: default; }
+.cm-item:focus-visible, .cm-item:focus, .cm-item.sub-open { background: var(--accent-soft); outline: none; }
+.cm-item[aria-disabled="true"] { opacity: .42; }
+.cm-item.danger { color: var(--red); }
+.cm-item.danger:focus, .cm-item.danger:focus-visible { background: color-mix(in srgb, var(--red) 14%, transparent); }
+.cm-item svg { flex: none; color: var(--label-2); }
+.cm-item.danger svg { color: inherit; }
+.cm-icon-pad { width: 15px; flex: none; }
+.cm-label { flex: 1; min-width: 0; display: flex; flex-direction: column; line-height: 1.25; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cm-sub { font-size: 11px; color: var(--label-3); }
+.cm-check { color: var(--accent) !important; }
+.cm-hint { flex: none; font: 500 11px var(--mono); color: var(--label-3); padding-left: 12px; }
+.cm-chev { flex: none; margin-right: -3px; color: var(--label-3) !important; }
+.cm-sep { height: .5px; background: var(--separator); margin: 5px 6px; }
+.cm-heading { padding: 5px 9px 2px; font-size: 10.5px; text-transform: uppercase; letter-spacing: .07em; color: var(--label-3); }
+@media (prefers-reduced-motion: reduce) { .cm, .cm.in { transition: none; transform: none; } }
+
+/* ---------- shelf chip for the floating Studio pill: status dot, short title, open comment count ---------- */
+.shelf-item[data-kind="studio"] .shelf-dot { background: var(--green); }
+.shelf-item[data-kind="studio"][data-status="drafting"] .shelf-dot, .shelf-item[data-kind="studio"][data-status="applying"] .shelf-dot { background: var(--accent); }
+.shelf-item[data-kind="studio"][data-status="editing"] .shelf-dot { background: var(--label-3); }
+.shelf-item[data-kind="studio"][data-status="conflicts"] .shelf-dot { background: var(--orange); }
+.shelf-item[data-kind="studio"].pending .shelf-dot { box-shadow: 0 0 0 2px var(--bg-2); animation: shelf-pulse 1.4s ease-in-out infinite; }
+.shelf-count { flex: none; min-width: 16px; padding: 1px 4px; border-radius: 99px; background: var(--accent-soft); color: var(--accent); font-size: 10px; text-align: center; }
+.shelf-count[hidden] { display: none; }
+@media (prefers-reduced-motion: reduce) { .shelf-item[data-kind="studio"].pending .shelf-dot { animation: none; } }
+
+/* T-73: pending notes (sheet, "Will be sent with Start"): subtle Edit / Delete on hover and keyboard focus */
+.prestart-note .note-actions { opacity: 0; margin: -2px -4px -2px 0; }
+.prestart-note:hover .note-actions, .prestart-note:focus-within .note-actions { opacity: 1; }
+@media (hover: none) { .prestart-note .note-actions { opacity: .7; } }
+.prestart-code { cursor: text; }
+.prestart-confirm { display: flex; align-items: center; gap: 4px; flex: none; }
+.prestart-confirm-q { font-size: 12px; color: var(--label-2); }
+.prestart-del-yes { color: var(--red); }
+.prestart-note .note-edit { min-height: 40px; }

@@ -14,7 +14,7 @@ const KEYS = {
   project: 'projects', session: 'sessions', agent: 'agents', task: 'tasks', note: 'notes',
   question: 'questions', job: 'jobs', digest: 'digests', // v0.2 (missing keys from an older hub are treated as empty)
   workflow: 'workflows', run: 'runs', // v0.9
-  template: 'templates', // v0.11
+  template: 'templates', doc: 'docs', // v0.11, v0.15 Studio documents (no blocks)
   concept: 'concepts', // v0.13: keyed by slug (normalizeRow mirrors it into `id`)
 };
 
@@ -30,6 +30,7 @@ export const state = {
   workflows: new Map(),
   runs: new Map(), // Run rows with `nodes` inlined
   templates: new Map(), // v0.11 task templates (archived ones included; selectors filter)
+  docs: new Map(), // v0.15 Studio documents (metadata and version; blocks are fetched by the Studio screen)
   concepts: new Map(), // v0.13 top concepts by last seen (no summaries; the page fetches its own)
   activity: new Map(), // id -> Activity (bounded)
   usageToday: { overheadUsd: 0, requestedUsd: 0 }, // v0.4 Helm overhead meter
@@ -43,7 +44,7 @@ export const state = {
   },
 };
 
-const ver = { project: 0, session: 0, agent: 0, task: 0, note: 0, question: 0, job: 0, digest: 0, workflow: 0, run: 0, template: 0, concept: 0, activity: 0, usage: 0 };
+const ver = { project: 0, session: 0, agent: 0, task: 0, note: 0, question: 0, job: 0, digest: 0, workflow: 0, run: 0, template: 0, doc: 0, concept: 0, activity: 0, usage: 0 };
 
 /* ---------- subscriptions ---------- */
 const listeners = new Set();
@@ -79,6 +80,7 @@ export function normalizeRow(entity, row) {
     if (row.branch === undefined) row.branch = null; // v0.12 branch / PR / CI
   } else if (entity === 'project') {
     if (row.autoStart === undefined) row.autoStart = false; // v0.7 Up next auto mode
+    if (row.autoConcurrency === undefined) row.autoConcurrency = 1; // T-71
   } else if (entity === 'run') {
     if (!Array.isArray(row.nodes)) row.nodes = []; // v0.9
   } else if (entity === 'workflow') {
@@ -474,10 +476,12 @@ function openStream() {
   source.addEventListener('open', async () => {
     try {
       await resync();
+      if (es !== source) return; // replaced while resyncing: ignore this stale stream
       retry = 0;
       setConn('live');
     } catch {
       try { source.close(); } catch { /* noop */ }
+      if (es !== source) return;
       scheduleReconnect();
     }
   });
@@ -490,7 +494,15 @@ function openStream() {
     applyAndAdvance(msg);
   });
   source.addEventListener('reset', async () => {
-    try { await resync(); setConn('live'); } catch { try { source.close(); } catch { /* noop */ } scheduleReconnect(); }
+    try {
+      await resync();
+      if (es !== source) return; // stale stream
+      setConn('live');
+    } catch {
+      try { source.close(); } catch { /* noop */ }
+      if (es !== source) return;
+      scheduleReconnect();
+    }
   });
   source.addEventListener('error', () => {
     try { source.close(); } catch { /* noop */ }

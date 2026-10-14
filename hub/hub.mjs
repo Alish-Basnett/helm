@@ -7,7 +7,7 @@ import {
   localDate, usageSummary, usageBreakdown, usageToday, toAttachment, MAX_NOTE_ATTACHMENTS,
   toProject, toSession, SESSION_SQL, computeHealth, HEALTH, costToday, toAgent, toTask, toNote, toActivity, toQuestion, toJob, toDigest,
 } from './projections.mjs';
-import { computeDiff, diffStat } from './diff.mjs';
+import { computeDiff, diffStat, deriveFiles, repoHead, within } from './diff.mjs';
 import { search as ftsSearch, learn as ftsLearn } from './search.mjs';
 import { WfEngine } from './wfengine.mjs';
 import * as gf from './gitflow.mjs';
@@ -15,9 +15,12 @@ import { GitSync } from './gitsync.mjs';
 import {
   toConcept, getConcept, resolveConcept, conceptKey, backfillConcepts, STATE_CONCEPTS, MAX_ALIASES,
 } from './concepts.mjs';
+import { DocsEngine } from './docsengine.mjs';
+import { toDoc } from './docs.mjs';
 import { toTemplate, getTemplate, renderTemplate, agentOfSubagent, TEMPLATE_AGENTS, MAX_CHECKS, MAX_TAGS } from './templates.mjs';
 
 import { HttpError } from './errors.mjs';
+import { safetyNet, backfill as backfillRecapsImpl } from './recapjobs.mjs';
 export { HttpError };
 const bad = (m) => new HttpError(400, m);
 const notFound = (m) => new HttpError(404, m);
@@ -29,7 +32,10 @@ const TABLES = [
   'agent_files', 'conflicts', 'questions', 'jobs', 'digests', 'attachments', 'usage', 'task_diffs',
   'workflows', 'workflow_versions', 'runs', 'run_nodes', 'steps', 'templates', 'concepts', 'concept_tasks', 'concept_keys',
   'session_samples',
+  'docs', 'doc_versions', 'doc_comments',
 ];
+export const RESUME_MARK = '[helm:resume]';
+const MAX_AUTO_CONCURRENCY = 5; // T-71: the most tasks Up next auto mode runs at once
 const START_FROM = ['backlog', 'next', 'later', 'blocked'];
 const DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
 export { localDate };
@@ -54,6 +60,7 @@ export class Hub {
     this.replaying = false;         // true during rebuild(): replay applies recorded workflow events and never decides
     this.gitBusy = new Set();       // v0.12: task ids with a git operation in flight (one at a time per task)
     this.gitSync = new GitSync(this, { fetchImpl }); // v0.12: PR + CI polling for pushed branches (the timer lives in server.mjs)
+    this.docs = new DocsEngine(this); // v0.15 Studio documents: commands, doc_draft / doc_edit judging, export
     this.wf = new WfEngine(this);   // v0.9 workflows: decisions + commands (the reducer lives in workflows.mjs)
   }
   /** One-time (meta flag) projection of the recaps already in the tasks table into concepts. */
@@ -76,7 +83,7 @@ export class Hub {
       onRollback: () => { this.p.dirty = false; },
     });
     // v0.7: every committed ingest / command may free the project's slot, so re-evaluate auto mode.
-    if (outer) { this.autoTick(); this.wf.tick(); } // v0.9: results/steps/sessions may have unblocked a workflow run
+    if (outer) { this.autoTick(); this.wf.tick(); this.docs.tick(); } // v0.9: results/steps/sessions may have unblocked a workflow run
     return r;
   }
   seqNow() {
@@ -205,11 +212,67 @@ export class Hub {
     while (this.snapshots.size) await Promise.all([...this.snapshots]);
   }
   taskDiffInput(t) {
-    return { filesChanged: JSON.parse(t.files_changed || '[]'), git: toTask(t).git, createdAt: t.created_at, doneAt: t.done_at };
+    return { filesChanged: JSON.parse(t.files_changed || '[]'), git: toTask(t).git, createdAt: t.created_at, doneAt: t.done_at, filesNote: t.files_note || null };
+  }
+  /**
+   * T-66: work out which files a task changed from git (see diff.mjs deriveFiles) and record the decision as a
+   * hub.task.files event, so replay never re-asks git. Needs a recorded base; a no-op without one or without news.
+   */
+  async deriveTaskFiles(taskId) {
+    const t = this.p.getTask(taskId);
+    if (!t || this.closed || !t.git) return null;
+    const hints = this.db.all("SELECT summary FROM activity WHERE task_id = ? AND kind = 'tool' ORDER BY id DESC LIMIT 400", taskId).map((r) => r.summary);
+    const r = await deriveFiles(this.taskDiffInput(t), { mentions: JSON.parse(t.mentions || '[]'), hints });
+    if (r.source === 'none' || this.closed) return null;
+    const cur = this.p.getTask(taskId);
+    if (!cur) return null;
+    const have = new Set(JSON.parse(cur.files_changed || '[]'));
+    const fresh = r.files.filter((f) => !have.has(f));
+    if (!fresh.length && (r.note === null || (cur.files_note || null) === r.note)) return null;
+    return this.tx(() => this.command('hub.task.files', { taskId, files: fresh, mode: 'merge', note: r.note }, this.now()));
+  }
+  /**
+   * POST /v1/tasks/:id/files { files, root?, note?, replace? }: attach files to an existing task by hand (a backfill).
+   * Relative paths resolve against `root` (or the task's git root) and must stay inside it. With `root` and no recorded
+   * base, the repo's current HEAD becomes the base (a diff against HEAD), decided here and carried in the event.
+   */
+  async attachTaskFiles(id, body) {
+    const t = this.p.getTask(id);
+    if (!t) throw notFound('task not found');
+    if (!isObj(body) || !Array.isArray(body.files) || !body.files.length || body.files.length > 500 || body.files.some((f) => !isStr(f) || !f || f.includes('\0'))) {
+      throw bad('files must be a non-empty array of paths (max 500)');
+    }
+    if (body.root !== undefined && (!isStr(body.root) || !path.isAbsolute(body.root))) throw bad('root must be an absolute path');
+    if (body.note !== undefined && body.note !== null && !isStr(body.note)) throw bad('note must be a string');
+    const cur = JSON.parse(t.git || 'null');
+    let git = null, root = cur && cur.root ? cur.root : null;
+    if (body.root) {
+      const h = await repoHead(body.root);
+      if (!h) throw bad('root is not a git repository');
+      root = h.root;
+      if (!cur) git = { root: h.root, base: h.head, head: h.head, at: this.now() };
+    }
+    const files = [];
+    for (const f of body.files) {
+      const abs = path.isAbsolute(f) ? path.resolve(f) : root ? path.resolve(root, f) : null;
+      if (!abs) throw bad(`relative path without a root: ${f}`);
+      if (root && !within(root, abs)) throw bad(`path escapes the repo root: ${f}`);
+      files.push(abs);
+    }
+    const note = body.note === undefined ? 'attached by hand' : body.note;
+    const task = this.tx(() => this.command('hub.task.files', { taskId: id, files, mode: body.replace ? 'replace' : 'merge', note, ...(git ? { git } : {}) }, this.now()));
+    if (this.autoSnapshot) {
+      const p = this.snapshotTask(id).catch((e) => this.log?.warn(`diff snapshot failed for ${id}`, e)).finally(() => this.snapshots.delete(p));
+      this.snapshots.add(p);
+    }
+    return { task };
   }
   /** Compute the task's diff now and record it as a hub.task.diff event. Skips when there is nothing to freeze. */
   async snapshotTask(taskId) {
-    const t = this.p.getTask(taskId);
+    let t = this.p.getTask(taskId);
+    if (!t || this.closed) return null;
+    await this.deriveTaskFiles(taskId).catch((e) => this.log?.warn(`file derivation failed for ${taskId}`, e));
+    t = this.p.getTask(taskId);
     if (!t || this.closed) return null;
     const diff = await computeDiff(this.taskDiffInput(t), { now: this.now() });
     if (diff.source === 'none' || this.closed) return null;
@@ -218,12 +281,13 @@ export class Hub {
   }
   /** GET /v1/tasks/:id/diff. Snapshot if there is one (unless refresh), else live / history. */
   async taskDiff(id, { refresh = false } = {}) {
-    const t = this.p.getTask(id);
+    let t = this.p.getTask(id);
     if (!t) throw notFound('task not found');
     if (!refresh) {
       const s = this.db.get('SELECT diff FROM task_diffs WHERE task_id = ?', id);
       if (s) { try { return { ...JSON.parse(s.diff), source: 'snapshot' }; } catch { /* recompute */ } }
     }
+    if (t.git) { await this.deriveTaskFiles(id).catch((e) => this.log?.warn(`file derivation failed for ${id}`, e)); t = this.p.getTask(id); }
     const diff = await computeDiff(this.taskDiffInput(t), { now: this.now() });
     const stat = diffStat(diff);
     if (diff.source !== 'none' && !this.closed) {
@@ -461,10 +525,14 @@ export class Hub {
     try {
       const ids = this.db.all('SELECT id FROM projects WHERE auto_start = 1 AND archived = 0 ORDER BY rowid').map((r) => r.id);
       for (const id of ids) {
-        const plan = this.autoPlan(id, now);
-        if (!plan) continue;
-        this.tx(() => this.command('hub.task.autostart', plan, now));
-        started.push(plan.taskId);
+        // T-71: keep starting until the project's concurrency is full. Each start note counts as in flight at once,
+        // so autoPlan sees the slot taken; the cap only guards against a runaway loop.
+        for (let i = 0; i < MAX_AUTO_CONCURRENCY; i++) {
+          const plan = this.autoPlan(id, now);
+          if (!plan) break;
+          this.tx(() => this.command('hub.task.autostart', plan, now));
+          started.push(plan.taskId);
+        }
       }
     } catch (e) {
       this.log?.error('auto-start failed', e);
@@ -474,40 +542,61 @@ export class Hub {
     this.lastAuto = started;
     return started;
   }
-  /** The next auto-start for a project, or null. See CONTRACT v0.7 for the rule. */
+  /**
+   * The next auto-start for a project, or null. See CONTRACT v0.7 for the rule; T-71 generalises "nothing in progress"
+   * to "fewer than N busy", where busy = in-progress tasks + Up next tasks whose start is still in flight.
+   */
   autoPlan(projectId, now) {
     const { autoStartingMs, autoBackoffMs, sendingMs } = this.cfg;
-    if (this.db.get(`SELECT 1 AS x FROM tasks WHERE project_id = ? AND status = 'in_progress' LIMIT 1`, projectId)) return null;
+    const limit = this.p.getProject(projectId)?.auto_concurrency || 1;
+    let busy = this.db.get(`SELECT COUNT(*) AS c FROM tasks WHERE project_id = ? AND status = 'in_progress'`, projectId).c;
+    if (busy >= limit) return null;
     const next = this.db.all(
       `SELECT * FROM tasks WHERE project_id = ? AND status = 'next' ORDER BY ord, created_at, rowid`, projectId);
     if (!next.length) return null;
+    const candidates = [];
     for (const t of next) {
       const n = t.start_note_id ? this.p.getNote(t.start_note_id) : null;
-      if (!n || n.state === 'failed') continue;
-      if (n.state === 'queued' || n.state === 'sending') return null;   // a start is in flight
-      if (now - n.created_at < autoStartingMs) return null;              // delivered, agent not up yet
-      // Delivered but not answered yet: the session only reads prompts when its current turn ends, which can
-      // take longer than autoStartingMs. Until it replies (or 30 min pass), the start is still in flight.
-      if (n.state === 'ran' && !n.replied_at && now - (n.ran_at ?? n.created_at) < 30 * 60_000) return null;
+      let inFlight = false;
+      if (n && n.state !== 'failed') {
+        if (n.state === 'queued' || n.state === 'sending') inFlight = true;          // a start is in flight
+        else if (now - n.created_at < autoStartingMs) inFlight = true;               // delivered, agent not up yet
+        // Delivered but not answered yet: the session only reads prompts when its current turn ends, which can
+        // take longer than autoStartingMs. Until it replies (or 30 min pass), the start is still in flight.
+        else if (n.state === 'ran' && !n.replied_at && now - (n.ran_at ?? n.created_at) < 30 * 60_000) inFlight = true;
+      }
+      if (inFlight) { if (++busy >= limit) return null; continue; }
+      if (!this.depsDone(t)) continue;                                               // waits for its dependencies
+      if (n && n.state === 'failed') {
+        const failedAt = n.ran_at ?? (n.sending_at ? n.sending_at + sendingMs : n.queued_at ?? n.created_at);
+        if (now - failedAt < autoBackoffMs) return null;                             // back off; do not skip past it
+      }
+      candidates.push(t);
     }
-    const top = next[0];
-    const n = top.start_note_id ? this.p.getNote(top.start_note_id) : null;
-    if (n && n.state === 'failed') {
-      const failedAt = n.ran_at ?? (n.sending_at ? n.sending_at + sendingMs : n.queued_at ?? n.created_at);
-      if (now - failedAt < autoBackoffMs) return null;
+    // Nothing may be started while an earlier in-flight start is still unresolved beyond the cap (checked above).
+    for (const top of candidates) {
+      let plan;
+      try { plan = this.startPlan(top); } catch (e) {
+        if (e instanceof HttpError) return null;  // no live session: retry when one appears
+        throw e;
+      }
+      return { taskId: top.id, sessionId: plan.sessionId, text: plan.text, noteIds: plan.noteIds,
+        reason: limit === 1 ? 'nothing in progress' : `free slot (${busy + 1} of ${limit})` };
     }
-    let plan;
-    try { plan = this.startPlan(top); } catch (e) {
-      if (e instanceof HttpError) return null;  // no live session: retry when one appears
-      throw e;
-    }
-    return { taskId: top.id, sessionId: plan.sessionId, text: plan.text, noteIds: plan.noteIds, reason: 'nothing in progress' };
+    return null;
+  }
+  /** True when every task this one depends on is done (a dependency that no longer exists counts as done). */
+  depsDone(t) {
+    let deps; try { deps = JSON.parse(t.depends_on || '[]'); } catch { deps = []; }
+    return deps.every((d) => { const x = this.p.getTask(d); return !x || x.status === 'done'; });
   }
 
   // ---------------------------------------------------------------- sweep
   sweep(now = this.now()) {
     const r = this.sweepCore(now);
     this.autoTick(now); // backoff / starting windows expire with time, not with an event
+    safetyNet(this, now); // T-76: a finished task still without a recap gets one
+    this.docs.tick(now);
     this.wf.tick(now);  // unclaimed / overdue workflow steps time out, waiting runs are re-evaluated
     return r;
   }
@@ -647,9 +736,12 @@ export class Hub {
     const templates = this.db.all(
       projectId ? 'SELECT * FROM templates WHERE project_id IS NULL OR project_id = ? ORDER BY rowid' : 'SELECT * FROM templates ORDER BY rowid',
       ...(projectId ? [projectId] : [])).map(toTemplate);
+    const docs = this.db.all(
+      projectId ? 'SELECT * FROM docs WHERE archived = 0 AND project_id = ? ORDER BY updated_at DESC, rowid DESC' : 'SELECT * FROM docs WHERE archived = 0 ORDER BY updated_at DESC, rowid DESC',
+      ...(projectId ? [projectId] : [])).map((r) => toDoc(r, { blocks: false }));
     const concepts = this.db.all('SELECT * FROM concepts ORDER BY last_seen_at DESC, slug LIMIT ?', STATE_CONCEPTS).map((r) => toConcept(r));
     return {
-      projects, templates, concepts, sessions: sessions.map(toSession), agents: agents.map(toAgent),
+      projects, templates, docs, concepts, sessions: sessions.map(toSession), agents: agents.map(toAgent),
       tasks: tasks.map(toTask), notes: notes.map(toNote), questions: questions.map(toQuestion),
       jobs: jobs.map(toJob), digests: digests.map(toDigest), workflows, runs,
       usageToday: usageToday(this.db, this.now()), seq: this.seqNow(),
@@ -921,6 +1013,11 @@ export class Hub {
       if (typeof body.autoStart !== 'boolean') throw bad('autoStart must be a boolean');
       data.autoStart = body.autoStart;
     }
+    if (body?.autoConcurrency !== undefined) {
+      const n = body.autoConcurrency;
+      if (!Number.isInteger(n) || n < 1 || n > MAX_AUTO_CONCURRENCY) throw bad(`autoConcurrency must be an integer from 1 to ${MAX_AUTO_CONCURRENCY}`);
+      data.autoConcurrency = n;
+    }
     this.lastAuto = [];
     const project = this.tx(() => this.command('hub.project.update', data, at));
     return { project: this.p.getProject(id) ? toProject(this.p.getProject(id)) : project, autoStarted: this.lastAuto.slice() };
@@ -957,9 +1054,18 @@ export class Hub {
   }
   /** Validate a Start and build its note: { sessionId, text }. Throws 409 when not allowed / no live session. */
   startPlan(t) {
+    if (toTask(t).interrupted) return this.resumePlan(t); // T-70: Start on an interrupted card is a Resume
     if (!START_FROM.includes(t.status)) throw new HttpError(409, `cannot start a task that is ${t.status}`);
     const sessionId = this.pickJobSession(t.session_id, t.project_id);
     // Draft notes on the task ride along with Start (v0.8): folded after the Brief, marked ran by the same event.
+    const { drafts, notesBlock } = this.draftNotes(t);
+    const text = `Start Helm task ${t.id} \u201c${t.title}\u201d.\n\nBrief:\n${t.description}\n\n${notesBlock}`
+      + `Create nothing new: delegate this existing task now with the Agent tool (description starting with [helm:${t.id}]), `
+      + 'choosing helm:builder for code changes or helm:scout for read-only work, run it in the background, '
+      + 'then reply in one line with what you started.';
+    return { sessionId, text, noteIds: drafts.map((n) => n.id) };
+  }
+  draftNotes(t) {
     const drafts = this.db.all(
       `SELECT * FROM notes WHERE target_kind = 'task' AND target_id = ? AND state = 'draft' ORDER BY created_at, rowid`, t.id);
     const folded = drafts.map((n) => {
@@ -967,12 +1073,24 @@ export class Hub {
       const att = files.length ? `\n  Attached files (open them with the Read tool):\n${files.map((f) => `  - ${f.path}`).join('\n')}` : '';
       return `- ${n.text}${att}`;
     });
-    const notesBlock = folded.length ? `Notes from the user:\n${folded.join('\n')}\n\n` : '';
-    const text = `Start Helm task ${t.id} \u201c${t.title}\u201d.\n\nBrief:\n${t.description}\n\n${notesBlock}`
-      + `Create nothing new: delegate this existing task now with the Agent tool (description starting with [helm:${t.id}]), `
-      + 'choosing helm:builder for code changes or helm:scout for read-only work, run it in the background, '
-      + 'then reply in one line with what you started.';
-    return { sessionId, text, noteIds: drafts.map((n) => n.id) };
+    return { drafts, notesBlock: folded.length ? `Notes from the user:\n${folded.join('\n')}\n\n` : '' };
+  }
+  /** T-70: Resume an interrupted task. Same queue as Start, but the note is a task note the mod turns into a follow-up builder. */
+  resumePlan(t) {
+    const t2 = toTask(t);
+    if (!t2.interrupted) throw new HttpError(409, 'only an interrupted task can be resumed');
+    const inflight = t.start_note_id ? this.p.getNote(t.start_note_id) : null;
+    if (inflight && (inflight.state === 'queued' || inflight.state === 'sending')) throw new HttpError(409, 'already starting');
+    const sessionId = this.pickJobSession(t.session_id, t.project_id);
+    const { drafts, notesBlock } = this.draftNotes(t);
+    const text = `!${RESUME_MARK} Resume Helm task ${t.id} \u201c${t.title}\u201d: its agent was stopped mid-task.\n\n${notesBlock}`.trimEnd();
+    return { sessionId, text, noteIds: drafts.map((n) => n.id), resume: true };
+  }
+  resumeTask(id, at = this.now()) {
+    const t = this.p.getTask(id);
+    if (!t) throw notFound('task not found');
+    const plan = this.resumePlan(t);
+    return this.tx(() => this.command('hub.task.start', { id, ...plan }, at));
   }
   startTask(id, at = this.now()) {
     const t = this.p.getTask(id);
@@ -1055,7 +1173,14 @@ export class Hub {
       if (body.blockedReason !== null && !isStr(body.blockedReason)) throw bad('blockedReason must be a string or null');
       patch.blockedReason = body.blockedReason === null ? null : cut(body.blockedReason, 500);
     }
-    return this.tx(() => ({ task: this.command('hub.task.update', { id, patch }, at) }));
+    const out = this.tx(() => ({ task: this.command('hub.task.update', { id, patch }, at) }));
+    // A task the main loop did itself has no agent.completed to trigger a snapshot: moving it to review/done does.
+    if (this.autoSnapshot && t.git && (patch.status === 'review' || patch.status === 'done')) {
+      const p = new Promise((r) => setImmediate(r)).then(() => this.snapshotTask(id))
+        .catch((e) => this.log?.warn(`diff snapshot failed for ${id}`, e)).finally(() => this.snapshots.delete(p));
+      this.snapshots.add(p);
+    }
+    return out;
   }
   checkDeps(deps, selfId) {
     if (!Array.isArray(deps) || deps.some((d) => !isStr(d))) throw bad('dependsOn must be an array of task ids');
@@ -1223,6 +1348,14 @@ export class Hub {
     const any = this.db.get(`SELECT id FROM sessions WHERE status = 'active' ORDER BY last_seen_at DESC, rowid DESC LIMIT 1`);
     if (any) return any.id;
     throw new HttpError(409, 'no live session');
+  }
+  /** T-76: give every finished task without a recap one (see hub/recapjobs.mjs). Body: { dryRun, improve, taskIds, reports }. */
+  backfillRecaps(body) {
+    if (body !== undefined && !isObj(body)) throw bad('body must be an object');
+    const b = body || {};
+    if (b.reports !== undefined && !isObj(b.reports)) throw bad('reports must be an object of agentId -> report text');
+    if (b.taskIds !== undefined && !(Array.isArray(b.taskIds) && b.taskIds.every(isStr))) throw bad('taskIds must be an array of strings');
+    return backfillRecapsImpl(this, b);
   }
   explainTask(id, at = this.now()) {
     const t = this.p.getTask(id);

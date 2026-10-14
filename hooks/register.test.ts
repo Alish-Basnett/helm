@@ -56,10 +56,19 @@ function fakeHub(sessionId: string, opts: HubOpts = {}) {
       tasks.push(task)
       return json({ task })
     }
+    const patch = path.match(/^\/v1\/tasks\/(T-\d+)$/)
+    if (method === 'PATCH' && patch) {
+      const t = tasks.find(x => x.id === patch[1])
+      if (!t) return json({ error: 'not found' }, 404)
+      Object.assign(t, body)
+      return json({ task: t })
+    }
     const detail = path.match(/^\/v1\/tasks\/(T-\d+)$/)
     if (method === 'GET' && detail) {
       const d = opts.taskDetail?.[detail[1]!]
-      return d ? json({ ...d, activity: [], notes: [] }) : json({ error: 'not found' }, 404)
+      if (d) return json({ activity: [], notes: [], ...d })
+      const t = tasks.find(x => x.id === detail[1])
+      return t ? json({ task: t, agent: null, activity: [], notes: [] }) : json({ error: 'not found' }, 404)
     }
     return json({ error: `unexpected ${method} ${path}` }, 404)
   }
@@ -68,6 +77,7 @@ function fakeHub(sessionId: string, opts: HubOpts = {}) {
     events,
     calls,
     inbox,
+    tasks,
     jobs,
     steps,
     state,
@@ -81,6 +91,7 @@ type World = {
   clock: ReturnType<typeof mock.clock>
   hub: ReturnType<typeof fakeHub>
   spawned: any[]
+  compacts: any[]
   sent: any[]
   submitted: any[]
   modelCalls: any[]
@@ -91,7 +102,7 @@ type World = {
   storeSeed: Record<string, any>
   agentList: { value: any[] }
   sessionId?: string
-  engine: { submitResult: any; sendResult: any; modelResult: any; spawnResult: any; processRun: (e: any) => any; toolResult: (e: any) => any }
+  engine: { modelGate?: () => Promise<void> | undefined; messages: any[] | (() => any); compactResult: any; submitResult: any; sendResult: any; modelResult: any; spawnResult: any; processRun: (e: any) => any; toolResult: (e: any) => any }
 }
 
 let counter = 0
@@ -107,6 +118,7 @@ async function boot($: any, on: any, opts: HubOpts & { start?: boolean } = {}): 
     clock,
     hub,
     spawned: [],
+    compacts: [],
     sent: [],
     submitted: [],
     modelCalls: [],
@@ -117,6 +129,8 @@ async function boot($: any, on: any, opts: HubOpts & { start?: boolean } = {}): 
     storeSeed: {},
     agentList: { value: [] },
     engine: {
+      messages: [],
+      compactResult: { messages: [{ role: 'user', text: 'a', toolUses: [] }, { role: 'assistant', text: 'b', toolUses: [] }] },
       submitResult: {},
       sendResult: { isDelivered: true },
       modelResult: { isAnswered: true, text: '  ## What happened\nIt works.  ', usage: {} },
@@ -134,17 +148,20 @@ async function boot($: any, on: any, opts: HubOpts & { start?: boolean } = {}): 
   on('http.fetch', (_$: any, e: any) => v(hub.handle(e.url, e.init)))
   on('session.id', () => v(sessionId))
   on('session.cwd', () => v('/work/proj'))
+  on('session.messages', () => v(typeof w.engine.messages === 'function' ? w.engine.messages() : w.engine.messages))
   on('session.model', () => v('opus'))
   on('session.usage', () => v({ context: { tokens: 1234 }, cost: { usd: 0.5 } }))
   on('agent.list', () => v(w.agentList.value))
   on('ui.status', () => v(undefined))
   on('fs.exists', () => v(false))
+  on('fs.read', (_$: any, e: any) => v(String(e.path).endsWith('/.claude-plugin/plugin.json') ? JSON.stringify({ name: 'helm', version: '9.9.9' }) : ''))
   on('fs.write', () => v(undefined))
   on('process.run', (_$: any, e: any) => { w.processCalls.push(e); const r = w.engine.processRun(e); return r?.deny ? r : v(r) })
   on('command.register', (_$: any, e: any) => v({ command: e.name }))
   on('tool.register', (_$: any, e: any) => (w.toolRegistered.push(e), v({ tool: `mcp__helm__${e.name}` })))
   on('agent.register', (_$: any, e: any) => v({ agent: `helm:${e.name}` }))
-  on('model.complete', (_$: any, e: any) => (w.modelCalls.push(e), v(w.engine.modelResult)))
+  // `w.engine.modelGate`: a test may hold a model call back (a stuck host call) until it resolves it.
+  on('model.complete', async (_$: any, e: any) => { w.modelCalls.push(e); await w.engine.modelGate?.(); return v(w.engine.modelResult) })
   on('session.start', (_$: any, e: any) => ({ cwd: e.cwd }))
 
   // The engine floor for the events the mod hooks: the bottom answers what core would.
@@ -155,6 +172,7 @@ async function boot($: any, on: any, opts: HubOpts & { start?: boolean } = {}): 
   })
   on('prompt.submit', (_$: any, e: any) => (w.submitted.push(e), w.engine.submitResult.drop ? w.engine.submitResult : { text: e.text, ...w.engine.submitResult }))
   on('session.send', (_$: any, e: any) => (w.sent.push(e), w.engine.sendResult))
+  on('session.compact', (_$: any, e: any) => (w.compacts.push(e), typeof w.engine.compactResult === 'function' ? w.engine.compactResult() : w.engine.compactResult))
   on('turn.start', (_$: any, e: any) => ({ turnId: e.turnId }))
   on('turn.complete', (_$: any, e: any) => ({ text: e.answer }))
   on('tool.call', (_$: any, e: any) => (w.toolCalls.push(e), w.engine.toolResult(e)))
@@ -448,6 +466,102 @@ describe('mcp__helm__task tool', () => {
     expect(post.body).toMatchObject({ projectId: 'P-1', sessionId: w.sessionId, title: 'Write tests', description: 'cover register.ts', status: 'next', dependsOn: [] })
   })
 
+  test('work tags the main loop\'s tool calls with the card; an unknown id denies and tags nothing', async ($, on) => {
+    const w = await boot($, on, { tasks: [{ id: 'T-7', title: 'Mine', status: 'next' }] })
+    const bad: any = await $.tool.call({ tool: 'mcp__helm__task', action: 'work', id: 'T-999', tool_use_id: 'tu-work-bad' } as any)
+    expect(bad.deny).toContain('Helm hub unavailable')
+    await $.tool.call({ tool: 'Read', file_path: '/r/a.ts', tool_use_id: 'tu-after-bad' } as any)
+    const ok: any = await $.tool.call({ tool: 'mcp__helm__task', action: 'work', id: 'T-7', tool_use_id: 'tu-work' } as any)
+    expect(ok.result).toContain('Working on T-7')
+    await $.tool.call({ tool: 'Read', file_path: '/r/b.ts', tool_use_id: 'tu-after-ok' } as any)
+    await tick(w)
+    const called = (id: string) => asEvent('tool.called', w).find(e => e.data.toolUseId === id)!.data
+    expect(called('tu-after-bad').taskId).toBeUndefined()
+    expect(called('tu-after-ok').taskId).toBe('T-7')
+    expect(w.storeSeed[`mainTask:${w.sessionId}`]).toBe('T-7')
+  })
+
+  describe('mainTaskId follows the card (T-51)', () => {
+    const taskGets = (w: World, id: string) => w.hub.calls.filter(c => c.method === 'GET' && c.path === `/v1/tasks/${id}`)
+    const calledTask = (w: World, id: string) => asEvent('tool.called', w).find(e => e.data.toolUseId === id)!.data.taskId
+
+    test('clears the tag and the stored key once the hub says the card left in_progress, then stops tagging', async ($, on) => {
+      const w = await boot($, on, { tasks: [{ id: 'T-7', title: 'Mine', status: 'next' }] })
+      await $.tool.call({ tool: 'mcp__helm__task', action: 'work', id: 'T-7', tool_use_id: 'tu-w1' } as any)
+      await $.tool.call({ tool: 'Read', file_path: '/r/a.ts', tool_use_id: 'tu-t1' } as any)
+      expect(w.hub.tasks[0].status).toBe('in_progress')
+      w.hub.tasks[0].status = 'done' // moved in the web UI
+      await w.clock.advance(15000)
+      await w.clock.settle()
+      expect(w.storeSeed[`mainTask:${w.sessionId}`]).toBeNull()
+      await $.tool.call({ tool: 'Read', file_path: '/r/b.ts', tool_use_id: 'tu-t2' } as any)
+      await tick(w)
+      expect(calledTask(w, 'tu-t1')).toBe('T-7')
+      expect(calledTask(w, 'tu-t2')).toBeUndefined()
+    })
+
+    test('keeps the tag while the card stays in_progress', async ($, on) => {
+      const w = await boot($, on, { tasks: [{ id: 'T-7', title: 'Mine', status: 'next' }] })
+      await $.tool.call({ tool: 'mcp__helm__task', action: 'work', id: 'T-7', tool_use_id: 'tu-w2' } as any)
+      await w.clock.advance(30000)
+      await w.clock.settle()
+      expect(taskGets(w, 'T-7').length).toBeGreaterThan(0)
+      await $.tool.call({ tool: 'Read', file_path: '/r/c.ts', tool_use_id: 'tu-t3' } as any)
+      await tick(w)
+      expect(calledTask(w, 'tu-t3')).toBe('T-7')
+      expect(w.storeSeed[`mainTask:${w.sessionId}`]).toBe('T-7')
+    })
+
+    test('with no tag set, no card is ever fetched', async ($, on) => {
+      const w = await boot($, on)
+      for (let i = 0; i < 20; i++) await tick(w)
+      expect(w.hub.calls.filter(c => /^\/v1\/tasks\/T-/.test(c.path))).toHaveLength(0)
+    })
+
+    test('adds no request per tool call: checks are throttled to one per 12 s', async ($, on) => {
+      const w = await boot($, on, { tasks: [{ id: 'T-7', title: 'Mine', status: 'next' }] })
+      await $.tool.call({ tool: 'mcp__helm__task', action: 'work', id: 'T-7', tool_use_id: 'tu-w3' } as any)
+      const before = taskGets(w, 'T-7').length
+      // 50 tool calls in one go and a few ticks (4.5 s): not one extra request
+      for (let i = 0; i < 50; i++) await $.tool.call({ tool: 'Read', file_path: `/r/n${i}.ts`, tool_use_id: `tu-bulk-${i}` } as any)
+      for (let i = 0; i < 3; i++) await tick(w)
+      expect(taskGets(w, 'T-7').length).toBe(before)
+      // 60 s of ticks: at most one check per 12 s
+      for (let i = 0; i < 40; i++) await tick(w)
+      const checks = taskGets(w, 'T-7').length - before
+      expect(checks).toBeGreaterThan(0)
+      expect(checks).toBeLessThanOrEqual(6)
+    })
+
+    test('a work call on a card that is not in progress moves it to in_progress and tags it', async ($, on) => {
+      const w = await boot($, on, { tasks: [{ id: 'T-8', title: 'Later', status: 'later' }] })
+      await $.tool.call({ tool: 'mcp__helm__task', action: 'work', id: 'T-8', tool_use_id: 'tu-w4' } as any)
+      expect(w.hub.calls.find(c => c.method === 'PATCH' && c.path === '/v1/tasks/T-8')!.body).toEqual({ status: 'in_progress' })
+      expect(w.storeSeed[`mainTask:${w.sessionId}`]).toBe('T-8')
+    })
+
+    test('a hub that is down or erroring keeps the tag; a card the hub no longer knows (404) clears it', async ($, on) => {
+      const w = await boot($, on, { tasks: [{ id: 'T-7', title: 'Mine', status: 'next' }] })
+      await $.tool.call({ tool: 'mcp__helm__task', action: 'work', id: 'T-7', tool_use_id: 'tu-w5' } as any)
+      w.hub.state.up = false
+      for (let i = 0; i < 20; i++) await tick(w)
+      expect(w.storeSeed[`mainTask:${w.sessionId}`]).toBe('T-7')
+      w.hub.state.up = true
+      w.hub.tasks.splice(0) // a replaced hub that no longer has the card
+      for (let i = 0; i < 20; i++) await tick(w)
+      expect(w.storeSeed[`mainTask:${w.sessionId}`]).toBeNull()
+    })
+
+    test('a tag restored from the store on session.start is verified on the first tick', async ($, on) => {
+      const w = await boot($, on, { start: false, tasks: [{ id: 'T-7', title: 'Mine', status: 'review' }] })
+      w.storeSeed[`mainTask:${w.sessionId}`] = 'T-7'
+      await $.session.start({ cwd: '/work/proj', surface: null, isInteractive: true })
+      await w.clock.settle()
+      for (let i = 0; i < 3; i++) await tick(w)
+      expect(w.storeSeed[`mainTask:${w.sessionId}`]).toBeNull()
+    })
+  })
+
   test('list returns one line per task, or a placeholder', async ($, on) => {
     const w = await boot($, on, { tasks: [{ id: 'T-1', title: 'First', status: 'review' }] })
     const r: any = await $.tool.call({ tool: 'mcp__helm__task', action: 'list', tool_use_id: 'tu-list' } as any)
@@ -624,6 +738,113 @@ describe('jobs', () => {
     expect(data.error).toContain('api-error')
   })
 
+  test('Studio: a doc_draft job runs sonnet with the JSON-blocks prompt and reports the JSON', async ($, on) => {
+    const w = await boot($, on)
+    const reply = '```json\n{"blocks":[{"type":"h1","text":"Brief"},{"type":"p","text":"Hello."}]}\n```'
+    w.engine.modelResult = { isAnswered: true, text: reply, usage: { input_tokens: 900, output_tokens: 300 } }
+    w.hub.jobs.push({ id: 'J-20', kind: 'doc_draft', taskId: null, input: { docId: 'D-1', prompt: 'a brief about caching', title: 'Brief' } })
+    await tick(w)
+    expect(w.modelCalls).toHaveLength(1)
+    expect(w.modelCalls[0]).toMatchObject({ model: 'sonnet', maxTokens: 6000 })
+    expect(w.modelCalls[0].system).toContain('{"blocks":[...]}')
+    expect(w.modelCalls[0].prompt).toContain('a brief about caching')
+    const data = asEvent('job.result', w).find(e => e.data.jobId === 'J-20')!.data
+    expect(data.ok).toBe(true)
+    expect(JSON.parse(data.text).blocks).toHaveLength(2)
+    // metered like the other jobs, as work the user asked for: sonnet pricing (3 in / 15 out per Mtok)
+    const usage = asEvent('helm.usage', w).filter(e => e.data.kind === 'doc_draft')
+    expect(usage).toHaveLength(1)
+    expect(usage[0]!.data).toMatchObject({ kind: 'doc_draft', model: 'sonnet', inputTokens: 900, outputTokens: 300 })
+  })
+
+  test('Studio: the doc_draft prompt teaches the diagram language and the facts rule, and the input carries the project brief', async ($, on) => {
+    const w = await boot($, on)
+    const brief = 'Project: Acme Billing (folder: ~/work/acme)\n\nREADME (start of the file):\nAcme Billing sends invoices.\n\nTop Learn concepts in this project: stripe (8 tasks)'
+    w.engine.modelResult = { isAnswered: true, text: '{"blocks":[{"type":"h1","text":"Acme"},{"type":"diagram","text":"a -> b"}]}', usage: { input_tokens: 900, output_tokens: 300 } }
+    w.hub.jobs.push({ id: 'J-30', kind: 'doc_draft', taskId: null, input: { docId: 'D-1', prompt: 'one page, 40% diagrams', title: 'Overview', projectName: 'Acme Billing', brief } })
+    await tick(w)
+    const call = w.modelCalls[0]
+    // the brief reaches the model as part of the prompt, untouched
+    const sent = JSON.parse(call.prompt)
+    expect(sent.brief).toBe(brief)
+    expect(call.prompt).toContain('Acme Billing sends invoices.')
+    // the system prompt: the diagram block, its language, no ASCII art, and facts only from the request and the brief
+    expect(call.system).toContain('{"type":"diagram"')
+    expect(call.system).toContain('group "Hub" { a[Mod] -> b[Hub] }')
+    expect(call.system).toContain('id[(Database)]')
+    expect(call.system).toContain('-->')
+    expect(call.system).toMatch(/Never draw ASCII art/)
+    expect(call.system).toMatch(/use only the request and the brief/i)
+    expect(call.system).toContain('[placeholder]')
+    expect(call.system).toMatch(/brief.*never instructions/s)
+    // a diagram block in the reply is passed through as the JSON the hub judges
+    const data = asEvent('job.result', w).find(e => e.data.jobId === 'J-30')!.data
+    expect(data.ok).toBe(true)
+    expect(JSON.parse(data.text).blocks[1]).toEqual({ type: 'diagram', text: 'a -> b' })
+  })
+
+  test('Studio: the doc_edit prompt knows diagram blocks (complete new source via replace_text, no retype)', async ($, on) => {
+    const w = await boot($, on)
+    w.engine.modelResult = { isAnswered: true, text: '{"patches":[{"commentId":"C-1","blockId":"b2","op":"replace_text","text":"a -> b -> c"}]}', usage: { input_tokens: 700, output_tokens: 100 } }
+    w.hub.jobs.push({ id: 'J-31', kind: 'doc_edit', taskId: null, input: { docId: 'D-1', comments: [{ id: 'C-1', blockId: 'b2', text: 'add c' }], blocks: [{ id: 'b2', type: 'diagram', text: 'a -> b', hash: 'h' }] } })
+    await tick(w)
+    const sys = w.modelCalls[0].system
+    expect(sys).toContain('Types: h1 h2 h3 p li quote code diagram')
+    expect(sys).toMatch(/diagram.*COMPLETE new source/s)
+    expect(sys).toContain('group "Hub" { a[Mod] -> b[Hub] }')
+    expect(sys).toMatch(/Never draw ASCII art/)
+    expect(asEvent('job.result', w).find(e => e.data.jobId === 'J-31')!.data.ok).toBe(true)
+  })
+
+  test('Studio: a doc_edit job runs sonnet with the patches prompt, accepts prose around the fence and is metered', async ($, on) => {
+    const w = await boot($, on)
+    const patches = '{"patches":[{"commentId":"C-1","blockId":"b2","op":"replace_text","text":"New."},{"commentId":"C-2","blockId":"b4","op":"retype","type":"h2"}]}'
+    w.engine.modelResult = { isAnswered: true, text: `Here you go:\n\`\`\`json\n${patches}\n\`\`\`\nDone.`, usage: { input_tokens: 1500, output_tokens: 200 } }
+    w.hub.jobs.push({ id: 'J-21', kind: 'doc_edit', taskId: null, input: { docId: 'D-1', comments: [{ id: 'C-1', blockId: 'b2', text: 'shorter' }], blocks: [{ id: 'b2', type: 'p', text: 'Old.', hash: 'abc' }] } })
+    await tick(w)
+    expect(w.modelCalls[0]).toMatchObject({ model: 'sonnet', maxTokens: 2500 })
+    expect(w.modelCalls[0].system).toContain('replace_text')
+    expect(w.modelCalls[0].system).toContain('retype')
+    const data = asEvent('job.result', w).find(e => e.data.jobId === 'J-21')!.data
+    expect(data).toEqual({ jobId: 'J-21', ok: true, text: patches }) // only the JSON goes to the hub
+    expect(asEvent('helm.usage', w).filter(e => e.data.kind === 'doc_edit')).toHaveLength(1)
+  })
+
+  test('Studio: a reply that is not JSON, is cut off, or has an empty list becomes a failed job, still metered', async ($, on) => {
+    const w = await boot($, on)
+    w.engine.modelResult = { isAnswered: true, text: '{"blocks":[{"type":"p","text":"cut off', usage: { input_tokens: 800, output_tokens: 4000 } }
+    w.hub.jobs.push({ id: 'J-22', kind: 'doc_draft', input: { prompt: 'x' } })
+    await tick(w)
+    let d = asEvent('job.result', w).find(e => e.data.jobId === 'J-22')!.data
+    expect(d.ok).toBe(false)
+    expect(d.error).toContain('not valid JSON')
+    expect(asEvent('helm.usage', w).filter(e => e.data.kind === 'doc_draft')).toHaveLength(1)
+    w.engine.modelResult = { isAnswered: true, text: 'Sure! I changed the second paragraph.' }
+    w.hub.jobs.push({ id: 'J-23', kind: 'doc_edit', input: { comments: [] } })
+    await tick(w)
+    d = asEvent('job.result', w).find(e => e.data.jobId === 'J-23')!.data
+    expect(d.ok).toBe(false)
+    expect(d.error).toContain('not valid JSON')
+    w.engine.modelResult = { isAnswered: true, text: '{"patches":[]}' }
+    w.hub.jobs.push({ id: 'J-24', kind: 'doc_edit', input: { comments: [] } })
+    await tick(w)
+    d = asEvent('job.result', w).find(e => e.data.jobId === 'J-24')!.data
+    expect(d.ok).toBe(false)
+    expect(d.error).toContain('"patches"')
+  })
+
+  test('Studio: an in-flight doc_edit job survives a reload (it is re-run on session.start)', async ($, on) => {
+    const w = await boot($, on, { start: false })
+    w.storeSeed[`inflight-jobs:${w.sessionId}`] = [{ id: 'J-95', kind: 'doc_edit', input: { docId: 'D-7' } }]
+    w.engine.modelResult = { isAnswered: true, text: '{"patches":[{"commentId":"C-1","op":"reply","text":"no"}]}' }
+    await $.session.start({ cwd: '/work/proj', surface: null, isInteractive: true })
+    await w.clock.settle()
+    await tick(w)
+    expect(w.modelCalls.some(c => String(c.prompt).includes('D-7'))).toBe(true)
+    expect(asEvent('job.result', w).find(e => e.data.jobId === 'J-95')!.data.ok).toBe(true)
+    expect(w.storeSeed[`inflight-jobs:${w.sessionId}`]).toEqual([])
+  })
+
   test('an unknown job kind fails without calling the model', async ($, on) => {
     const w = await boot($, on)
     w.hub.jobs.push({ id: 'J-4', kind: 'mystery', input: {} })
@@ -649,6 +870,13 @@ describe('outbox delivery', () => {
     expect(new Set(seqs).size).toBe(seqs.length)
     expect(mine[0]!.type).toBe('session.started')
     expect(mine[0]!.data).toMatchObject({ cwd: '/work/proj', title: 'proj', model: 'opus' })
+  })
+
+  test('session.started names the mod copy that runs (version, root, installed or dev) so a stale installed copy is visible (T-95)', async ($, on) => {
+    const w = await boot($, on)
+    const started = w.hub.events.find(e => e.sessionId === w.sessionId && e.type === 'session.started')!
+    expect(started.data.mod).toMatchObject({ version: '9.9.9', installed: false })
+    expect(typeof started.data.mod.root).toBe('string')
   })
 
   test('events queued while the hub is down are delivered once it is back', async ($, on) => {
@@ -755,18 +983,19 @@ describe('note replies', () => {
     expect(replies(w)).toHaveLength(0)
   })
 
-  test('reply maps are saved under replies:<sessionId> by the 2 s timer', async ($, on) => {
+  test('reply maps are saved under replies:<sessionId> right at turn.start, not on a timer', async ($, on) => {
     const w = await boot($, on, { taskDetail: taskDetail('ag-rep-save') as any })
     w.agentList.value = [{ id: 'ag-rep-save', status: 'running' }]
     w.hub.inbox.push({ id: 'N-60', target: { kind: 'task', id: 'T-5' }, text: 'hi' })
     await tick(w)
     await $.turn.start({ text: 'Helm note (N-61):\nx', turnId: 'rt-save' } as any)
-    expect(w.storeSets.filter(s => s.key === `replies:${w.sessionId}`)).toHaveLength(0)
-    await w.clock.advance(2100)
-    await w.clock.settle()
+    // no timer has run since turn.start, and a reload now (N-74, N-81) must still find the map
     const saved = w.storeSets.filter(s => s.key === `replies:${w.sessionId}`).at(-1)!.value
     expect(saved.turns).toContainEqual(['rt-save', ['N-61']])
-    expect(saved.agents).toContainEqual(['ag-rep-save', ['N-60']])
+    expect(saved.notes.map((n: any) => n[0])).toContain('N-61')
+    await w.clock.advance(2100)
+    await w.clock.settle()
+    expect(w.storeSets.filter(s => s.key === `replies:${w.sessionId}`).at(-1)!.value.agents).toContainEqual(['ag-rep-save', ['N-60']])
   })
 
   test('saved reply maps are restored on session.start, so a reload still answers the note', async ($, on) => {
@@ -781,6 +1010,236 @@ describe('note replies', () => {
       { noteId: 'N-70', text: 'back again' },
       { noteId: 'N-71', text: 'agent back' },
     ])
+  })
+
+  // ---- T-68: robust capture of session-note replies ----
+  const user = (text: string) => ({ role: 'user', text, toolUses: [] })
+  const toolResult = () => ({ role: 'user', text: '', toolUses: [], toolResults: [{ tool_use_id: 'tu', text: 'ok', isError: false }] })
+  const asst = (text: string, tool = false) => ({ role: 'assistant', text, toolUses: tool ? [{ id: 'tu', name: 'Bash' }] : [] })
+  const note = (w: World, id: string, text = 'hello') => w.hub.inbox.push({ id, target: { kind: 'session', id: w.sessionId }, text })
+  const idle = async (w: World, ms = 12000) => {
+    await w.clock.advance(ms)
+    await w.clock.settle()
+  }
+  const textOf = (w: World, id: string) => replies(w).filter(e => e.data.noteId === id).map(e => e.data.text)
+
+  test('reload right after turn.start (N-81): the map was saved at once, so the restored mod answers it', async ($, on) => {
+    const w = await boot($, on)
+    note(w, 'N-300')
+    await tick(w)
+    await $.turn.start({ text: w.submitted[0].text, turnId: 'rt-300' } as any)
+    // simulate the reload: module state is dropped, only the store survives
+    const kept = w.storeSeed[`replies:${w.sessionId}`]
+    expect(kept.turns).toContainEqual(['rt-300', ['N-300']])
+    expect(kept.notes.map((n: any) => n[0])).toContain('N-300')
+    await $.session.start({ cwd: '/work/proj', surface: null, isInteractive: true })
+    await w.clock.settle()
+    await $.turn.complete(turn({ turnId: 'rt-300', answer: 'plain text answer' }) as any)
+    await tick(w)
+    expect(textOf(w, 'N-300')).toEqual(['plain text answer'])
+  })
+
+  test('N-84/N-85: notification turn, a note turn reloaded 0.4 s after turn.start, the next note queued at once, reloaded again', async ($, on) => {
+    const w = await boot($, on)
+    const reload = async () => { await $.session.start({ cwd: '/work/proj', surface: null, isInteractive: true }); await w.clock.settle() }
+    // 1. a background-agent notification turn runs first
+    await $.turn.start({ text: '<task-notification>agent finished</task-notification>', turnId: 'rt-n84-notif' } as any)
+    await $.turn.complete(turn({ turnId: 'rt-n84-notif', answer: 'The agent finished.' }) as any)
+    // 2. N-84 delivered; its turn starts, then the mod reloads
+    note(w, 'N-384'); await tick(w)
+    await $.turn.start({ text: w.submitted[0].text, turnId: 'rt-n84' } as any)
+    await reload()
+    // 3. N-85 arrives while N-84's turn is still running; reload again
+    note(w, 'N-385'); await tick(w)
+    await reload()
+    await $.turn.complete(turn({ turnId: 'rt-n84', answer: 'Plain text answer to N-84.' }) as any)
+    await $.turn.start({ text: w.submitted[1].text, turnId: 'rt-n85' } as any)
+    await reload()
+    await $.turn.complete(turn({ turnId: 'rt-n85', answer: 'Started the builder.' }) as any)
+    await tick(w)
+    expect(textOf(w, 'N-384')).toEqual(['Plain text answer to N-84.'])
+    expect(textOf(w, 'N-385')).toEqual(['Started the builder.'])
+  })
+
+  test('the reply is saved to the outbox as it is produced, so a reload within 2 s cannot lose it', async ($, on) => {
+    const w = await boot($, on)
+    await $.turn.start({ text: 'Helm note (N-301):\nx', turnId: 'rt-301' } as any)
+    await $.turn.complete(turn({ turnId: 'rt-301', answer: 'quick' }) as any)
+    const outbox = w.storeSeed[`outbox:${w.sessionId}`] as Ev[]
+    expect(outbox.some(e => e.type === 'note.reply' && e.data.noteId === 'N-301')).toBe(true)
+  })
+
+  test('a multi-step turn (tool calls, then text) replies with the final answer', async ($, on) => {
+    const w = await boot($, on)
+    await $.turn.start({ text: 'Helm note (N-302):\nstop the tasks', turnId: 'rt-302' } as any)
+    await $.turn.complete(turn({ turnId: 'rt-302', answer: 'Stopped both builders.' }) as any)
+    await tick(w)
+    expect(textOf(w, 'N-302')).toEqual(['Stopped both builders.'])
+  })
+
+  test('turn.start lost to a reload: the reply is recovered from the transcript (text after the last tool call)', async ($, on) => {
+    const w = await boot($, on)
+    note(w, 'N-303', 'safely stop the ongoing tasks')
+    await tick(w)
+    expect(textOf(w, 'N-303')).toEqual([])
+    w.engine.messages = [
+      user('earlier prompt'), asst('earlier answer'),
+      user(w.submitted[0].text),
+      asst('Stopping now.', true), toolResult(), asst('', true), toolResult(),
+      asst('Both stopped.'), asst('Anything else?'),
+    ]
+    await idle(w)
+    expect(textOf(w, 'N-303')).toEqual(['Both stopped.\n\nAnything else?'])
+    // answered once, and no longer awaited
+    await idle(w, 30000)
+    expect(textOf(w, 'N-303')).toHaveLength(1)
+  })
+
+  test('several notes folded into one turn, and notifications in between, each get their own turn\'s reply', async ($, on) => {
+    const w = await boot($, on)
+    note(w, 'N-310'); note(w, 'N-311'); note(w, 'N-312')
+    await tick(w)
+    w.engine.messages = [
+      user('Helm note (N-310):\nfirst\nHelm note (N-311):\nsecond'), asst('answers to both'),
+      user('<task-notification>background task finished</task-notification>'), asst('The task finished.'),
+      user('Helm note (N-312):\nthird'), asst('looking', true), toolResult(), asst('third answer'),
+    ]
+    await idle(w)
+    expect(textOf(w, 'N-310')).toEqual(['answers to both'])
+    expect(textOf(w, 'N-311')).toEqual(['answers to both'])
+    expect(textOf(w, 'N-312')).toEqual(['third answer'])
+  })
+
+  test('a note that entered a running turn as its own prompt shares that turn\'s reply', async ($, on) => {
+    const w = await boot($, on)
+    note(w, 'N-313'); note(w, 'N-314')
+    await tick(w)
+    w.engine.messages = [user('Helm note (N-313):\na'), user('Helm note (N-314):\nb'), asst('did a', true), toolResult(), asst('did both')]
+    await idle(w)
+    expect(textOf(w, 'N-313')).toEqual(['did both'])
+    expect(textOf(w, 'N-314')).toEqual(['did both'])
+  })
+
+  test('a note submitted while a turn runs waits for the turn, then binds to its own turn', async ($, on) => {
+    const w = await boot($, on)
+    await $.turn.start({ text: 'a long normal prompt', turnId: 'rt-run' } as any)
+    note(w, 'N-320')
+    await tick(w)
+    await idle(w, 200000) // a long turn, far past every grace period: nothing may be guessed while it runs
+    expect(textOf(w, 'N-320')).toEqual([])
+    await $.turn.complete(turn({ turnId: 'rt-run', answer: 'the long answer' }) as any)
+    await $.turn.start({ text: 'Helm note (N-320):\nhello', turnId: 'rt-next' } as any)
+    await idle(w, 30000)
+    expect(textOf(w, 'N-320')).toEqual([]) // its turn is bound and running
+    await $.turn.complete(turn({ turnId: 'rt-next', answer: 'hi there' }) as any)
+    await tick(w)
+    expect(textOf(w, 'N-320')).toEqual(['hi there'])
+  })
+
+  test('a notification turn between a note and its turn does not answer the note', async ($, on) => {
+    const w = await boot($, on)
+    note(w, 'N-330')
+    await tick(w)
+    await $.turn.start({ text: '<task-notification>done</task-notification>', turnId: 'rt-notif' } as any)
+    await $.turn.complete(turn({ turnId: 'rt-notif', answer: 'notification reply' }) as any)
+    await tick(w)
+    expect(textOf(w, 'N-330')).toEqual([])
+    await $.turn.start({ text: 'Helm note (N-330):\nx', turnId: 'rt-330' } as any)
+    await $.turn.complete(turn({ turnId: 'rt-330', answer: 'the real reply' }) as any)
+    await tick(w)
+    expect(textOf(w, 'N-330')).toEqual(['the real reply'])
+  })
+
+  test('an empty answer on a note turn is filled from the transcript, else the placeholder', async ($, on) => {
+    const w = await boot($, on)
+    w.engine.messages = [user('Helm note (N-340):\nx'), asst('text only in the transcript')]
+    await $.turn.start({ text: 'Helm note (N-340):\nx', turnId: 'rt-340' } as any)
+    await $.turn.complete(turn({ turnId: 'rt-340', answer: '' }) as any)
+    await tick(w)
+    expect(textOf(w, 'N-340')).toEqual(['text only in the transcript'])
+  })
+
+  test('a turn that is still mid tool loop is not read as a reply (stale bound turn after a reload)', async ($, on) => {
+    const w = await boot($, on, { start: false })
+    w.storeSeed[`replies:${w.sessionId}`] = { turns: [['rt-gone', ['N-350']]], agents: [], notes: [['N-350', { at: 1_800_000_000_000, turnId: 'rt-gone', boundAt: 1_800_000_000_000 }]] }
+    await $.session.start({ cwd: '/work/proj', surface: null, isInteractive: true })
+    await w.clock.settle()
+    w.engine.messages = [user('Helm note (N-350):\nx'), asst('working', true)]
+    await idle(w, 90000)
+    expect(textOf(w, 'N-350')).toEqual([])
+    // the turn finished while the mod was gone: its text-final message is now the end of the transcript
+    w.engine.messages = [user('Helm note (N-350):\nx'), asst('working', true), toolResult(), asst('finished')]
+    await idle(w, 5000)
+    expect(textOf(w, 'N-350')).toEqual(['finished'])
+  })
+
+  test('never waits forever: the note is marked "replied in session" when the transcript cannot give the reply', async ($, on) => {
+    const w = await boot($, on)
+    note(w, 'N-360'); note(w, 'N-361')
+    await tick(w)
+    w.engine.messages = [user('Helm note (N-360):\nx'), asst('', true), toolResult(), asst('')] // answered with tools only
+    await idle(w, 20000)
+    expect(textOf(w, 'N-360')).toEqual(['(Claude replied in the session, but the reply could not be captured here. Open the session to read it.)'])
+    expect(textOf(w, 'N-361')).toEqual([]) // not in the transcript yet: still within the grace period
+    await idle(w, 100000)
+    expect(textOf(w, 'N-361')).toHaveLength(1)
+    expect(textOf(w, 'N-361')[0]).toContain('replied in the session')
+  })
+
+  test('the transcript being unavailable still ends the wait with the notice', async ($, on) => {
+    const w = await boot($, on)
+    w.engine.messages = () => { throw new Error('no transcript') }
+    note(w, 'N-362')
+    await tick(w)
+    await idle(w, 120000)
+    expect(textOf(w, 'N-362')).toHaveLength(1)
+    expect(textOf(w, 'N-362')[0]).toContain('replied in the session')
+  })
+
+  test('a late real reply replaces the notice and a rejected prompt is not awaited', async ($, on) => {
+    const w = await boot($, on)
+    w.engine.submitResult = { drop: 'blocked by hook' }
+    note(w, 'N-370')
+    await tick(w)
+    expect(asEvent('note.result', w).find(e => e.data.noteId === 'N-370')!.data.ok).toBe(false)
+    await idle(w, 200000)
+    expect(textOf(w, 'N-370')).toEqual([])
+  })
+})
+
+describe('/compact notes', () => {
+  const sessionNote = (id: string, text: string) => ({ id, target: { kind: 'session', id: 'x' }, text })
+  const result = (w: World, id: string) => asEvent('note.result', w).find(e => e.data.noteId === id)?.data
+
+  test('compacts between turns, then reports ran and replies', async ($, on) => {
+    const w = await boot($, on)
+    w.hub.inbox.push(sessionNote('N-90', '/compact keep the plan'))
+    await tick(w)
+    await tick(w)
+    expect(w.compacts).toEqual([{ instructions: 'keep the plan' }])
+    expect(result(w, 'N-90')).toMatchObject({ ok: true, via: 'compact' })
+    expect(asEvent('note.reply', w).find(e => e.data.noteId === 'N-90')!.data.text).toContain('Compacted')
+    expect(w.storeSeed[`compacts:${w.sessionId}`]).toEqual([])
+  })
+
+  test('a queued compact survives a reload (restored from the store on session.start)', async ($, on) => {
+    const w = await boot($, on, { start: false })
+    w.storeSeed[`compacts:${w.sessionId}`] = [{ noteId: 'N-91' }]
+    await $.session.start({ cwd: '/work/proj', surface: null, isInteractive: true })
+    await w.clock.settle()
+    await tick(w)
+    await tick(w)
+    expect(w.compacts).toHaveLength(1)
+    expect(result(w, 'N-91')).toMatchObject({ ok: true, via: 'compact' })
+  })
+
+  test('a failing compaction fails the note visibly', async ($, on) => {
+    const w = await boot($, on)
+    w.engine.compactResult = () => { throw new Error('boom') }
+    w.hub.inbox.push(sessionNote('N-92', '/compact'))
+    await tick(w)
+    await tick(w)
+    expect(result(w, 'N-92')).toMatchObject({ ok: false, via: 'compact' })
   })
 })
 
@@ -861,6 +1320,39 @@ describe('v0.4: cheap answers', () => {
     await tick(w)
     expect(w.modelCalls).toHaveLength(0)
     expect(w.spawned[0].prompt).toContain('Attached files (open them with the Read tool):\n- /h/attachments/A-3/a.png')
+  })
+
+  test('a resume note spawns a builder with the brief, the previous agent\'s trail, files and the stopped-mid-task instruction', async ($, on) => {
+    const detail = {
+      'T-5': {
+        task: { id: 'T-5', title: 'Fix login', description: 'the original brief', recap: null, filesChanged: ['a.ts', 'b.ts'], interrupted: true },
+        agent: { id: 'ag-res-1', description: 'Fix login', status: 'failed', toolCount: 7 },
+        activity: [
+          { kind: 'status', tool: null, summary: 'Agent failed: ended: aborted' },
+          { kind: 'tool', tool: 'Edit', summary: 'Edit a.ts' },
+          { kind: 'tool', tool: 'Read', summary: 'Read b.ts' },
+        ],
+      },
+    }
+    const w = await boot($, on, { taskDetail: detail as any })
+    w.agentList.value = [{ id: 'ag-res-1', status: 'failed' }]
+    w.engine.spawnResult = { model: 'sonnet', agentId: 'ag-res-2' }
+    w.hub.inbox.push(taskNote('N-70', '![helm:resume] Resume Helm task T-5 \u201cFix login\u201d: its agent was stopped mid-task.\n\nNotes from the user:\n- prefer small commits'))
+    await tick(w)
+    expect(w.modelCalls).toHaveLength(0)
+    expect(w.spawned).toHaveLength(1)
+    const sp = w.spawned[0]
+    expect(sp.subagentType ?? sp.subagent_type).toBe('helm:builder')
+    expect(sp.description).toBe('[helm:T-5] resume')
+    expect(sp.prompt).toContain('the original brief')
+    expect(sp.prompt).toContain('Files touched so far: a.ts, b.ts')
+    expect(sp.prompt.indexOf('- tool Read: Read b.ts')).toBeLessThan(sp.prompt.indexOf('- tool Edit: Edit a.ts')) // oldest first
+    expect(sp.prompt).toContain('- status: Agent failed: ended: aborted')
+    expect(sp.prompt).toContain('You were stopped mid-task. First inspect the working tree (`git status`/`git diff`)')
+    expect(sp.prompt).toContain('Do not redo finished parts or revert others\' work.')
+    expect(sp.prompt).toContain('prefer small commits')
+    expect(sp.prompt).not.toContain('[helm:resume]')
+    expect(noteResult(w, 'N-70')).toMatchObject({ ok: true, via: 'followup_spawn' })
   })
 
   test('a session note with attachments gets the same suffix through prompt.submit', async ($, on) => {
@@ -975,6 +1467,91 @@ describe('v0.4: free recaps', () => {
     await tick(w)
     await tick(w)
     expect(w.modelCalls).toHaveLength(1)
+  })
+})
+
+describe('T-76: recap pipeline robustness', () => {
+  const turn = (extra: Record<string, unknown>) => ({ turnId: 't', durationMs: 5, isAborted: false, answer: '', reason: 'answer', ...extra })
+  const agentsOpt = (id: string, taskId: string) => [{ id, taskId, description: 'Write tests' }]
+  // trimmed copies of real builder reports from the live board
+  const REAL_PLAIN = `DONE: "Create" now queues a \`doc_draft\` job and "Apply all" queues one \`doc_edit\` job. The hub judges every patch, and all valid patches land as one version. The hub suite passes (316 tests).
+
+HOW:
+- **Hub:** T-58 had already built the doc tables, so I extended them.
+  - \`judgePatches\` now accepts \`replace_text\` and \`delete\`.
+- **Mod:**
+  - Prompts are rewritten for JSON blocks.
+
+FILES: hub/docs.mjs, \`hooks/register.ts\`
+LEARNED: Never let a model write straight into your data. Ask it for structured proposals, then let plain code check each one.
+TAGS: llm-jobs, event-sourcing, testing`
+  const REAL_BOLD = `**DONE:** Fixed the lost queue.\n\n**HOW**:\n1. Saved it to the store.\n2. Restored it on start.\n\n**LEARNED**: State held only in memory dies with the process.\n**TAGS:** Persistence`
+
+  test('a real multi-line report with bullets in HOW parses into one clean recap', async ($, on) => {
+    const w = await boot($, on, { agents: agentsOpt('ag-t76-1', 'T-91') })
+    await $.turn.complete(turn({ agentId: 'ag-t76-1', answer: REAL_PLAIN }) as any)
+    await tick(w)
+    await tick(w)
+    expect(w.modelCalls).toHaveLength(0)
+    const rec = asEvent('recap.generated', w).find(e => e.data.taskId === 'T-91')!.data
+    expect(rec.what).toBe('"Create" now queues a doc_draft job and "Apply all" queues one doc_edit job. The hub judges every patch, and all valid patches land as one version. The hub suite passes (316 tests).')
+    expect(rec.how).toBe('Hub: T-58 had already built the doc tables, so I extended them. judgePatches now accepts replace_text and delete. Mod: Prompts are rewritten for JSON blocks.')
+    expect(rec.learned).toBe('Never let a model write straight into your data. Ask it for structured proposals, then let plain code check each one.')
+    expect(rec.concepts).toEqual(['llm-jobs', 'event-sourcing', 'testing'])
+  })
+
+  test('bold labels with the colon outside, numbered HOW and a TAGS line', async ($, on) => {
+    const w = await boot($, on, { agents: agentsOpt('ag-t76-2', 'T-92') })
+    await $.turn.complete(turn({ agentId: 'ag-t76-2', answer: REAL_BOLD.replace(/\\n/g, '\n') }) as any)
+    await tick(w)
+    await tick(w)
+    expect(asEvent('recap.generated', w).find(e => e.data.taskId === 'T-92')!.data).toEqual({
+      taskId: 'T-92', what: 'Fixed the lost queue.', how: 'Saved it to the store. Restored it on start.',
+      learned: 'State held only in memory dies with the process.', concepts: ['persistence'],
+    })
+  })
+
+  test('agent.completed carries the full final report', async ($, on) => {
+    const w = await boot($, on, { agents: agentsOpt('ag-t76-3', 'T-93') })
+    await $.turn.complete(turn({ agentId: 'ag-t76-3', answer: REAL_PLAIN }) as any)
+    await tick(w)
+    const done = asEvent('agent.completed', w).find(e => e.data.agentId === 'ag-t76-3')!.data
+    expect(done.report).toBe(REAL_PLAIN)
+    expect(done.files).toEqual(['hub/docs.mjs', 'hooks/register.ts'])
+  })
+
+  test('a completion with no task yet stays queued, and the queue is saved to the store', async ($, on) => {
+    const w = await boot($, on, { agents: [] })
+    await $.turn.complete(turn({ agentId: 'ag-t76-4', answer: REAL_BOLD.replace(/\\n/g, '\n') }) as any)
+    await tick(w)
+    const saved = w.storeSets.filter(s => s.key === `recaps:${w.sessionId}`).at(-1)!.value
+    expect(saved).toHaveLength(1)
+    expect(saved[0]).toMatchObject({ agentId: 'ag-t76-4' })
+    expect(saved[0].answer).toContain('Fixed the lost queue')
+  })
+
+  test('a saved queue is restored on session.start and produces the recap after a reload', async ($, on) => {
+    const w = await boot($, on, { start: false, agents: agentsOpt('ag-t76-5', 'T-95') })
+    w.storeSeed[`recaps:${w.sessionId}`] = [{ agentId: 'ag-t76-5', answer: REAL_BOLD.replace(/\\n/g, '\n'), tries: 0 }]
+    await $.session.start({ cwd: '/work/proj', surface: null, isInteractive: true })
+    await w.clock.settle()
+    await tick(w)
+    await tick(w)
+    expect(w.modelCalls).toHaveLength(0)
+    expect(asEvent('recap.generated', w).find(e => e.data.taskId === 'T-95')!.data).toMatchObject({ what: 'Fixed the lost queue.' })
+    expect(w.storeSets.filter(s => s.key === `recaps:${w.sessionId}`).at(-1)!.value).toEqual([])
+  })
+
+  test('the hub recap job runs on haiku and returns the JSON as its result', async ($, on) => {
+    const w = await boot($, on)
+    w.engine.modelResult = { isAnswered: true, text: 'Here: {"what":"Fixed it","how":"Patched","learned":"Persist state","concepts":["state"]}', usage: { input_tokens: 100, output_tokens: 20 } }
+    w.hub.jobs.push({ id: 'J-200', kind: 'recap', taskId: 'T-5', input: { title: 'Fix login', tools: ['Edit a.ts'] } })
+    await tick(w)
+    expect(w.modelCalls[0].model).toBe('haiku')
+    const res = asEvent('job.result', w).find(e => e.data.jobId === 'J-200')!.data
+    expect(res.ok).toBe(true)
+    expect(JSON.parse(res.text as string).what).toBe('Fixed it')
+    expect(asEvent('helm.usage', w).some(e => e.data.kind === 'recap')).toBe(true)
   })
 })
 
@@ -1302,5 +1879,129 @@ describe('v0.9: workflow step runner', () => {
     const sets = w.storeSets.filter(s => s.key === key)
     expect(sets.some(s => s.value.some((x: any) => x.id === 'R-1:tr:1'))).toBe(true)
     expect(sets.some(s => s.value.some((x: any) => x.id === 'R-1:tr:2'))).toBe(false)
+  })
+})
+
+describe('T-66: git bases and path hints for diffs', () => {
+  const taskDetail = (agentId: string) => ({ 'T-5': { task: { id: 'T-5', title: 'Fix login', description: 'brief', recap: null, filesChanged: [] }, agent: { id: agentId } } })
+  const gitRun = (e: any) => {
+    const j = JSON.stringify(e)
+    const stdout = j.includes('--show-toplevel') ? '/work/proj\n' : j.includes('"HEAD"') ? 'abc1234def\n' : ''
+    return { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false }
+  }
+
+  // A plugin's own $.agent.spawn skips this mod's agent.spawn hook, so a mod spawn is found by the reconciler (heartbeat).
+  test('a mod-spawned agent (follow-up or workflow step) found by the reconciler records its git base', async ($, on) => {
+    const w = await boot($, on)
+    w.engine.processRun = gitRun
+    w.agentList.value = [
+      { id: 'ag-mod-git', status: 'running', description: '[helm:T-5] follow-up', type: 'helm:builder' },
+      { id: 'ag-other', status: 'running', description: 'unrelated agent', type: 'Explore' },
+    ]
+    await w.clock.advance(11000)
+    await w.clock.settle()
+    await tick(w)
+    const gits = asEvent('agent.git', w)
+    expect(gits).toHaveLength(1)
+    expect(gits[0]!.data).toMatchObject({ toolUseId: 'reconcile:ag-mod-git', agentId: 'ag-mod-git', root: '/work/proj', head: 'abc1234def', base: 'abc1234def', discovered: true })
+    // asked once per agent, not on every heartbeat
+    await w.clock.advance(11000)
+    await w.clock.settle()
+    await tick(w)
+    expect(asEvent('agent.git', w)).toHaveLength(1)
+  })
+
+  test('announceSpawn: a spawn that does answer an agentId is announced and queued for a base', async ($, on) => {
+    const w = await boot($, on, { taskDetail: taskDetail('ag-gone') as any })
+    w.engine.processRun = gitRun
+    w.agentList.value = [{ id: 'ag-gone', status: 'completed' }]
+    w.engine.spawnResult = { model: 'sonnet', agentId: 'ag-mod-ann' }
+    w.hub.inbox.push({ id: 'N-66', target: { kind: 'task', id: 'T-5' }, text: 'continue' })
+    await tick(w)
+    await tick(w)
+    const done = asEvent('note.result', w).find(e => e.data.noteId === 'N-66')
+    if (done?.data.agentId) { // the kit answers an id: the announce path ran
+      expect(asEvent('agent.spawned', w).some(e => e.data.toolUseId === 'mod:ag-mod-ann' && e.data.taskId === 'T-5')).toBe(true)
+      expect(asEvent('agent.git', w).find(e => e.data.toolUseId === 'mod:ag-mod-ann')?.data).toMatchObject({ agentId: 'ag-mod-ann', root: '/work/proj' })
+    } else {
+      expect(done?.data.ok).toBe(true)
+    }
+  })
+
+  test('work snapshots a git base for the task', async ($, on) => {
+    const w = await boot($, on, { tasks: [{ id: 'T-7', title: 'Mine', status: 'next' }] })
+    w.engine.processRun = gitRun
+    await $.tool.call({ tool: 'mcp__helm__task', action: 'work', id: 'T-7', tool_use_id: 'tu-work-git' } as any)
+    await tick(w)
+    expect(asEvent('task.git', w).map(e => e.data)).toEqual([expect.objectContaining({ taskId: 'T-7', root: '/work/proj', head: 'abc1234def', base: 'abc1234def' })])
+  })
+
+  test('tool.called carries the paths a Bash command names, so edits made through the shell can be attributed', async ($, on) => {
+    const w = await boot($, on)
+    await $.tool.call({ tool: 'Bash', command: "cd /work/proj && sed -i 's/a/b/' hub/http.mjs && python3 scripts/fix.py 'web/app.js' https://example.com/x.html", tool_use_id: 'tu-bash-paths' } as any)
+    await $.tool.call({ tool: 'Edit', file_path: '/work/proj/hooks/register.ts', tool_use_id: 'tu-edit-paths' } as any)
+    await tick(w)
+    const called = (id: string) => asEvent('tool.called', w).find(e => e.data.toolUseId === id)!.data
+    expect(called('tu-bash-paths').paths).toEqual(expect.arrayContaining(['/work/proj', 'hub/http.mjs', 'scripts/fix.py', 'web/app.js']))
+    expect(called('tu-bash-paths').paths).not.toContain('https://example.com/x.html')
+    expect(called('tu-edit-paths').paths).toEqual(['/work/proj/hooks/register.ts'])
+    expect(called('tu-edit-paths').files).toEqual(['/work/proj/hooks/register.ts'])
+  })
+})
+
+describe('T-52: tick watchdog generation and per-step guards', () => {
+  const sessionNote = (id: string, text: string) => ({ id, target: { kind: 'session', id: 'x' }, text })
+  const turn = (extra: Record<string, unknown>) => ({ turnId: 't', durationMs: 5, isAborted: false, answer: '', reason: 'answer', ...extra })
+  const deferred = () => { let resolve!: () => void; const promise = new Promise<void>(r => { resolve = r }); return { promise, resolve } }
+  const inboxPolls = (w: World) => w.hub.calls.filter(c => c.path === `/v1/sessions/${w.sessionId}/inbox`).length
+
+  test('an old tick resuming after the watchdog neither clears `ticking` nor re-runs a step', async ($, on) => {
+    const w = await boot($, on, { agents: [{ id: 'ag-t52', taskId: 'T-52', description: 'Tick fix' }], taskDetail: { 'T-52': { task: { id: 'T-52' }, agent: null } } })
+    // a recap job waits in the queue; its model call is held back
+    const modelGate = deferred()
+    w.engine.modelGate = () => modelGate.promise
+    w.engine.modelResult = { isAnswered: true, text: '{"what":"fixed the tick","how":"generation token","learned":"guard re-entrancy","concepts":["async"]}', usage: {} }
+    // the compaction (a host call) never returns until the test lets it
+    const compactGate = deferred()
+    w.engine.compactResult = () => compactGate.promise.then(() => ({ messages: [{ role: 'user', text: 'a', toolUses: [] }] }))
+    const answer = 'I fixed the tick watchdog.' // free text: no DONE/HOW/LEARNED, so the recap needs a model call
+    w.hub.inbox.push(sessionNote('N-t52', '/compact'))
+
+    // tick A: picks up the note, then hangs inside session.compact
+    await w.clock.advance(TICK)
+    await w.clock.advance(TICK)
+    expect(w.compacts).toHaveLength(1)
+    await $.turn.complete(turn({ agentId: 'ag-t52', answer }) as any) // a recap job is queued while A is stuck
+
+    // ticks before the watchdog (20 s) are refused
+    const before = inboxPolls(w)
+    await w.clock.advance(10000)
+    expect(inboxPolls(w)).toBe(before)
+
+    // past the watchdog a new tick (B) starts; it must not compact again, and it reaches the (held) recap model call
+    await w.clock.advance(12000)
+    expect(inboxPolls(w)).toBeGreaterThan(before)
+    expect(w.compacts).toHaveLength(1)
+    expect(w.modelCalls).toHaveLength(1)
+
+    // the stuck compaction finally resolves: tick A resumes and finishes while B is still running
+    compactGate.resolve()
+    await w.clock.advance(1)
+    const during = inboxPolls(w)
+    await w.clock.advance(TICK * 4)
+    expect(inboxPolls(w)).toBe(during) // `ticking` is still set by B: no third tick started
+    expect(w.compacts).toHaveLength(1)
+    expect(asEvent('note.result', w).filter(e => e.data.noteId === 'N-t52')).toHaveLength(1)
+    expect(asEvent('recap.generated', w).filter(e => e.data.taskId === 'T-52')).toHaveLength(0) // A's runRecaps was refused
+
+    // B finishes: it clears the flag, ticking goes on, and the recap was emitted exactly once
+    modelGate.resolve()
+    await w.clock.advance(1)
+    await w.clock.advance(TICK * 2)
+    await w.clock.settle()
+    expect(inboxPolls(w)).toBeGreaterThan(during)
+    expect(asEvent('recap.generated', w).filter(e => e.data.taskId === 'T-52')).toHaveLength(1)
+    expect(w.modelCalls).toHaveLength(1)
+    expect(w.compacts).toHaveLength(1)
   })
 })

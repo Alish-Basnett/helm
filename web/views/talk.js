@@ -14,6 +14,7 @@ import { createFloating, createBubble, loadFloat, saveFloat } from '../floating.
 import { cwdTail } from '../format.js';
 import { emptyState, modelBadge, updateModelBadge, toast } from '../ui.js';
 import { getPref, codeOn, onPrefs } from '../prefs.js';
+import { openContextMenu, closeContextMenu, isContextMenuOpen } from '../contextmenu.js';
 import { createCodeTurn, composerView, codeEditor } from '../code.js';
 
 const STATE_LABEL = { draft: 'Draft', queued: 'Queued', sending: 'Sending…', ran: 'Delivered', failed: 'Failed' };
@@ -172,9 +173,10 @@ const FLOAT_KEY = 'helm.talk.float';
 const BUBBLE_KEY = 'helm.talk.bubble';
 
 export function createTalkSheet(dock) {
-  const picker = h('select', { class: 'select talk-picker', 'aria-label': 'Session to talk to', onchange: () => choose(picker.value, true) });
+  // the session name is a plain label (drags the window); the Talk icon opens the session switcher
+  const label = h('span', { class: 'talk-label' });
+  const switcher = h('button', { class: 'icon-btn talk-switch', type: 'button', 'aria-label': 'Switch session', 'aria-haspopup': 'menu', 'aria-expanded': 'false', title: 'Switch session' }, icon('chat', 18));
   const model = modelBadge('');
-  const sub = h('div', { class: 'talk-sub mono' });
   const bodyEl = h('div', { class: 'talk-body' });
   let isOpen = false;
   let detached = false; // true = Talk lives in the floating window (open or not)
@@ -193,8 +195,7 @@ export function createTalkSheet(dock) {
   const minBtn = h('button', { class: 'icon-btn talk-min', type: 'button', 'aria-label': 'Minimise Talk to the shelf', title: 'Minimise Talk to the shelf (M minimises all)', onclick: () => requestMinimise() }, icon('minimize', 18));
   const popBtn = h('button', { class: 'icon-btn talk-pop', type: 'button', 'data-act': 'detach', onclick: () => toggleDetached() });
   const head = h('header', { class: 'sheet-head talk-head', 'data-float-drag': '' },
-    h('div', { class: 'sheet-head-top' }, h('h2', { class: 'talk-title' }, icon('chat', 16), 'Talk'), model, h('span', { class: 'spacer' }), popBtn, minBtn, closeBtn),
-    picker, sub);
+    h('div', { class: 'sheet-head-top' }, switcher, label, model, popBtn, minBtn, closeBtn));
   panel.el.append(head, bodyEl);
 
   function paintMode() {
@@ -276,24 +277,46 @@ export function createTalkSheet(dock) {
     mountTalk();
   }
 
+  /** Compact popover (contextmenu.js): sessions grouped by project, newest first, current one checked, busy as a dot. */
+  let hoverT = 0, wasOpen = false;
+  function openSwitcher(byKey) {
+    clearTimeout(hoverT);
+    if (isContextMenuOpen() || switcher.disabled) return;
+    const groups = new Map();
+    for (const x of sel.talkSessions()) { // already sorted by last used
+      if (!groups.has(x.projectId)) groups.set(x.projectId, []);
+      groups.get(x.projectId).push(x);
+    }
+    const items = [];
+    for (const [pid, list] of groups) {
+      items.push({ heading: sel.projectName(pid) });
+      for (const x of list) items.push({
+        label: x.title || cwdTail(x.cwd) || x.id, checked: x.id === sid, icon: x.busy ? 'dot' : undefined,
+        onSelect: () => { if (x.id !== sid) choose(x.id, true); focusTalk(); },
+      });
+    }
+    const r = switcher.getBoundingClientRect();
+    switcher.setAttribute('aria-expanded', 'true');
+    openContextMenu({ x: r.left, y: r.bottom + 4, items, restoreFocus: switcher, restoreOnSelect: false, focusFirst: byKey, onClose: () => switcher.setAttribute('aria-expanded', 'false') });
+  }
+  switcher.addEventListener('pointerenter', () => { clearTimeout(hoverT); hoverT = setTimeout(() => openSwitcher(false), 350); });
+  switcher.addEventListener('pointerleave', () => clearTimeout(hoverT));
+  switcher.addEventListener('pointerdown', () => { wasOpen = isContextMenuOpen(); }); // the menu's outside-click closes first
+  switcher.addEventListener('click', (e) => { if (wasOpen) { wasOpen = false; return; } openSwitcher(e.detail === 0); }); // detail 0 = Enter/Space
+  switcher.addEventListener('keydown', (e) => { if (e.key === 'ArrowDown') { e.preventDefault(); openSwitcher(true); } });
+
   function syncPicker() {
     const list = sel.talkSessions();
-    const multi = state.ui.projectId === 'all' && state.projects.size > 1;
-    const sig = list.map((x) => `${x.id}|${x.title}|${x.status}|${x.projectId}`).join(';') + `|${multi}`;
-    if (picker.__sig !== sig) {
-      picker.__sig = sig;
-      picker.textContent = '';
-      for (const x of list) {
-        picker.appendChild(h('option', { value: x.id }, `${multi ? sel.projectName(x.projectId) + ' · ' : ''}${x.title || cwdTail(x.cwd) || x.id}  ·  ${x.status}`));
-      }
-      if (!list.length) picker.appendChild(h('option', { value: '' }, 'No live sessions'));
-    }
-    picker.disabled = list.length === 0;
-    if (sid && picker.value !== sid) picker.value = sid;
+    const cur = sid && state.sessions.get(sid);
+    label.textContent = cur ? (cur.title || cwdTail(cur.cwd) || cur.id) : 'No live session';
+    switcher.disabled = list.length === 0;
     const s = sid && state.sessions.get(sid);
     setHidden(model, !s);
     if (s) updateModelBadge(model, s.model);
-    setText(sub, s ? `${sel.projectName(s.projectId)} · ${cwdTail(s.cwd, 3)}${s.busy ? ' · working' : ''}` : '');
+    // the old second line (project · folder · working) now lives in the tooltip so the header stays one row
+    const detail = s ? `${sel.projectName(s.projectId)} · ${cwdTail(s.cwd, 3)}${s.busy ? ' · working' : ''}` : '';
+    label.title = detail;
+    setClass(head, 'is-busy', !!(s && s.busy));
   }
 
   const focusTalk = () => { if (talk) talk.focus(); else if (win && detached) win.el.focus({ preventScroll: true }); };

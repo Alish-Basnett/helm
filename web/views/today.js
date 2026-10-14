@@ -10,6 +10,7 @@ import { api } from '../api.js';
 import { fmtUsd, fmtUsdSmall, fmtTokens, cwdTail, agentLabel, truncate, modelInfo, plural } from '../format.js';
 import { updateModelBadge, emptyState } from '../ui.js';
 import { openTask, navigate, setArgs, route } from '../router.js';
+import { bindTaskMenu } from '../taskmenu.js';
 import {
   HOUR, FIT_MIN, fmtDur, fmtDurExact, fmtClockSec, toScale, pctOf, zoomedRange, paddedFit, paintTicks, attachPanZoom, MIN_SPAN,
 } from '../axis.js';
@@ -255,6 +256,7 @@ export function mount(container, initialRoute) {
     } else if (it.kind === 'agent') {
       r.dot = h('span', { class: 'td-dot', 'aria-hidden': 'true' });
       r.tid = h('button', { class: 'td-tid mono', type: 'button' }, h('span', { class: 'sdot', 'aria-hidden': 'true' }), h('span', { class: 'td-tid-t' }));
+      bindTaskMenu(r.tid, () => state.tasks.get(r.tid.__task));
       r.title = h('span', { class: 'td-title' });
       r.badge = h('span', { class: 'badge' });
       r.bar = h('i', { class: 'td-bar-el' });
@@ -414,6 +416,7 @@ export function mount(container, initialRoute) {
     if (!t) return [h('span', {}, truncate(lg.taskId || 'agent', 32))];
     const b = h('button', { class: 'td-tid mono', type: 'button', title: `${t.id} · ${t.title} — open details and chat`, onclick: () => openTask(t.id) },
       h('span', { class: `sdot st-${t.status}`, 'aria-hidden': 'true' }), t.id);
+    bindTaskMenu(b, () => state.tasks.get(t.id));
     return [b, h('span', { class: 'td-long-t' }, truncate(t.title, 44))];
   }
 

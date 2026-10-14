@@ -43,6 +43,7 @@ const P = {
   arrowRight: '<path d="M5 12h14M13 6l6 6-6 6"/>',
   pulse: '<path d="M3 12h4l2.5-6 4 12 2.5-6H21"/>',
   command: '<path d="M4 7l6 5-6 5M12 18h8"/>',
+  dot: '<circle cx="12" cy="12" r="3.2" fill="currentColor" stroke="none"/>',
   circle: '<circle cx="12" cy="12" r="8.5"/>',
   spinner: '<path d="M12 3.5a8.5 8.5 0 1 0 8.5 8.5"/>',
   inbox: '<path d="M3.5 13l2.7-7a1.5 1.5 0 0 1 1.4-1h8.8a1.5 1.5 0 0 1 1.4 1l2.7 7v4.5a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/><path d="M3.5 13h5l1 2.5h5l1-2.5h5"/>',

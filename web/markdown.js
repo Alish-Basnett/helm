@@ -23,7 +23,9 @@ function inline(text, opts) {
   const out = [];
   let rest = String(text);
   let guard = 0;
-  while (rest && guard++ < 500) {
+  while (rest) {
+    // Safety valve against pathological input: keep whatever is left as plain text rather than dropping it.
+    if (guard++ >= 500) { out.push(...plain(rest, opts)); break; }
     const m = INLINE.exec(rest);
     if (!m) { out.push(...plain(rest, opts)); break; }
     if (m.index > 0) out.push(...plain(rest.slice(0, m.index), opts));

@@ -108,7 +108,7 @@ accepted (outbox may have trimmed) but logged.
 
 | type | data | projection |
 |---|---|---|
-| `session.started` | `{ cwd, title, model }` | upsert Session; if new and not joined, create Project named after `basename(cwd)` (reuse an existing non-archived project with that exact name **only if** the session id was previously bound to it) |
+| `session.started` | `{ cwd, title, model, mod? }` (`mod`: `{ version, root, installed }`, which copy of the mod runs; ignored by the hub) | upsert Session; if new and not joined, create Project named after `basename(cwd)` (reuse an existing non-archived project with that exact name **only if** the session id was previously bound to it) |
 | `session.heartbeat` | `{ tokens?, costUsd? }` | `lastSeenAt`, status active, tokens/costUsd when present |
 | `session.ended` | `{ reason }` | status ended; running agents of that session → failed ("session ended") |
 | `turn.started` | `{ agentId? }` | no agentId → session.busy = true |
@@ -117,7 +117,7 @@ accepted (outbox may have trimmed) but logged.
 | `agent.bound` | `{ toolUseId, agentId }` | rename pending agent id → agentId everywhere |
 | `tool.called` | `{ agentId?, toolUseId, tool, summary }` | Activity; agent (or session if no agentId) nowDoing, lastActivityAt, toolCount++; stalled → running, blocked-by-stall task → in_progress |
 | `tool.finished` | `{ agentId?, toolUseId, tool, ok, summary, files? }` | Activity; `files` appended (deduped) to task.filesChanged |
-| `agent.completed` | `{ agentId, ok, summary, tokens?, files? }` (`files` from the agent's `FILES:` report line, appended like tool.finished files) | agent done/failed; task → `review` if ok, `blocked` (reason = summary) if not |
+| `agent.completed` | `{ agentId, ok, summary, tokens?, files? }` (`files` from the agent's `FILES:` report line, appended like tool.finished files) | agent done/failed; task → `review` if ok, `blocked` (reason = summary) if not, except (T-53) a card in `later`, or `blocked` by the user (set through `PATCH /v1/tasks`, remembered as `tasks.blocked_by = 'user'`), keeps its status and reason; `interrupted`, report, files, recap and diff are still recorded, and a user-blocked card gets an activity line ("Agent finished; card kept blocked by user" / the failure). Blocks from a failure, stall or workflow have `blocked_by = null` and move as before |
 | `recap.generated` | `{ taskId, what, how, learned, concepts }` | task.recap; Activity kind recap |
 | `note.result` | `{ noteId, ok, via, error? }` | note ran/failed |
 | `reconcile` | `{ agents: { agentId, status: 'running' \| 'done' \| 'failed' }[] }` | for this session: any hub agent running but reported done/failed or missing → apply that terminal state; running in report but unknown to hub → create Agent |
@@ -264,6 +264,14 @@ Opening a v0.1 database adds the new tables/columns in place. Old events are not
   `Start Helm task T-n “<title>”.\n\nBrief:\n<description>\n\nCreate nothing new: delegate this existing task now with the Agent tool (description starting with [helm:T-n]), choosing helm:builder for code changes or helm:scout for read-only work, run it in the background, then reply in one line with what you started.`
   Allowed when status is `backlog`, `next`, `later` or `blocked`; otherwise 409. Sets task status `next`
   and `startNoteId`.
+- `POST /v1/tasks/:id/files { files: string[], root?, note?, replace? }` -> `{ task }` (T-66). Attaches files to a task (backfill); records `hub.task.files`. Relative paths resolve against `root` or the task's git root and must stay inside it (`400` otherwise). With `root` and no recorded base, HEAD becomes the base. `task.filesNote` labels how `filesChanged` was derived (null = attributed; "unattributed: ..." = full delta).
+- `POST /v1/tasks/:id/resume` → `{ note, task }` (T-70). For an **interrupted** task: `task.interrupted` is true when the
+  latest agent bound to the card ended without success (failed, killed, stopped, session ended) and the card is not
+  `done`/`archived`; `task.lastAgentId` is that agent. The note is a **task** note (so the mod spawns a follow-up
+  `helm:builder` from the hub's task record) with text `![helm:resume] Resume Helm task T-n “<title>”: …` plus any draft
+  notes; the card moves to `next` and `startNoteId` is set. 409 when the task is not interrupted, a start is already in
+  flight, or there is no live session. `/start` on an interrupted task does the same. A new agent bound to the card clears
+  `interrupted`. Stored as `tasks.interrupted` (migrated in place, back-filled from failed agents); replay-exact.
 - `Task` gains `startNoteId: string | null` (the latest start note; the UI reads its state/reply).
 - `POST /v1/tasks` accepts `start: true` → creates the task, then starts it as above; returns `{ task, note? }`
   (task is still created if no live session; the response then carries `error`).
@@ -832,3 +840,185 @@ Applying the result: the `job.result` event is the record. It sets `Concept.summ
   The Health sidebar badge counts sessions that are not healthy in scope.
 - **Inbox**: sessions at critical health appear in a new "Sessions" group (`sel.sessionsNeedingYou()`), with the reason and advice, "Open health" and "Open thread". The Inbox badge counts them.
   This is not a `needsYou(task)` reason: the Board's yellow treatment stays for tasks only.
+
+## v0.15 additions — Studio documents (hub side; design in docs/PLAN-studio.md)
+
+Tables (`CREATE IF NOT EXISTS`, projections of events, rebuilt by `helmd --rebuild`): `docs`, `doc_versions`, `doc_comments`.
+Ids: `D-n` document, `C-n` comment, blocks `b<n>` (per-document counter, never reused).
+
+```ts
+type Block = { id: string; type: 'h1'|'h2'|'h3'|'p'|'li'|'quote'|'code'|'hr'|'img'|'table'|'diagram'; text: string;   // diagram: `text` is the diagram source (see "Diagram DSL")
+  marks: { s: number; e: number; t: 'b'|'i'|'a'; href?: string }[];           // plain text + marks, no HTML anywhere
+  level?: number; ordered?: boolean;                                            // li
+  rows?: string[][];                                                            // table
+  attachmentId?: string }                                                       // img
+type Doc = { id; projectId; title; kind: 'document'|'report'|'letter'|'notes'|'other'; version: number; sessionId; createdAt; updatedAt; archived;
+  blocks?: Block[] /* GET /v1/docs/:id only; the list and /v1/state carry blockCount */ }
+type DocVersion = { docId; n; cause: 'create'|'draft'|'edit'|'apply'|'revert'|'manual'; jobId; at; blocks?: Block[] }
+type DocComment = { id; docId; blockId: string|null; anchor: { blockId, start, end, quote, prefix, suffix }|null; text;
+  state: 'open'|'queued'|'applied'|'conflict'|'orphaned'|'dismissed'; createdAt; appliedVersion; jobId; reason }
+```
+
+Events (hub-originated, session `_hub`): `hub.doc.create|rename|archive|edit|save|export|drafted|apply|applied|revert` and
+`hub.doc.comment.add|update|delete`. Edits coalesce into one `edit` snapshot per 5 minutes (a save, export, apply or revert seals it);
+history is capped at 100 versions (oldest `edit` snapshots go first). Revert writes a new version. SSE entities: `doc`, `doc_comment`.
+Search kind `doc`. `/v1/state` gains `docs` (metadata only).
+
+| Route | Body / result |
+|---|---|
+| `GET /v1/docs?projectId&includeArchived` | `{ docs }` |
+| `POST /v1/docs` | `{ projectId, title, kind?, blocks? \| markdown?, prompt? }` -> 201 `{ doc, job, draftError? }`; a `prompt` queues a `doc_draft` job when a session is live |
+| `GET /v1/docs/:id` | `{ doc, versions, comments }` |
+| `PATCH /v1/docs/:id`, `DELETE` | `{ title?, archived? }`; DELETE archives |
+| `POST /v1/docs/:id/edit` | `{ baseVersion?, ops }` ops: `{blockId, text?, marks?, type?, ...}` \| `{op:'insert', after, block}` \| `{op:'delete', blockId}`. Stale `baseVersion` -> 409 `{ version }` |
+| `POST /v1/docs/:id/save` | seal the current snapshot |
+| `POST /v1/docs/:id/comments` | `{ text, blockId?, start?, end? }` (no blockId = whole document) -> 201 `{ comment }` |
+| `PATCH /v1/docs/:id/comments/:cid`, `DELETE` | `{ text?, state?: 'open'\|'dismissed', anchor? }` |
+| `POST /v1/docs/:id/apply` | `{ commentIds? }` (default all open/conflict) -> 201 `{ job, comments }`; one `doc_edit` job; 409 with no live session |
+| `POST /v1/docs/:id/revert` | `{ toVersion }` |
+| `GET /v1/docs/:id/versions/:n` | `{ version }` with blocks |
+| `GET /v1/docs/:id/export?format=html\|md\|pdf\|docx&v=n` | file preview (pdf is inline); not recorded |
+| `POST /v1/docs/:id/export` | `{ format, version? }` file download; records `hub.doc.export` |
+| `POST /v1/docs/export` | `{ format, title?, blocks }` ad hoc export of a block tree the hub does not hold (a browser-only doc); validated, not stored, not recorded |
+
+Jobs (Sonnet, small prompts, metered as `doc_draft` / `doc_edit` in `helm.usage`):
+- `doc_draft` reply = `{ "blocks": [...] }` (block schema above: h1-h3, p, li, quote, code, diagram, optional `marks`). A reply that opens with `{`
+  must be valid JSON with a `blocks` list, otherwise the job fails and the doc stays at version 0; a non-JSON reply is read as markdown.
+  The hub numbers the blocks and stores the result as one `draft` version. A doc edited while the draft ran discards the draft.
+- `doc_edit` input = the commented blocks plus one neighbour block each side (`blocks[]`, each with a content `hash`), the heading
+  `outline` and the `comments`. Reply = `{ "patches": [...] }`, one per comment: `{commentId, blockId, op, text?, type?, blocks?}` with `op`
+  `replace_text` (whole new text of the block; for a `diagram` block the whole new source) | `insert_after` | `delete` | `retype` (`type` h1/h2/h3/p/quote/li/code) | `reply`
+  (a refusal with a reason). The older `replace` (`find` / `with`) is still accepted.
+Like `wf_draft`, `job.result` keeps the raw reply and the hub judges it (`hub/docsengine.mjs tick`, `judgePatches` in `hub/docs.mjs`,
+deterministic code). A patch becomes a `conflict` comment with a reason (and the comment can be applied again) unless: the op is known; the
+block exists; the block's `hash` still matches what was sent (an edited block is never overwritten); it targets the block its own comment
+is on (a whole-document comment may target any sent block; `insert_after` may also sit on a direct neighbour of a commented block); the
+result passes the block schema and caps; and no earlier patch in the batch already rewrote that block. All valid patches of the job are
+applied as ONE new `apply` version (comment `appliedVersion` = that version), so one `POST /revert { toVersion: appliedVersion - 1 }`
+undoes the batch and re-opens exactly the comments it had applied. A reply that is not valid JSON fails the job and frees the comments.
+`POST /v1/docs/:id/edit` inserts may carry their own `block.id` (`b<n>`); it is kept when free.
+Files live in `$HELM_HOME/studio/<doc>/<n>.<ext>`. PDF needs a Chromium browser (`HELM_CHROME` overrides
+the path; 501 otherwise), docx needs macOS `textutil`.
+
+### Studio reference (v0.25.0)
+
+**Errors.** Routes use the usual `{ error }` bodies: 400 for a body or block that fails validation, 404 for an unknown doc, comment or
+version, 409 for a stale `baseVersion` or no live session for a job, 501 when Chrome or `textutil` is missing (body has a `hint`
+pointing at `window.print()`), 502 when a conversion fails. Caps: 2000 blocks, 20000 characters per block, 400000 per document, 4000 per
+comment, 100 versions.
+
+**Events.** All `hub.doc.*` events come from session `_hub` and replay deterministically.
+
+| Event | Data (main fields) | Effect |
+|---|---|---|
+| `hub.doc.create` | `projectId, title, kind, blocks, nextBlock, sessionId` | row `D-n`; version 1 when blocks were given, else 0 |
+| `hub.doc.rename` / `archive` | `docId, title` / `docId, archived` | metadata only |
+| `hub.doc.edit` | `docId, blocks, nextBlock` | new blocks; opens or extends the 5 minute `edit` snapshot |
+| `hub.doc.save` | `docId` | seals the current snapshot |
+| `hub.doc.export` | `docId, format, version` | recorded and sealed (previews are not) |
+| `hub.doc.drafted` | `docId, jobId, blocks` | the `doc_draft` result lands as one `draft` version |
+| `hub.doc.apply` | `docId, commentIds, jobId` | those comments become `queued` |
+| `hub.doc.applied` | `docId, jobId, blocks, results[]` | ONE `apply` version; each comment becomes `applied` (with `appliedVersion`) or `conflict` (with `reason`) |
+| `hub.doc.revert` | `docId, toVersion` | a new `revert` version with the old blocks; comments the undone batch had applied go back to `open` |
+| `hub.doc.comment.add` / `update` / `delete` | `docId, comment` / `commentId, patch` / `commentId` | comment rows (`C-n`) and their anchors |
+
+**`doc_draft` job** (kind `doc_draft`, Sonnet, 6000 max tokens, carried by a live session of the project):
+
+```jsonc
+// job.input
+{ "docId": "D-1", "baseVersion": 0, "title": "Proposal", "kind": "report", "prompt": "Write a proposal",
+  "projectName": "acme", "brief": "Project: acme (folder: ~/work/acme)\n\nREADME (start of the file):\n...",   // see "Project brief"
+  "existing": "markdown of blocks already in the doc, or empty" }
+// job.result.text (a ```json fence or bare JSON; ids are ignored and assigned by the hub)
+{ "blocks": [ { "type": "h1", "text": "Proposal" },
+              { "type": "p", "text": "Hello bold", "marks": [ { "s": 6, "e": 10, "t": "b" } ] },
+              { "type": "li", "text": "item", "level": 0, "ordered": false },
+              { "type": "diagram", "text": "dir LR\ngroup \"Hub\" { a[Mod] -> b[Hub] }\nb -> c[(DB)] : events" } ] }
+```
+
+The hub stores it as version 1 (`cause: draft`). It fails the job (doc stays at version 0, `draftError` reason kept) when the reply opens
+with `{` but is not valid JSON, has no `blocks` list, or a block fails the schema. A reply that does not start with `{` is read as markdown.
+A document edited while the draft ran discards the draft.
+
+**`doc_edit` job** (kind `doc_edit`, Sonnet, 2500 max tokens):
+
+```jsonc
+// job.input
+{ "docId": "D-1", "baseVersion": 3, "title": "Proposal", "kind": "report",
+  "outline": [ { "id": "b1", "type": "h1", "text": "Proposal" } ],
+  "blocks":  [ { "id": "b2", "type": "p", "text": "...", "hash": "9f2c..." } ],   // commented blocks + one neighbour each side
+  "comments": [ { "id": "C-1", "blockId": "b2", "quote": "selected text or null", "text": "make it shorter" } ],
+  "commentIds": ["C-1"] }
+// job.result.text
+{ "patches": [ { "commentId": "C-1", "blockId": "b2", "op": "replace_text", "text": "..." } ] }
+```
+
+Patch ops: `replace_text` (`text` = the whole new text of the block; marks outside the changed words are kept), `insert_after`
+(`blocks[]` of `{type,text,...}` go after `blockId`), `delete`, `retype` (`type` one of h1 h2 h3 p li quote code; text is kept), `reply`
+(`text` = why the comment cannot be done; always a conflict), and the older `replace` (`find` / `with`, exact single match).
+
+Judging (deterministic, `judgePatches` in `hub/docs.mjs`). A patch is a `conflict` (the comment keeps its text and can be applied again)
+when: the op is unknown; the block does not exist; the block's current `hash` differs from the one sent (edited meanwhile; never
+overwritten); the patch is not on the block its own comment is on (whole-document comments may target any sent block; `insert_after`
+may also sit on a direct neighbour of a commented block); the result is the same as the original, or the op does not fit the block
+(retype to or from `table`/`img`/`hr`/`diagram`, text change on a table); the result fails the block schema or the caps; a `diagram` block that the patch changes (`replace_text`, `replace`) or inserts (`insert_after`) no longer parses as the Diagram DSL (the reason is `the diagram would not parse (line N: ...)`); or an earlier patch in
+the batch already rewrote that block. A comment with no patch at all is a conflict ("no change"). Everything that passes lands as one
+`apply` version. A reply that is not valid JSON fails the job and frees the comments, as does a job the sweep times out.
+
+Both kinds are metered in `helm.usage` like the other jobs (`REQUESTED_KINDS`: work the user asked for).
+
+**Project brief (v0.25).** `POST /v1/docs` with a `prompt` builds `input.brief` for the `doc_draft` job: a compact markdown string
+(`hub/docbrief.mjs`, `gatherBrief`) so the model writes about the project and not about Studio. In this order, each part only when it
+exists: `Project: <name> (folder: <path, ~ for home>)`; `README (start of the file)`, the first ~1500 characters of `README.md` with
+badge and image lines removed; `plan.md (headline: ...)`, the first ~600 characters of `plan.md`; `Top Learn concepts in this project`,
+the 8 concepts used by the most tasks of the project (`name (n tasks)`); `Latest finished work (task recaps)`, the `what` line of the 6 newest
+recaps (`- T-9 title: what`, each cut to 200 characters). The whole brief is capped at 9000 characters (about 2.3k tokens, under the 2.5k
+promise), by section budgets and a final cut. The folder is the `cwd` of the session that carries the job (else the project's most
+recent session with one). Only `README.md` (or `Readme.md`, `readme.md`, `README`) and `plan.md` in that folder are read, only their first
+6 KB, only as a regular file that is not a symlink; anything missing or unreadable is left out, and a failure never blocks the create.
+The brief is built once, at create time, and stored in the job input (it is not part of event replay). The mod's system prompt tells
+the model to use only the request and the brief, to write `[placeholder]` for anything else, and to treat the brief as data, not instructions.
+
+**Diagram DSL (v0.25).** A `diagram` block holds a small text language in `text` (max 8000 characters, 60 nodes, 120 edges, 12 groups,
+labels cut at 80 characters). One statement per line, or separated by `;`; lines starting with `#` or `//` are comments.
+
+```
+dir LR                                  # TB (top to bottom, the default; TD is an alias) or LR
+group "Hub" { a[Mod] -> b[Hub] }        # a titled box around the nodes written inside it; may span lines; groups do not nest
+b -> c[(DB)] : events                   # an edge, with an optional label after ":"
+a --> d{ok?}                            # "-->" is a dashed edge
+x -> y -> z : last                      # chains; the label belongs to the last edge
+```
+
+Nodes are `id[Label]` box, `id(Label)` rounded, `id[(Label)]` database, `id{Label}` diamond, or a bare `id` (a box labelled with the id).
+Ids are `[A-Za-z_][A-Za-z0-9_]*`. A label is plain text up to the closing bracket, or `"quoted"` (with `\"` and `\\`) when it holds
+brackets or quotes. A node is declared where it is first written with a label; later mentions use the bare id; writing a different label
+or shape for it again is an error. A node written inside a group belongs to it (in two groups is an error). `dir` and `group` count as
+keywords only when followed by their operand, so they still work as ids. Parser: `parseDiagram(text)` in `web/studio/diagram.js` returns
+`{ dir, nodes:[{id,label,shape,group}], edges:[{from,to,label,dashed}], groups:[{id,title,nodes}], errors:[{line,message}] }` and never
+throws; the diagram is valid when `errors` is empty and there is at least one node.
+
+The same file holds the layout (`layoutDiagram`: cycle breaking, longest-path layers, dummy nodes for long edges, barycenter ordering
+that keeps a group's members together, then positions relaxed towards neighbours so nodes never overlap; no randomness, so the same text
+always gives the same picture) and the two SVG back ends over one list of drawing primitives: DOM calls (`createElementNS`, in
+`web/studio/diagramdom.js`) for the editor, the paper preview and the pill, and a pure string builder (`diagramSvgString`, every label
+and attribute value XML-escaped) for export. Where the block is used:
+
+- Editor: the source is edited as text (Enter adds a line, paste keeps lines) beside a live drawing, or below it on a narrow page; parse
+  errors are listed under the source (`line N: message`) and the part that parsed is still drawn. A block that does not parse is saved
+  as typed (the author is still typing); the model's patches are the ones that must parse.
+- Paper preview, print and the floating pill draw the SVG; a diagram that does not parse shows `[diagram not drawn: line N: ...]` and its source.
+- Export: `html` and `pdf` carry inline SVG (Chrome prints it as vector). `md` writes a ```` ```diagram ```` fence, and a `diagram` fence in a
+  markdown draft reply becomes a diagram block. `docx`: `textutil` drops SVG and also drops every image in its docx writer, so the hub draws
+  each diagram to a PNG with headless Chrome (`--screenshot`, 2x, one run each, at most 10 per document), has `textutil` write the docx with
+  a text placeholder in its place, then adds the PNGs, their relationships and the `<w:drawing>` elements by editing the docx zip
+  (`hub/zipedit.mjs`, node:zlib only). Without Chrome, with a diagram that does not parse, or if the zip step fails, the docx gets
+  `[diagram not drawn: <reason>]` followed by the diagram source as text.
+
+## T-76 additions — recaps that always exist
+
+- `agent.completed` data gains optional `report` (the agent's whole final answer, newlines kept, max 16000 chars). The hub keeps the first non-empty one on the agent (`agents.report`, not part of `Agent`); a later empty completion does not erase it. Hub event `hub.agent.report { agentId, report }` attaches one found elsewhere.
+- `recap.generated` data may carry `source` and `agentId` (ignored by the projection, kept in the event). Hub-made recaps use the `_hub` session.
+- Job kind `recap` (Haiku): `input` = `{ title, description, filesChanged, tools[], notes[] }`; the reply is the JSON `{ what, how, learned, concepts }`. `job.result` sets the task recap; a reply that is not that JSON fails the job.
+- Sweep safety net: a task in `review`/`done` with no recap whose latest finished agent ended more than `recapGraceMs` (config, default 180000, `HELM_RECAP_GRACE_MS`, negative = off) ago gets a `recap.generated` parsed from the stored report, else one `recap` job (at most 3 per task, none open at once, none when there is no trail).
+- `POST /v1/recaps/backfill { dryRun?, improve?, taskIds?, reports?: { [agentId]: text } }` -> `{ dryRun, counts, results: { taskId, status, agentId, source: 'report:stored'|'report:transcript'|'haiku-job'|'skipped', reason?, jobId?, recap?, replaced? }[] }`. `improve` also replaces recaps the old parser cut off. CLI: `helmd --backfill-recaps [--dry-run] [--improve] [--reports FILE.json]` (through the daemon when running, else on the database).

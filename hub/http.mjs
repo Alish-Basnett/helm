@@ -96,6 +96,7 @@ route('GET', '/v1/sessions/:id/activity', ({ hub, params, query }) => {
 route('GET', '/v1/sessions/:id/health', ({ hub, params, query }) => hub.sessionHealth(params.id, intParam(query.get('hours'), 24, 1, 168)));
 route('GET', '/v1/health/sessions', ({ hub }) => hub.healthSummary());
 route('POST', '/v1/sessions/:id/join', async ({ hub, params, json }) => hub.joinSession(params.id, await json()));
+route('POST', '/v1/tasks/:id/files', async ({ hub, params, json }) => hub.attachTaskFiles(params.id, await json()));
 route('GET', '/v1/tasks/:id/diff', ({ hub, params, query }) => hub.taskDiff(params.id, { refresh: /^(1|true|yes)$/i.test(query.get('refresh') || '') }));
 // v0.12 branch per task
 route('GET', '/v1/tasks/:id/git', ({ hub, params }) => hub.gitInfo(params.id));
@@ -108,9 +109,11 @@ route('POST', '/v1/tasks/:id/push', async ({ hub, params, json }) => hub.pushBra
 route('POST', '/v1/tasks/:id/pr', async ({ hub, params, json }) => hub.linkPr(params.id, await json()));
 route('POST', '/v1/tasks/:id/ci/refresh', ({ hub, params }) => hub.refreshCi(params.id));
 route('POST', '/v1/tasks/:id/start', ({ hub, params }) => hub.startTask(params.id));
+route('POST', '/v1/tasks/:id/resume', ({ hub, params }) => hub.resumeTask(params.id));
 route('POST', '/v1/tasks/:id/choices/apply', async ({ hub, params, json }) => hub.applyChoices(params.id, await json()));
 route('POST', '/v1/tasks/:id/choices/reset', ({ hub, params }) => hub.resetChoices(params.id));
 route('POST', '/v1/tasks/:id/explain', ({ hub, params }) => hub.explainTask(params.id));
+route('POST', '/v1/recaps/backfill', async ({ hub, json }) => hub.backfillRecaps(await json()));
 route('POST', '/v1/digest', async ({ hub, json }) => hub.requestDigest(await json()));
 route('GET', '/v1/digests', ({ hub, query }) => ({
   digests: hub.digests({ projectId: query.get('projectId') || undefined, limit: intParam(query.get('limit'), 14, 1, 200) }),
@@ -147,6 +150,36 @@ route('POST', '/v1/templates/:id/use', async ({ hub, params, json, remote, remot
   const r = hub.useTemplate(params.id, await json());
   if (remoteListener && r.note) remote.trackNote(r.note.id);
   return created(r);
+});
+// v0.15 Studio documents
+route('GET', '/v1/docs', ({ hub, query }) => ({
+  docs: hub.docs.list({ projectId: query.get('projectId') || undefined, includeArchived: /^(1|true|yes)$/i.test(query.get('includeArchived') || '') }),
+}));
+route('POST', '/v1/docs', async ({ hub, json }) => created(hub.docs.create(await json())));
+route('GET', '/v1/docs/:id', ({ hub, params }) => hub.docs.detail(params.id));
+route('PATCH', '/v1/docs/:id', async ({ hub, params, json }) => hub.docs.update(params.id, await json()));
+route('DELETE', '/v1/docs/:id', ({ hub, params }) => hub.docs.update(params.id, { archived: true }));
+route('POST', '/v1/docs/:id/edit', async ({ hub, params, json }) => hub.docs.edit(params.id, await json()));
+route('POST', '/v1/docs/:id/save', ({ hub, params }) => hub.docs.save(params.id));
+route('POST', '/v1/docs/:id/comments', async ({ hub, params, json }) => created(hub.docs.addComment(params.id, await json())));
+route('PATCH', '/v1/docs/:id/comments/:cid', async ({ hub, params, json }) => hub.docs.updateComment(params.id, params.cid, await json()));
+route('DELETE', '/v1/docs/:id/comments/:cid', ({ hub, params }) => hub.docs.deleteComment(params.id, params.cid));
+route('POST', '/v1/docs/:id/apply', async ({ hub, params, json }) => {
+  let body; try { body = await json(); } catch (e) { if (e instanceof HttpError && e.status === 400) body = undefined; else throw e; }
+  return created(hub.docs.apply(params.id, body));
+});
+route('POST', '/v1/docs/:id/revert', async ({ hub, params, json }) => hub.docs.revert(params.id, await json()));
+route('GET', '/v1/docs/:id/versions/:n', ({ hub, params }) => hub.docs.version(params.id, params.n));
+// GET previews a version (the PDF tab's iframe); POST is a real export and is recorded as a hub.doc.export event.
+// Ad hoc export of a block tree the hub does not hold (a Studio doc still in the browser's localStorage). Not recorded.
+route('POST', '/v1/docs/export', async ({ hub, json, query }) => {
+  const b = await json();
+  return { [FILE]: await hub.docs.exportBlocks({ format: b?.format || query.get('format') || 'html', title: b?.title, blocks: b?.blocks }) };
+});
+route('GET', '/v1/docs/:id/export', async ({ hub, params, query }) => ({ [FILE]: await hub.docs.export(params.id, { format: query.get('format') || 'pdf', version: query.get('v') ?? undefined }) }));
+route('POST', '/v1/docs/:id/export', async ({ hub, params, json, query }) => {
+  const b = await json();
+  return { [FILE]: await hub.docs.export(params.id, { format: b?.format || query.get('format') || 'pdf', version: b?.version, record: true }) };
 });
 // v0.13 concepts (static paths first: /merge must not be read as a slug)
 route('GET', '/v1/concepts', ({ hub, query }) => hub.concepts({ q: query.get('q') || undefined, sort: query.get('sort') || undefined }));
@@ -270,17 +303,20 @@ function guard(req, viaTcp, mutating, remoteListener = false) {
  * everything else (html, svg, ...) is a download, and a sandbox CSP + nosniff stop it running as a page.
  */
 function sendAttachment(req, res, a, cors) {
-  const inline = /^image\/(png|jpeg|gif|webp|avif|bmp|x-icon)$/.test(a.mime);
+  const inline = !!a.inline || /^image\/(png|jpeg|gif|webp|avif|bmp|x-icon)$/.test(a.mime);
   const ascii = a.name.replace(/[^\x20-\x7e]/g, '_').replace(/["\\]/g, '_');
   res.writeHead(200, {
     ...cors,
-    'Content-Type': a.mime, 'Content-Length': a.size, 'Cache-Control': 'private, max-age=3600',
+    'Content-Type': a.mime, 'Content-Length': a.size, 'Cache-Control': a.noStore ? 'no-store' : 'private, max-age=3600',
     'Content-Disposition': `${inline ? 'inline' : 'attachment'}; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(a.name)}`,
-    'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "sandbox; default-src 'none'; img-src 'self' data:",
+    'X-Content-Type-Options': 'nosniff',
+    // The `sandbox` CSP would stop the browser's PDF viewer, so an inline PDF (the Studio preview) gets the strict default only.
+    'Content-Security-Policy': a.inline ? "default-src 'none'" : "sandbox; default-src 'none'; img-src 'self' data:",
   });
-  if (req.method === 'HEAD') return res.end();
+  if (req.method === 'HEAD') { if (a.cleanup) a.cleanup(); return res.end(); }
   const rs = fs.createReadStream(a.path);
   rs.on('error', () => res.destroy());
+  if (a.cleanup) { let done = false; const once = () => { if (!done) { done = true; try { a.cleanup(); } catch { /* best effort */ } } }; rs.on('close', once); res.on('close', once); }
   rs.pipe(res);
 }
 

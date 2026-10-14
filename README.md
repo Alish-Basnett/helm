@@ -11,6 +11,7 @@ Mission control for Claude Code. Every session reports into one live board. You 
 - **Spotlight (⌘K)**: full-text search across every session's tasks, notes, recaps, activity, questions and digests. Type `>` for commands.
 - **Extras**: a radar that flags two agents editing the same file, a questions inbox (`AskUserQuestion` calls and waiting agents), task replay, and an optional export of recaps to Obsidian.
 - **Workflows**: draw a graph of steps (builder or scout agents, shell checks, gates that wait for you, an Opus review) on a canvas, save it as versions, and press Run. The hub decides what runs next and queues steps for a live session; nodes light up as they go, a gate waits for Approve (in the Inbox, on the Board card or on the node), and the run's cost ticks live. Cards a run creates carry a run chip, and the Board can group them by run. `CONTRACT.md` v0.9 has the step contract.
+- **Studio**: a drawing board for documents (reports, letters, one-pagers) at `#/studio`. Pick a project, describe what you want and Sonnet writes the first draft as blocks (a `doc_draft` job through a live session). Edit any block in place, select text and Comment, then press **Apply all**: one `doc_edit` job proposes a patch per comment, the hub judges each patch with deterministic code and lands the good ones as ONE new version (a block you changed meanwhile is never overwritten). Undo all goes back to the version before the batch and re-opens those comments. Drafts know the project (a brief from its README, plan, Learn concepts and latest recaps goes into the job) and can contain **diagram blocks**: a small text language (`a[Mod] -> b[Hub] : events`, groups, TB or LR) that is drawn automatically beside the text and exported as inline SVG (HTML, PDF) or a PNG picture (Word, needs Chrome). Export HTML, PDF (needs Chrome) or Word (needs macOS `textutil`), or **Pop out** a floating pill that follows you on every screen. Without a live session the editor still works; drafting and Apply all need one. Routes and job shapes are in `CONTRACT.md` v0.15; the design and status are in `docs/PLAN-studio.md`.
 - **Model routing**: the session runs on Opus. `helm:builder` uses Sonnet and `helm:scout` uses Haiku, and Opus subagents are downgraded to Sonnet.
 
 ## How it fits together
@@ -43,6 +44,16 @@ claude plugin marketplace add /path/to/helm
 claude plugin install helm@helm-local --scope user
 ```
 
+To update a GitHub install to the latest commit, then restart your sessions (in the desktop app: quit with Cmd+Q and reopen):
+
+```bash
+claude plugin marketplace update helm-local
+```
+
+```bash
+claude plugin update helm@helm-local
+```
+
 New sessions load Helm automatically and start the hub on first use. Open the dashboard with `/helm`, or go to http://localhost:7777. Optional settings, which you can change with `/plugin configure helm@helm-local` in a terminal session:
 
 - `obsidianExport` (default off)
@@ -61,3 +72,16 @@ claude plugin test ~/WebDev/builtbyAlish/helm
 - Hub: `node hub/helmd.mjs --detach | --stop | --status | --rebuild`, `--seed --demo-live --port 7798` for demo data.
 - Data: `~/.helm/` (`helm.db`, `helmd.sock`, `helmd.log`).
 - Use a `claude` build of at least 2.1.29x for `plugin validate` and `plugin test`. Older builds reject `prompt.compose`.
+
+### One copy only
+
+A local-clone install is a snapshot: `claude plugin install` copies the repo into `~/.claude/plugins/cache/helm-local/helm/<version>` and nothing
+refreshes it when the repo changes. If a dev link (`~/.claude/dev-mods/<session>/helm`) is loaded as well, two copies of the mod run in one session and
+the older one can win tool registration and note delivery (T-95: Talk replies vanished). Check which copy a session runs:
+
+```bash
+sqlite3 -readonly ~/.helm/helm.db "select json_extract(data,'$.mod') from events where type='session.started' order by id desc limit 5"
+```
+
+`installed: true` with an old `version` means the cache copy. Refresh it with `claude plugin update helm@helm-local` (bump `version` in
+`.claude-plugin/plugin.json` first, the update compares versions), then restart the session; or `claude plugin disable helm@helm-local` while you use a dev link.

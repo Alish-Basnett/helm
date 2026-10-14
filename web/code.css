@@ -20,6 +20,7 @@
   --cm-bad: light-dark(#cf222e, #ff7b72);
   --cm-fs: 12.5px;
   --cm-gut-w: 3ch;
+  --cm-pad-r: 24px;
 }
 
 /* ---------- lines: a gutter number (CSS counter, not selectable) + wrapped code ---------- */
@@ -95,8 +96,13 @@ html[data-code="on"] :is(.talk-inputwrap, .cm-ed) { background: var(--cm-bg-2); 
 html[data-code="on"] :is(.talk-inputwrap, .cm-ed):focus-within { box-shadow: inset 0 0 0 1.5px var(--accent), 0 0 0 4px var(--accent-soft); }
 html[data-code="on"] :is(.talk-inputwrap, .cm-ed) .cm-hl, html[data-code="on"] :is(.talk-inputwrap, .cm-ed) textarea:is(.talk-input, .cm-ta) {
   font: var(--cm-fs)/1.55 var(--mono); letter-spacing: 0; font-variant-ligatures: none; font-variant-numeric: normal; tab-size: 2;
-  padding: 9px 12px; margin: 0; border: 0; width: 100%; white-space: pre-wrap; overflow-wrap: anywhere; word-break: normal; text-align: left;
+  padding: 9px var(--cm-pad-r) 9px 12px; margin: 0; border: 0; width: 100%; box-sizing: border-box; white-space: break-spaces; overflow-wrap: anywhere; word-break: normal; text-align: left;
+  letter-spacing: 0; text-transform: none; text-rendering: auto; font-kerning: none;
 }
+/* the closing quote/semicolon hangs in the right padding (zero layout width) so it never moves the wrap point */
+.cm-sfx { position: relative; }
+.cm-sfx-in { position: absolute; display: inline; white-space: nowrap; }
+.cm-pfx { white-space: nowrap; }
 html[data-code="on"] :is(.talk-inputwrap, .cm-ed) .cm-hl { display: block; position: absolute; inset: 0; overflow: hidden; pointer-events: none; color: var(--cm-text); background: none; }
 html[data-code="on"] :is(.talk-inputwrap, .cm-ed) textarea:is(.talk-input, .cm-ta),
 html[data-code="on"] :is(.talk-inputwrap, .cm-ed) textarea:is(.talk-input, .cm-ta):focus {
@@ -134,12 +140,12 @@ html[data-code="on"] .talk-composer .note-hint { font-family: var(--mono); }
 
 /* gutter editor: the layer is one numbered row per typed line, the textarea sits over the code column */
 html[data-code="on"] .cm-ed.cm-ed-block { background: var(--cm-bg); }
-html[data-code="on"] .cm-ed.cm-ed-block .cm-hl { counter-reset: cm-ln; padding: 8px 12px 8px 0; }
+html[data-code="on"] .cm-ed.cm-ed-block .cm-hl { counter-reset: cm-ln; padding: 8px var(--cm-pad-r) 8px 0; line-height: 1.65; }
 html[data-code="on"] .cm-ed.cm-ed-block textarea.cm-ta, html[data-code="on"] .cm-ed.cm-ed-block textarea.cm-ta:focus {
-  padding: 8px 12px 8px calc(var(--cm-gut-w) + 14px); line-height: 1.65; min-height: 88px; resize: none; overflow: hidden;
+  padding: 8px var(--cm-pad-r) 8px calc(var(--cm-gut-w) + 14px); line-height: 1.65; min-height: 88px; resize: none; overflow: hidden;
 }
-html[data-code="on"] .cm-ed.cm-ed-block .cm-code { max-width: none; }
-html[data-code="on"] .cm-ed.cm-ed-block .cm-line { padding-right: 12px; }
+html[data-code="on"] .cm-ed.cm-ed-block .cm-code { max-width: none; white-space: break-spaces; }
+html[data-code="on"] .cm-ed.cm-ed-block .cm-line { padding-right: 0; }
 html[data-code="on"] .desc-editor .cm-ed { flex: none; }
 html[data-code="on"] .desc-hint { margin-right: auto; align-self: center; color: var(--cm-com); font-size: 11px; }
 .desc-hint { display: none; }

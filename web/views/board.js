@@ -3,12 +3,17 @@ import { ciSummary, prChip } from '../git.js';
 import { h, reconcile, setText, setClass, setHidden, setAttr, bus, startTicker } from '../dom.js';
 import { icon } from '../icons.js';
 import { state, sel, lsGet, lsSet, setUI } from '../store.js';
-import { patchTask, createTask, quickActions, runQuickAction, startTask, canStart, startDrafts, setAutoStart, autoTarget, decideGate } from '../actions.js';
+import { patchTask, createTask, quickActions, runQuickAction, startTask, canStart, startDrafts, setAutoStart, setAutoConcurrency, decideGate } from '../actions.js';
 import { createStartStatus } from '../replies.js';
-import { fmtElapsed, fmtTokens, truncate, agentLabel, STATUS_META, MAIN_COLUMNS, LANES, plural } from '../format.js';
+import { fmtElapsed, fmtTokens, truncate, agentLabel, modelInfo, STATUS_META, MAIN_COLUMNS, LANES, plural } from '../format.js';
 import { avatar, updateAvatar, modelBadge, updateModelBadge, nowDoingLine, statusDot, toast, openMenu } from '../ui.js';
 import { openTask, navigate } from '../router.js';
 import { openTemplatePopover } from '../templates.js';
+import { bindTaskMenu } from '../taskmenu.js';
+import {
+  GROUPS, SORTS, defaultView, normalizeView, isDefaultView, activeFilterCount, filterTasks, sortTasks, groupTasks, laneOf, canDropAcross,
+  laneStatuses, autoHeader, projectCount, normalizeSaved, saveView, removeView, matchingView, describeView,
+} from '../boardview.js';
 
 const DONE_LIMIT = 30;
 const cmp = (a, b) => (a.order - b.order) || (a.createdAt - b.createdAt) || String(a.id).localeCompare(String(b.id));
@@ -20,7 +25,12 @@ export function mount(container) {
   let dragId = null;
   let needsRender = false;
   let doneExpanded = false;
-  let onlyNeeds = lsGet('helm.board.needsMe') === '1';
+  const readJSON = (key, fallback) => { try { const raw = lsGet(key); return raw ? JSON.parse(raw) : fallback; } catch { return fallback; } };
+  // v0.22 View: group / sort / filters in one object, remembered per browser. The old "Needs me" key seeds the first load.
+  let view = normalizeView(readJSON('helm.board.view', { ...defaultView(), needs: lsGet('helm.board.needsMe') === '1' }));
+  let saved = normalizeSaved(readJSON('helm.board.views', []));
+  const collapsedLanes = new Set(readJSON('helm.board.lanesCollapsed', []));
+  let dragLane = null; // the lane the dragged card came from: drops are only allowed inside it
   let groupByRun = lsGet('helm.board.groupRun') === '1'; // v0.9: cards made by a workflow run sit under one header per run
   const collapsedRuns = new Set((() => { try { return JSON.parse(lsGet('helm.board.runsCollapsed') || '[]'); } catch { return []; } })());
   const cols = {}; // status -> {el, body, count, composer, ...}
@@ -33,14 +43,23 @@ export function mount(container) {
   const colsEl = h('div', { class: 'board-cols' });
   const lanesEl = h('div', { class: 'board-lanes' });
   const needsBtnCount = h('span', { class: 'needs-toggle-count mono', hidden: true }, '0');
-  const needsBtn = h('button', { class: 'needs-toggle', type: 'button', 'aria-pressed': String(onlyNeeds), title: 'Show only cards waiting for you (y jumps to the next one)',
-    onclick: () => { onlyNeeds = !onlyNeeds; lsSet('helm.board.needsMe', onlyNeeds ? '1' : '0'); render(); } },
+  const needsBtn = h('button', { class: 'needs-toggle', type: 'button', 'aria-pressed': String(view.needs), title: 'Show only cards waiting for you (y jumps to the next one)',
+    onclick: () => setView({ needs: !view.needs }) },
   h('span', { class: 'needs-dot', 'aria-hidden': 'true' }), h('span', {}, 'Needs me'), needsBtnCount);
   const groupBtn = h('button', { class: 'needs-toggle board-group', type: 'button', 'aria-pressed': String(groupByRun), title: 'Put the cards of each workflow run under one header',
     onclick: () => { groupByRun = !groupByRun; lsSet('helm.board.groupRun', groupByRun ? '1' : '0'); render(); } },
   icon('workflow', 14), h('span', {}, 'Group by run'));
-  const bar = h('div', { class: 'board-bar' }, needsBtn, groupBtn);
-  const root = h('div', { class: 'board' }, bar, banner, colsEl, lanesEl);
+  const viewLabel = h('span', { class: 'view-btn-sum' });
+  const viewBtn = h('button', { class: 'needs-toggle view-btn', type: 'button', 'aria-haspopup': 'dialog', 'aria-expanded': 'false', title: 'Group, filter and sort the board',
+    onclick: () => (viewPanel ? closeViewPanel() : openViewPanel()) }, icon('board', 14), h('span', {}, 'View'), viewLabel);
+  const savedEl = h('div', { class: 'view-saved', role: 'group', 'aria-label': 'Saved views' });
+  const laneHint = h('span', { class: 'lane-hint', hidden: true },
+    h('button', { class: 'lane-hint-go', type: 'button', onclick: () => setView({ group: 'project' }) }),
+    h('button', { class: 'lane-hint-x', type: 'button', 'aria-label': 'Hide this hint', title: 'Hide this hint', onclick: () => { lsSet('helm.board.laneHint', '0'); render(); } }, icon('close', 12)));
+  const bar = h('div', { class: 'board-bar' }, needsBtn, groupBtn, viewBtn, savedEl, h('span', { class: 'spacer' }), laneHint);
+  const swimEl = h('div', { class: 'board-swim', hidden: true });
+  const root = h('div', { class: 'board' }, bar, banner, colsEl, lanesEl, swimEl);
+  let viewPanel = null;
   container.appendChild(root);
 
   for (const status of MAIN_COLUMNS) colsEl.appendChild(buildColumn(status));
@@ -63,44 +82,78 @@ export function mount(container) {
     return el;
   }
 
-  /** v0.7: Manual | Auto switch in the Up next header (a project popover in All projects) plus the hint line. */
-  function attachAutoControls(c) {
+  /**
+   * v0.7 / T-71 / T-96: the Auto controls of one Up next header. One factory serves the Status column and every lane's
+   * Up next column, so no grouping can lose them again. `update(spec)` takes boardview.autoHeader()'s answer:
+   * a 'switch' (Manual | Auto + xN, bound to ONE project) or a 'picker' (compact popover over several projects).
+   */
+  function buildAutoControls() {
+    let spec = { kind: 'none' };
+    const proj = () => (spec.kind === 'switch' ? state.projects.get(spec.projectId) || null : null);
     const manual = h('button', { class: 'auto-seg-btn', type: 'button', 'data-mode': 'manual', onclick: () => setMode(false) }, 'Manual');
     const auto = h('button', { class: 'auto-seg-btn', type: 'button', 'data-mode': 'auto', onclick: () => setMode(true) }, 'Auto');
     const glyph = h('span', { class: 'auto-glyph', 'aria-hidden': 'true', hidden: true, title: 'Auto mode is on' }, '⟳');
     const seg = h('div', { class: 'auto-seg', role: 'group', 'aria-label': 'Up next mode' }, manual, auto);
-    const pick = h('button', { class: 'auto-pick', type: 'button', 'aria-haspopup': 'menu', title: 'Choose which projects start their Up next automatically',
-      onclick: () => openMenu(pick, sel.projects().map((p) => ({
-        label: p.name, sub: p.autoStart ? 'Auto' : 'Manual', active: !!p.autoStart, icon: p.autoStart ? 'play' : undefined,
+    const pick = h('button', { class: 'auto-pick', type: 'button', 'aria-haspopup': 'menu', title: 'Choose which projects start their Up next automatically (pick one project for “how many at once”)',
+      onclick: () => openMenu(pick, pickProjects().map((p) => ({
+        label: p.name, sub: p.autoStart ? `Auto \u00d7${p.autoConcurrency || 1}` : 'Manual', active: !!p.autoStart, icon: p.autoStart ? 'play' : undefined,
         onSelect: () => setAutoStart(p.id, !p.autoStart),
       })), { minWidth: 240 }) }, h('span', {}, 'Auto'), h('span', { class: 'auto-pick-n mono' }));
-    const wrap = h('div', { class: 'auto-ctl' }, glyph, seg, pick);
-    const hint = h('div', { class: 'auto-hint', hidden: true }, 'Auto: next task starts when nothing is in progress');
-    const head = c.el.querySelector('.col-head');
-    head.insertBefore(wrap, head.querySelector('.icon-btn'));
-    c.el.insertBefore(hint, c.body);
-    function setMode(on) { const t = autoTarget(); if (t) setAutoStart(t.id, on); }
-    c.auto = { wrap, manual, auto, glyph, seg, pick, hint };
+    // T-71: how many Up next tasks Auto keeps running at once (1-5), per project.
+    const conc = h('button', { class: 'auto-conc mono', type: 'button', 'aria-haspopup': 'menu', hidden: true,
+      title: 'How many tasks Auto keeps in progress at once',
+      onclick: () => { const t = proj(); if (t) openMenu(conc, [1, 2, 3, 4, 5].map((n) => ({
+        label: n === 1 ? '1 at a time' : `${n} at a time`, active: (t.autoConcurrency || 1) === n,
+        onSelect: () => setAutoConcurrency(t.id, n),
+      })), { minWidth: 160 }); } });
+    const wrap = h('div', { class: 'auto-ctl' }, glyph, seg, conc, pick);
+    const hint = h('div', { class: 'auto-hint', hidden: true }, 'Auto: next task starts when a slot is free');
+    function pickProjects() { return (spec.projectIds || []).map((id) => state.projects.get(id)).filter(Boolean); }
+    function setMode(on) { const t = proj(); if (t) setAutoStart(t.id, on); }
+    function update(next) {
+      spec = next || { kind: 'none' };
+      const t = proj();
+      const ps = spec.kind === 'picker' ? pickProjects() : [];
+      setHidden(wrap, spec.kind === 'none' || (spec.kind === 'switch' && !t) || (spec.kind === 'picker' && !ps.length));
+      setHidden(seg, !t);
+      setHidden(pick, spec.kind !== 'picker');
+      setHidden(conc, !(t && t.autoStart));
+      let on;
+      if (t) {
+        setText(conc, `\u00d7${t.autoConcurrency || 1}`);
+        setClass(auto, 'on', !!t.autoStart); setClass(manual, 'on', !t.autoStart);
+        auto.setAttribute('aria-pressed', String(!!t.autoStart)); manual.setAttribute('aria-pressed', String(!t.autoStart));
+        on = !!t.autoStart;
+        wrap.dataset.project = t.id;
+        seg.setAttribute('aria-label', `Up next mode for ${t.name}`);
+      } else {
+        delete wrap.dataset.project;
+        const n = ps.filter((p) => p.autoStart).length;
+        setText(pick.lastChild, n ? `${n}/${ps.length}` : '');
+        setClass(pick, 'on', n > 0);
+        on = n > 0;
+      }
+      setHidden(glyph, !on);
+      setHidden(hint, !on);
+    }
+    return { wrap, hint, update };
   }
+  function attachAutoControls(c) {
+    const ctl = buildAutoControls();
+    const head = c.el.querySelector('.col-head');
+    head.insertBefore(ctl.wrap, head.querySelector('.icon-btn'));
+    c.el.insertBefore(ctl.hint, c.body);
+    c.auto = ctl;
+  }
+  /** What the Up next headers need to decide: the pure rule lives in boardview.autoHeader. */
+  const autoSpec = (group, laneTasks) => autoHeader({
+    group, projectIds: sel.projects().map((p) => p.id), scopeProjectId: (sel.scopeProject() || {}).id,
+    filterProjects: view.projects, laneProjectIds: laneTasks ? laneTasks.map((t) => t.projectId) : [],
+  });
   function renderAutoControls() {
     const c = cols.next && cols.next.auto;
     if (!c) return;
-    const ps = sel.projects();
-    const target = autoTarget();
-    const anyOn = ps.some((p) => p.autoStart);
-    setHidden(c.wrap, ps.length === 0);
-    setHidden(c.seg, !target);
-    setHidden(c.pick, !!target);
-    if (target) {
-      setClass(c.auto, 'on', !!target.autoStart); setClass(c.manual, 'on', !target.autoStart);
-      c.auto.setAttribute('aria-pressed', String(!!target.autoStart)); c.manual.setAttribute('aria-pressed', String(!target.autoStart));
-    } else {
-      const n = ps.filter((p) => p.autoStart).length;
-      setText(c.pick.lastChild, n ? `${n}/${ps.length}` : '');
-      setClass(c.pick, 'on', n > 0);
-    }
-    setHidden(c.glyph, !(target ? target.autoStart : anyOn));
-    setHidden(c.hint, !(target ? target.autoStart : anyOn));
+    c.update(autoSpec('status'));
     // the card the hub will start next, per project on Auto
     const tops = new Map();
     for (const t of sel.scopedTasks()) {
@@ -204,6 +257,7 @@ export function mount(container) {
     r.title = h('h4', { class: 'card-title' });
     r.id = h('span', { class: 'task-id mono' });
     r.proj = h('span', { class: 'proj-chip' });
+    r.stat = h('span', { class: 'status-chip', hidden: true }); // only in the flat "None" grouping, where the column is gone
     r.conflict = h('span', { class: 'conflict-chip mono', hidden: true }, icon('warning', 12), h('span', {}));
     r.avatar = avatar(null, 'sm');
     r.model = modelBadge('');
@@ -228,16 +282,19 @@ export function mount(container) {
     r.start = createStartStatus();
     r.actions = h('div', { class: 'card-actions' });
     const el = h('article', { class: 'card', tabindex: '0', draggable: 'true', 'data-id': t.id, role: 'group' },
-      r.actions, r.need, r.title, h('div', { class: 'card-sub' }, r.id, r.proj, r.run, r.conflict, r.choices, r.nextUp), r.agent, r.blocked, r.start.el, r.meta, r.approve);
+      r.actions, r.need, r.title, h('div', { class: 'card-sub' }, r.id, r.stat, r.proj, r.run, r.conflict, r.choices, r.nextUp), r.agent, r.blocked, r.start.el, r.meta, r.approve);
     el.__r = r;
     el.__animate = !!animate;
     el.__needs = null; // unknown until first update; a card created already waiting pulses once when the board has rendered before
     el.addEventListener('click', (e) => { if (!e.target.closest('.card-actions') && !el.__task.__pending) openTask(el.__task.id); });
     el.addEventListener('focus', () => { if (state.ui.selectedTaskId !== el.__task.id) setUI({ selectedTaskId: el.__task.id }); });
     el.addEventListener('keydown', (e) => onCardKey(e, el));
+    bindTaskMenu(el, () => el.__task); // right-click, Shift+F10 or the menu key
     el.addEventListener('dragstart', (e) => {
       if (String(el.__task.id).startsWith('tmp-')) { e.preventDefault(); return; }
       dragId = el.__task.id;
+      const laneEl = el.closest('[data-lane]');
+      dragLane = laneEl ? laneEl.dataset.lane : null;
       e.dataTransfer.effectAllowed = 'move';
       try { e.dataTransfer.setData('text/plain', dragId); } catch { /* noop */ }
       setTimeout(() => el.classList.add('dragging'), 0);
@@ -248,6 +305,7 @@ export function mount(container) {
       root.classList.remove('is-dragging');
       clearDropMarks();
       dragId = null;
+      dragLane = null;
       if (needsRender) render();
     });
     return el;
@@ -275,7 +333,10 @@ export function mount(container) {
     setClass(el, 'pending', !!t.__pending);
     setText(r.title, t.title);
     setText(r.id, String(t.id).startsWith('tmp-') ? '…' : t.id);
-    const showProj = state.ui.projectId === 'all' && state.projects.size > 1;
+    const showProj = state.ui.projectId === 'all' && state.projects.size > 1 && view.group !== 'project';
+    const flat = view.group === 'none';
+    setHidden(r.stat, !flat);
+    if (flat) { setText(r.stat, (STATUS_META[t.status] || {}).label || t.status); setAttr(r.stat, 'data-status', t.status); }
     setHidden(r.proj, !showProj);
     if (showProj) setText(r.proj, sel.projectName(t.projectId));
     const agent = sel.agentOfTask(t);
@@ -352,21 +413,22 @@ export function mount(container) {
     setHidden(r.meta, r.elapsed.hidden && r.tokens.hidden && r.files.hidden && r.dep.hidden);
     // quick actions
     r.start.update(t);
-    const acts = t.__pending ? [] : [...(canStart(t) ? [{ key: 'start', label: 'Start', icon: 'play' }] : []), ...quickActions(t)];
+    const acts = t.__pending ? [] : [...(canStart(t) ? [t.interrupted ? { key: 'resume', label: 'Resume', icon: 'replay' } : { key: 'start', label: 'Start', icon: 'play' }] : []), ...quickActions(t)];
     reconcile(r.actions, acts, (a) => a.key, (a) => {
-      const isStart = a.key === 'start';
-      const b = h('button', { class: `qa qa-${a.key}`, type: 'button', title: isStart ? 'Start (S)' : a.label, 'aria-label': `${a.label} ${t.id}`,
+      const isStart = a.key === 'start' || a.key === 'resume'; // Resume wears the Start button's layout (T-57)
+      const b = h('button', { class: `qa qa-${a.key}${isStart ? ' qa-start' : ''}`, type: 'button', title: isStart ? `${a.label} (S)` : a.label, 'aria-label': `${a.label} ${t.id}`,
         onclick: (e) => { e.stopPropagation(); if (isStart) startTask(el.__task.id); else runQuickAction(el.__task, b.__a); } },
-      icon(a.icon, isStart ? 13 : 15), isStart ? h('span', { class: 'qa-label' }, 'Start') : null, isStart ? h('span', { class: 'qa-badge', hidden: true }) : null);
+      icon(a.icon, isStart ? 13 : 15), isStart ? h('span', { class: 'qa-label' }, a.label) : null, isStart ? h('span', { class: 'qa-badge', hidden: true }) : null);
       return b;
     }, (b, a) => {
       b.__a = a;
-      if (a.key !== 'start') return;
+      if (a.key !== 'start' && a.key !== 'resume') return;
       const k = startDrafts(t.id).length;
+      const verb = a.label;
       const badge = b.querySelector('.qa-badge');
       setText(badge, k ? String(k) : '');
       setHidden(badge, !k);
-      b.title = k ? `Start (S) — sends ${k} draft note${k === 1 ? '' : 's'} with it` : 'Start (S)';
+      b.title = k ? `${verb} (S) — sends ${k} draft note${k === 1 ? '' : 's'} with it` : `${verb} (S)`;
     });
   }
 
@@ -382,17 +444,19 @@ export function mount(container) {
     const idx = MAIN_COLUMNS.indexOf(t.status);
     if ((e.key === 'ArrowLeft' || e.key === 'ArrowRight') && idx >= 0) {
       const next = MAIN_COLUMNS[idx + (e.key === 'ArrowRight' ? 1 : -1)];
-      if (next) { e.preventDefault(); placeTask(t.id, next, columnTasks(next, t.id).length).then(() => refocus(t.id)); }
+      if (next) { e.preventDefault(); const lane = laneKeyOf(t); placeTask(t.id, next, columnTasks(next, t.id, lane).length, lane).then(() => refocus(t.id)); }
     } else if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
       e.preventDefault();
       const grp = needsOf(t);
-      const list = columnTasks(t.status, null).filter((x) => needsOf(x) === grp); // moves stay inside the card's group
+      if (view.sort !== 'manual') return; // a sorted view has no manual order to change
+      const lane = laneKeyOf(t);
+      const list = columnTasks(t.status, null, lane).filter((x) => needsOf(x) === grp); // moves stay inside the card's group
       const i = list.findIndex((x) => x.id === t.id);
       const down = e.key === 'ArrowDown';
       const target = list[i + (down ? 1 : -1)];
       if (i < 0 || !target) return;
-      const k = columnTasks(t.status, t.id).findIndex((x) => x.id === target.id);
-      placeTask(t.id, t.status, down ? k + 1 : k).then(() => refocus(t.id));
+      const k = columnTasks(t.status, t.id, lane).findIndex((x) => x.id === target.id);
+      placeTask(t.id, t.status, down ? k + 1 : k, lane).then(() => refocus(t.id));
     }
   }
   function refocus(id) {
@@ -446,22 +510,26 @@ export function mount(container) {
     return list.sort((a, b) => (flag.get(b.id) - flag.get(a.id)) || cmp(a, b));
   }
 
-  function columnTasks(status, excludeId) {
-    const list = sel.scopedTasks().filter((t) => t.status === status && t.id !== excludeId);
+  /** The lane a task sits in under the current grouping (null in the plain kanban). */
+  const laneKeyOf = (t) => { const l = view.group === 'status' ? null : laneOf(t, view.group, viewCtx()); return l ? l.key : null; };
+
+  /** Manual order of one column; inside a lane only that lane's cards count. */
+  function columnTasks(status, excludeId, lane = null) {
+    const list = sel.scopedTasks().filter((t) => t.status === status && t.id !== excludeId && (lane == null || laneKeyOf(t) === lane));
     return status === 'done' ? list.sort(cmpDone) : sortNeedsFirst(list);
   }
 
-  async function placeTask(id, status, index) {
+  async function placeTask(id, status, index, lane = null) {
     const t = state.tasks.get(id);
     if (!t) return;
-    if (status === 'done') { // done column is ordered by completion time, so only the status changes
+    if (status === 'done' || view.sort !== 'manual') { // done is ordered by completion time, a sorted view by its sort: only the status changes
       if (t.status !== status) await patchTask(id, { status }, 'Could not move task');
       return;
     }
     // `index` is a position in the displayed column (needs-you group first); orders only matter within a group,
     // so translate it to a position among the cards that share this card's group.
     const grp = needsOf(t);
-    const display = columnTasks(status, id);
+    const display = columnTasks(status, id, lane);
     const gIndex = display.slice(0, index).filter((x) => needsOf(x) === grp).length;
     const col = display.filter((x) => needsOf(x) === grp);
     index = gIndex;
@@ -505,7 +573,7 @@ export function mount(container) {
 
   function wireDrop(body) {
     body.addEventListener('dragover', (e) => {
-      if (!dragId) return;
+      if (!dragId || !body.dataset.status || !canDropAcross(dragLane, body.dataset.lane || null)) return; // not a target: cursor shows no-drop
       e.preventDefault();
       e.dataTransfer.dropEffect = 'move';
       clearDropMarks();
@@ -515,17 +583,199 @@ export function mount(container) {
     });
     body.addEventListener('dragleave', (e) => { if (!body.contains(e.relatedTarget)) { body.classList.remove('drop-over', 'drop-end'); } });
     body.addEventListener('drop', (e) => {
-      if (!dragId) return;
+      if (!dragId || !body.dataset.status || !canDropAcross(dragLane, body.dataset.lane || null)) return;
       e.preventDefault();
       const id = dragId;
       const { before } = dropIndex(body, e.clientX, e.clientY);
       clearDropMarks();
       dragId = null;
+      dragLane = null;
       root.classList.remove('is-dragging');
       const status = body.dataset.status;
-      const col = columnTasks(status, id); // unfiltered, so the "Needs me" filter cannot skew the position
+      const lane = body.dataset.lane || null;
+      const col = columnTasks(status, id, lane); // unfiltered, so the "Needs me" filter cannot skew the position
       const k = before && before.__task ? col.findIndex((x) => x.id === before.__task.id) : -1;
-      placeTask(id, status, k >= 0 ? k : col.length);
+      placeTask(id, status, k >= 0 ? k : col.length, lane);
+    });
+  }
+
+  /* ---------- view (group / filter / sort / saved) ---------- */
+  const viewCtx = () => ({
+    needs: needsOf, agent: (t) => sel.agentOfTask(t), model: (a) => modelInfo(a.model),
+    projectName: (id) => sel.projectName(id), projectOrder: sel.projects().map((p) => p.id),
+  });
+  /** The view as it applies right now: a project that no longer exists cannot filter everything away. */
+  function effectiveView() {
+    if (!view.projects.length || !state.ready) return view;
+    const known = view.projects.filter((id) => state.projects.has(id));
+    return known.length === view.projects.length ? view : { ...view, projects: known };
+  }
+  function setView(patch) {
+    view = normalizeView({ ...view, ...patch });
+    lsSet('helm.board.view', JSON.stringify(view));
+    lsSet('helm.board.needsMe', view.needs ? '1' : '0');
+    render();
+    paintViewPanel();
+  }
+  function setSaved(next) { saved = next; lsSet('helm.board.views', JSON.stringify(saved)); render(); paintViewPanel(); }
+  const orderList = (list, status) => {
+    if (view.sort === 'manual') return status === 'done' ? list.sort(cmpDone) : sortNeedsFirst(list);
+    return sortTasks(list, view.sort, cmp, viewCtx());
+  };
+
+  function paintViewBar() {
+    const v = effectiveView();
+    const n = activeFilterCount(v);
+    const custom = !isDefaultView(v);
+    setClass(viewBtn, 'on', custom);
+    setText(viewLabel, custom ? describeView(v).replace(/^Status( · )?/, '') : '');
+    setHidden(viewLabel, !custom || describeView(v) === 'Status');
+    viewBtn.title = custom ? `View: ${describeView(v)}` : 'Group, filter and sort the board';
+    const match = matchingView(saved, v);
+    reconcile(savedEl, saved.slice(0, 5), (e) => e.name, (e) => h('button', { class: 'view-pill', type: 'button' }),
+      (el, e) => {
+        el.__view = e.view;
+        setText(el, e.name);
+        setClass(el, 'on', !!match && match.name === e.name);
+        el.setAttribute('aria-pressed', String(!!match && match.name === e.name));
+        el.title = `Switch to “${e.name}” (${describeView(e.view)})`;
+        el.onclick = () => setView(el.__view);
+      });
+    return n;
+  }
+
+  /* the View popover */
+  function closeViewPanel() {
+    if (!viewPanel) return;
+    const { el, off } = viewPanel;
+    viewPanel = null;
+    off();
+    el.remove();
+    viewBtn.setAttribute('aria-expanded', 'false');
+  }
+  function openViewPanel() {
+    const el = h('div', { class: 'view-pop', role: 'dialog', 'aria-label': 'Board view' });
+    document.body.appendChild(el);
+    const place = () => {
+      const r = viewBtn.getBoundingClientRect();
+      el.style.left = Math.max(8, Math.min(r.left, innerWidth - el.offsetWidth - 8)) + 'px';
+      el.style.top = Math.min(r.bottom + 6, Math.max(8, innerHeight - el.offsetHeight - 8)) + 'px';
+    };
+    const onDown = (e) => { if (!el.contains(e.target) && !viewBtn.contains(e.target)) closeViewPanel(); };
+    const onKey = (e) => { if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeViewPanel(); viewBtn.focus(); } };
+    document.addEventListener('pointerdown', onDown, true);
+    document.addEventListener('keydown', onKey, true);
+    window.addEventListener('resize', closeViewPanel);
+    viewPanel = { el, place, off: () => { document.removeEventListener('pointerdown', onDown, true); document.removeEventListener('keydown', onKey, true); window.removeEventListener('resize', closeViewPanel); } };
+    viewBtn.setAttribute('aria-expanded', 'true');
+    paintViewPanel();
+    const first = el.querySelector('button');
+    if (first) first.focus({ preventScroll: true });
+  }
+  function paintViewPanel() {
+    if (!viewPanel) return;
+    const { el } = viewPanel;
+    const keep = document.activeElement && el.contains(document.activeElement) ? document.activeElement.dataset.k : null;
+    el.textContent = '';
+    const seg = (items, cur, onPick, label) => h('div', { class: 'view-seg', role: 'radiogroup', 'aria-label': label },
+      ...items.map((it) => h('button', { class: ['view-seg-btn', cur === it.key && 'on'], type: 'button', role: 'radio', 'aria-checked': String(cur === it.key), title: it.hint || it.label,
+        'data-k': `seg-${label}-${it.key}`, onclick: () => onPick(it.key) }, it.label)));
+    const chip = (label, on, onClick, k, dot) => h('button', { class: ['view-chip', on && 'on'], type: 'button', 'aria-pressed': String(on), 'data-k': k, onclick: onClick },
+      dot ? h('span', { class: 'view-chip-dot', style: { background: `var(--st-${dot})` }, 'aria-hidden': 'true' }) : null, label);
+    const toggleIn = (list, v) => (list.includes(v) ? list.filter((x) => x !== v) : [...list, v]);
+    const ps = sel.projects();
+    const statuses = [...MAIN_COLUMNS, ...LANES];
+    const nameInput = h('input', { class: 'input view-name', type: 'text', placeholder: 'Name this view…', maxlength: '32', 'aria-label': 'Name for the saved view', autocomplete: 'off', 'data-k': 'name' });
+    const doSave = () => { const nm = nameInput.value.trim(); if (!nm) { nameInput.focus(); return; } setSaved(saveView(saved, nm, view)); toast(`Saved view “${nm}”`, { duration: 2000 }); };
+    nameInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); doSave(); } e.stopPropagation(); });
+    el.append(
+      h('div', { class: 'view-sec' }, h('div', { class: 'view-h' }, 'Group by'),
+        seg(GROUPS, view.group, (k) => setView({ group: k }), 'Group by')),
+      h('div', { class: 'view-sec' }, h('div', { class: 'view-h' }, 'Sort'),
+        seg(SORTS, view.sort, (k) => setView({ sort: k }), 'Sort')),
+      h('div', { class: 'view-sec' }, h('div', { class: 'view-h' }, 'Show'),
+        h('div', { class: 'view-chips' },
+          chip('Needs you', view.needs, () => setView({ needs: !view.needs }), 'needs'),
+          chip('Has agent', view.hasAgent, () => setView({ hasAgent: !view.hasAgent }), 'agent'))),
+      h('div', { class: 'view-sec' }, h('div', { class: 'view-h' }, 'Status'),
+        h('div', { class: 'view-chips' }, ...statuses.map((st) => chip(STATUS_META[st].label, view.statuses.includes(st), () => setView({ statuses: toggleIn(view.statuses, st) }), `st-${st}`, st)))),
+      ps.length > 1 ? h('div', { class: 'view-sec' }, h('div', { class: 'view-h' }, 'Project'),
+        h('div', { class: 'view-chips' }, ...ps.map((p) => chip(p.name, view.projects.includes(p.id), () => setView({ projects: toggleIn(view.projects, p.id) }), `pr-${p.id}`)))) : null,
+      h('div', { class: 'view-sec view-saved-sec' }, h('div', { class: 'view-h' }, 'Saved views'),
+        saved.length ? h('div', { class: 'view-list' }, ...saved.map((e) => h('div', { class: 'view-row' },
+          h('button', { class: 'view-row-go', type: 'button', 'data-k': `sv-${e.name}`, onclick: () => setView(e.view) }, h('span', { class: 'view-row-name' }, e.name), h('span', { class: 'view-row-sum' }, describeView(e.view))),
+          h('button', { class: 'view-row-x', type: 'button', 'aria-label': `Delete view ${e.name}`, title: 'Delete', onclick: () => setSaved(removeView(saved, e.name)) }, icon('close', 12))))) : h('div', { class: 'view-none' }, 'None yet. Set up the board the way you like it, then save it.'),
+        h('div', { class: 'view-save' }, nameInput, h('button', { class: 'btn btn-quiet btn-sm', type: 'button', onclick: doSave }, 'Save'))),
+      h('div', { class: 'view-foot' },
+        h('button', { class: 'btn btn-quiet btn-sm', type: 'button', disabled: isDefaultView(view), onclick: () => setView(defaultView()) }, 'Reset')));
+    viewPanel.place();
+    if (keep) { const again = el.querySelector(`[data-k="${CSS.escape(keep)}"]`); if (again) again.focus({ preventScroll: true }); }
+  }
+
+  /* ---------- swimlanes (Project / Agent / None) ---------- */
+  function persistLanes() { lsSet('helm.board.lanesCollapsed', JSON.stringify([...collapsedLanes])); }
+  function createLane(lane) {
+    const count = h('span', { class: 'col-count mono' }, '0');
+    const need = h('span', { class: 'col-need mono', hidden: true });
+    const name = h('span', { class: 'col-title' });
+    const toggle = h('button', { class: 'lane-toggle swim-toggle', type: 'button', 'aria-expanded': 'true' }, icon('chevronDown', 14, 'lane-chev'), name, count, need);
+    const cols2 = h('div', { class: 'swim-cols' });
+    const el = h('section', { class: 'swim-lane', 'data-lane': lane.key }, toggle, cols2);
+    toggle.addEventListener('click', () => {
+      const key = el.__lane.key;
+      if (collapsedLanes.has(key)) collapsedLanes.delete(key); else collapsedLanes.add(key);
+      persistLanes();
+      setClass(el, 'collapsed', collapsedLanes.has(key));
+      toggle.setAttribute('aria-expanded', String(!collapsedLanes.has(key)));
+    });
+    el.__r = { name, count, need, cols: cols2, toggle };
+    return el;
+  }
+  function createLaneCol(status, laneKey) {
+    const meta = STATUS_META[status];
+    const count = h('span', { class: 'col-count mono' }, '0');
+    const body = h('div', { class: 'col-body', 'data-status': status, 'data-lane': laneKey, 'data-layout': 'v', 'data-empty': 'Drop tasks here' });
+    wireDrop(body);
+    const el = h('section', { class: `col col-${status}`, 'aria-label': meta.label }, h('header', { class: 'col-head' }, statusDot(status), h('h3', { class: 'col-title' }, meta.label), count), body);
+    el.__r = { body, count };
+    if (status === 'next') { // T-96: Auto lives in every Up next header, scoped to the lane's project
+      const ctl = buildAutoControls();
+      el.querySelector('.col-head').appendChild(ctl.wrap);
+      el.insertBefore(ctl.hint, body);
+      el.__r.auto = ctl;
+    }
+    return el;
+  }
+  function renderLanes(list) {
+    const ctx = viewCtx();
+    const lanes = groupTasks(list, view.group, ctx);
+    const rank = Object.fromEntries([...MAIN_COLUMNS, ...LANES].map((st, i) => [st, i]));
+    reconcile(swimEl, lanes, (l) => l.key, (l) => createLane(l), (el, lane) => {
+      const r = el.__r;
+      el.__lane = lane;
+      const collapsed = collapsedLanes.has(lane.key);
+      setClass(el, 'collapsed', collapsed);
+      r.toggle.setAttribute('aria-expanded', String(!collapsed));
+      setText(r.name, lane.label);
+      setText(r.count, String(lane.tasks.length));
+      const nNeed = lane.tasks.filter(needsOf).length;
+      setHidden(r.need, nNeed === 0);
+      setText(r.need, nNeed === 1 ? '1 needs you' : `${nNeed} need you`);
+      if (view.group === 'none') { // one flat list, status shown on the card
+        const sorted = sortTasks(lane.tasks, view.sort, view.sort === 'manual' ? (a, b) => (rank[a.status] - rank[b.status]) || cmp(a, b) : cmp, ctx);
+        let body = r.cols.firstChild;
+        if (!body) { body = h('div', { class: 'lane-body swim-flat', 'data-lane': lane.key, 'data-layout': 'grid', 'data-empty': 'Nothing matches this view' }); r.cols.appendChild(body); }
+        reconcile(body, sorted.map((t) => ({ key: t.id, t })), (it) => it.key, (it, animate) => createCard(it.t, animate), (c, it) => updateCard(c, it.t));
+        return;
+      }
+      const sts = laneStatuses(lane.tasks, MAIN_COLUMNS, LANES, view.statuses);
+      reconcile(r.cols, sts, (st) => st, (st) => createLaneCol(st, lane.key), (colEl, st) => {
+        const cr = colEl.__r;
+        if (cr.auto) cr.auto.update(autoSpec(view.group, lane.tasks));
+        const here = orderList(lane.tasks.filter((t) => t.status === st), st);
+        setText(cr.count, String(here.length));
+        reconcile(cr.body, here.map((t) => ({ key: t.id, t })), (it) => it.key, (it, animate) => createCard(it.t, animate), (c, it) => updateCard(c, it.t));
+      });
     });
   }
 
@@ -535,38 +785,59 @@ export function mount(container) {
     needsRender = false;
     renderAutoControls();
     const tasks = sel.scopedTasks();
+    const v = effectiveView();
+    const ctx = viewCtx();
+    const lanesMode = v.group !== 'status';
+    // everything but "needs you": the needs filter keeps its own count so the button can still show how many are waiting
+    const base = filterTasks(tasks, { ...v, needs: false }, ctx);
     const byStatus = {};
-    for (const t of tasks) (byStatus[t.status] ||= []).push(t);
-    let needTotal = 0;
-    setAttr(needsBtn, 'aria-pressed', String(onlyNeeds));
+    for (const t of base) (byStatus[t.status] ||= []).push(t);
+    setAttr(needsBtn, 'aria-pressed', String(v.needs));
     setAttr(groupBtn, 'aria-pressed', String(groupByRun));
     setClass(groupBtn, 'on', groupByRun);
-    setClass(needsBtn, 'on', onlyNeeds);
-    for (const status of [...MAIN_COLUMNS, ...LANES]) {
-      let list = status === 'done' ? (byStatus[status] || []).sort(cmpDone) : sortNeedsFirst(byStatus[status] || []);
+    setClass(needsBtn, 'on', v.needs);
+    setHidden(groupBtn, lanesMode);
+    root.dataset.group = v.group;
+    setHidden(colsEl, lanesMode);
+    setHidden(lanesEl, lanesMode);
+    setHidden(swimEl, !lanesMode);
+    paintViewBar();
+    // a nudge, not a switch: several projects on one board and still plain columns
+    const nProj = projectCount(base);
+    const hint = !lanesMode && state.ui.projectId === 'all' && nProj > 1 && lsGet('helm.board.laneHint') !== '0';
+    setHidden(laneHint, !hint);
+    if (hint) setText(laneHint.firstChild, `${nProj} projects here · group by project`);
+    // only one layout holds cards at a time, so refocus() and the y key never find a hidden twin
+    if (lanesMode) {
+      for (const status of [...MAIN_COLUMNS, ...LANES]) if (cols[status].body.__keyed && cols[status].body.__keyed.size) reconcile(cols[status].body, [], (x) => x.key);
+      renderLanes(v.needs ? base.filter(needsOf) : base);
+    } else if (swimEl.__keyed && swimEl.__keyed.size) reconcile(swimEl, [], (x) => x.key);
+    if (!lanesMode) for (const status of [...MAIN_COLUMNS, ...LANES]) {
+      let list = orderList(byStatus[status] || [], status);
       const c = cols[status];
       const nNeed = list.filter(needsOf).length;
-      needTotal += nNeed;
       setHidden(c.need, nNeed === 0);
       setText(c.need, nNeed === 1 ? '1 needs you' : `${nNeed} need you`);
-      if (onlyNeeds) list = list.filter(needsOf);
+      setHidden(c.el, v.statuses.length > 0 && !v.statuses.includes(status));
+      if (v.needs) list = list.filter(needsOf);
       const total = list.length;
       if (status === 'done' && !doneExpanded) list = list.slice(0, DONE_LIMIT);
       const items = groupByRun ? withRunHeads(list) : list.map((t) => ({ key: t.id, t }));
       reconcile(c.body, items, (it) => it.key, (it, animate) => (it.head ? createRunHead(it) : createCard(it.t, animate)),
         (el, it) => (it.head ? updateRunHead(el, it) : updateCard(el, it.t)));
-      c.body.setAttribute('data-empty', onlyNeeds ? 'Nothing here needs you' : (status === 'done' ? 'Nothing done yet' : status === 'later' ? 'Park tasks here to come back to them' : status === 'blocked' ? 'Nothing is blocked' : 'Drop tasks here'));
+      c.body.setAttribute('data-empty', v.needs ? 'Nothing here needs you' : (status === 'done' ? 'Nothing done yet' : status === 'later' ? 'Park tasks here to come back to them' : status === 'blocked' ? 'Nothing is blocked' : 'Drop tasks here'));
       setText(c.count, String(total));
       if (status === 'done') {
         setHidden(c.more, total <= DONE_LIMIT);
         setText(c.more, doneExpanded ? 'Show fewer' : `Show ${total - DONE_LIMIT} more`);
       }
     }
+    const needTotal = tasks.filter(needsOf).length; // every card waiting for you, whatever the filters
     setHidden(needsBtnCount, needTotal === 0);
     setText(needsBtnCount, String(needTotal));
     setClass(needsBtn, 'has-items', needTotal > 0);
     // blocked lane draws attention
-    if (byStatus.blocked && byStatus.blocked.length) setClass(cols.blocked.el, 'has-items', true); else setClass(cols.blocked.el, 'has-items', false);
+    setClass(cols.blocked.el, 'has-items', !!(byStatus.blocked && byStatus.blocked.length));
     setClass(cols.later.el, 'has-items', !!(byStatus.later && byStatus.later.length));
     if (composerCol) syncComposerProjects(composerCol);
 
@@ -615,6 +886,6 @@ export function mount(container) {
     watch: ['task', 'agent', 'project', 'session', 'ui', 'ready', 'question', 'note', 'run', 'workflow'],
     update: render,
     setRoute() {},
-    destroy() { offNew(); document.removeEventListener('keydown', onYKey); root.remove(); },
+    destroy() { offNew(); closeViewPanel(); document.removeEventListener('keydown', onYKey); root.remove(); },
   };
 }

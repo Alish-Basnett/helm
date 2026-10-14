@@ -459,6 +459,11 @@ function declHead(st, name) {
   return { nodes, len };
 }
 
+/** The closing quote + `;`: painted after the text but occupying zero width, so it can never change where text wraps. */
+/** The hint after an empty field: pushed right by the (zero-width) suffix's real width so the two never overlap. */
+const phNode = (st, placeholder, q, py) => h('span', { class: 'cm-c cm-ph', style: { marginLeft: `${q.length + (py ? 0 : 1) + 1}ch` } }, `${st.com} ${placeholder}`);
+const sfxNode = (q, py) => h('span', { class: 'cm-sfx' }, h('span', { class: 'cm-sfx-in' }, [h('span', { class: 'cm-s' }, q), h('span', { class: 'cm-p' }, py ? '' : ';')]));
+
 /** What the highlighted layer under the textarea shows: `const msg = "` + the typed text + `";`. Text is never altered. */
 export function composerView(text, style, placeholder, name = 'msg') {
   const st = styleOf(style);
@@ -467,8 +472,11 @@ export function composerView(text, style, placeholder, name = 'msg') {
   const py = st.id === 'py';
   const q = multi ? (py ? '"""' : '`') : '"';
   const head = declHead(st, name);
-  const nodes = [...head.nodes, h('span', { class: 'cm-s' }, [q, h('span', { class: 'cm-sb' }, bodyNodes(text, st)), q]), h('span', { class: 'cm-p' }, py ? '' : ';')];
-  if (!text && placeholder) nodes.push(' ', h('span', { class: 'cm-c cm-ph' }, `${st.com} ${placeholder}`));
+  // The prefix is unbreakable (the textarea indents its first line by the same width) and the suffix takes no width, so
+  // both layers wrap at exactly the same character. A trailing newline still yields a last line because the suffix
+  // sits after it.
+  const nodes = [h('span', { class: 'cm-pfx' }, [...head.nodes, h('span', { class: 'cm-s' }, q)]), h('span', { class: 'cm-s cm-sb' }, [...bodyNodes(text, st), text.endsWith('\n') ? '\u200b' : '']), sfxNode(q, py)];
+  if (!text && placeholder) nodes.push(phNode(st, placeholder, q, py));
   return { nodes, prefixLen: head.len + q.length };
 }
 
@@ -483,11 +491,11 @@ export function blockView(text, style, placeholder, name = 'description') {
   const parts = text.split('\n');
   const lines = parts.map((ln, i) => {
     const nodes = [];
-    if (i === 0) nodes.push(...head.nodes, h('span', { class: 'cm-s' }, q));
+    if (i === 0) nodes.push(h('span', { class: 'cm-pfx' }, [...head.nodes, h('span', { class: 'cm-s' }, q)]));
     nodes.push(h('span', { class: 'cm-s cm-sb' }, bodyNodes(ln, st)));
     if (i === parts.length - 1) {
-      nodes.push(h('span', { class: 'cm-s' }, q), h('span', { class: 'cm-p' }, py ? '' : ';'));
-      if (!text && placeholder) nodes.push(' ', h('span', { class: 'cm-c cm-ph' }, `${st.com} ${placeholder}`));
+      nodes.push(sfxNode(q, py));
+      if (!text && placeholder) nodes.push(phNode(st, placeholder, q, py));
     }
     return nodes;
   });

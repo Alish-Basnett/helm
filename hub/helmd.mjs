@@ -4,6 +4,7 @@
 //   node hub/helmd.mjs --detach      start in the background (returns once healthy)
 //   node hub/helmd.mjs --stop        SIGTERM the running daemon
 //   node hub/helmd.mjs --status      print health JSON (exit 1 when not running)
+//   node hub/helmd.mjs --backfill-recaps [--dry-run] [--improve] [--reports FILE.json]  record recap.generated for finished tasks without one
 //   node hub/helmd.mjs --rebuild     drop projections and replay the events table (daemon must be stopped)
 import fs from 'node:fs';
 import path from 'node:path';
@@ -24,6 +25,7 @@ function parseArgs(argv) {
     else if (a.startsWith('--port=')) o.port = Number(a.slice(7));
     else if (a === '--home') o.home = argv[++i];
     else if (a.startsWith('--home=')) o.home = a.slice(7);
+    else if (a === '--reports') o.reports = argv[++i];
     else if (a.startsWith('--')) o.flags.add(a.slice(2));
     else { console.error(`unknown argument: ${a}`); process.exit(2); }
   }
@@ -74,6 +76,28 @@ async function main() {
     }
     console.error(`daemon did not become healthy in 8s; see ${cfg.logFile}`);
     process.exit(1);
+  }
+
+  if (args.flags.has('backfill-recaps')) {
+    // T-76: through the running daemon when there is one, else straight on the database.
+    const body = { dryRun: args.flags.has('dry-run'), improve: args.flags.has('improve') };
+    if (args.reports) body.reports = JSON.parse(fs.readFileSync(args.reports, 'utf8'));
+    const live = await probeHealth(cfg);
+    let out;
+    if (live) {
+      const r = await fetch(`http://127.0.0.1:${live.port ?? cfg.port}/v1/recaps/backfill`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+      });
+      if (!r.ok) { console.error(`backfill failed: ${r.status} ${await r.text()}`); process.exit(1); }
+      out = await r.json();
+    } else {
+      const { Hub } = await import('./hub.mjs');
+      const hub = new Hub(cfg, createLogger(cfg.logFile, { tty }));
+      out = hub.backfillRecaps(body);
+      hub.close();
+    }
+    console.log(JSON.stringify(out, null, 1));
+    process.exit(0);
   }
 
   if (args.flags.has('rebuild')) {

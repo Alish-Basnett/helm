@@ -120,6 +120,26 @@ export async function setAutoStart(id, on) {
   }
 }
 
+/** T-71: how many Up next tasks Auto keeps in progress at once (1-5). */
+export async function setAutoConcurrency(id, n) {
+  const before = state.projects.get(id);
+  if (!before || (before.autoConcurrency || 1) === n) return null;
+  const optimistic = { ...before, autoConcurrency: n };
+  upsert('project', optimistic);
+  try {
+    const res = await api.patchProject(id, { autoConcurrency: n });
+    if (res?.project?.autoConcurrency !== n) throw new Error('The hub did not apply the setting. Restart it (node hub/helmd.mjs --stop, then --detach).');
+    upsert('project', res.project);
+    const started = res.autoStarted || [];
+    toast(started.length ? `Auto runs ${n} at a time: starting ${started.length} more` : `Auto runs ${n} at a time`);
+    return res;
+  } catch (e) {
+    if (state.projects.get(id) === optimistic) upsert('project', before);
+    toastError(e, 'Could not change auto concurrency');
+    return null;
+  }
+}
+
 /** The project the Up next switch controls: the selected one, or the only one that exists. */
 export function autoTarget() {
   const s = sel.scopeProject();
@@ -262,8 +282,10 @@ export function isStarting(t) {
 }
 /** Draft notes on a task: they ride along with Start (v0.8). */
 export const startDrafts = (id) => sel.notesFor('task', id).filter((n) => n.state === 'draft' && !n.__pending);
-export const startLabel = (n) => (n > 0 ? `Start with ${n} note${n === 1 ? '' : 's'}` : 'Start');
-export const canStart = (t) => !!t && !t.__pending && STARTABLE.has(t.status) && !isStarting(t);
+export const startLabel = (n, t) => { const v = isInterrupted(t) ? 'Resume' : 'Start'; return n > 0 ? `${v} with ${n} note${n === 1 ? '' : 's'}` : v; };
+/** T-70: the latest agent stopped mid-flight: the card offers Resume instead of Start, from any column but Done. */
+export const isInterrupted = (t) => !!t && t.interrupted === true && t.status !== 'done' && t.status !== 'archived';
+export const canStart = (t) => !!t && !t.__pending && (STARTABLE.has(t.status) || isInterrupted(t)) && !isStarting(t);
 export const NO_SESSION_MSG = 'No live session for this project — open a Claude Code session in it';
 
 export function startErrorMessage(e) {
@@ -282,7 +304,7 @@ export async function startTask(id) {
   const now = Date.now();
   folded.forEach((n) => upsert('note', { ...n, state: 'ran', ranAt: now, via: 'start' }));
   try {
-    const res = await api.startTask(id);
+    const res = await (isInterrupted(before) ? api.resumeTask(id) : api.startTask(id));
     if (res && res.note) upsert('note', res.note);
     if (res && res.task) upsert('task', res.task);
     return res;

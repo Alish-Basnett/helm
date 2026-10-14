@@ -149,13 +149,15 @@ async function patchOne(top, f) {
  * Inside the root -> that repo. Outside -> the path's own repo. Anything else (or a symlink escape) is refused.
  */
 async function resolvePaths(files, rootReal, rootLex, cache) {
-  const ok = [], refused = [];
+  const ok = [], refused = [], seen = new Set();
   for (const raw of files) {
     if (typeof raw !== 'string' || !raw || raw.includes('\0')) { refused.push({ path: String(raw), reason: 'invalid path' }); continue; }
     let lex;
     if (path.isAbsolute(raw)) lex = path.resolve(raw);
     else if (rootLex) lex = path.resolve(rootLex, raw);
     else { refused.push({ path: raw, reason: 'relative path without a repo root' }); continue; }
+    if (seen.has(lex)) continue; // the same file recorded as relative and absolute (T-66)
+    seen.add(lex);
     const real = realpathLoose(lex);
     if (rootReal && within(rootReal, real)) {
       if (isLink(lex) && !within(rootReal, realpathLoose(lex))) { refused.push({ path: raw, reason: 'symlink escape' }); continue; }
@@ -255,7 +257,8 @@ async function compute(task, now) {
   if (rootReal && base) {
     if (!ok.length) return none(joinNotes('no usable paths', rnote), rootReal, base);
     const { files, totals } = await build(ok, async (p) => [p.own ? await headOf(p.top) : base, null]);
-    return { source: 'live', root: rootReal, base, totals, files, ...(rnote ? { note: rnote } : {}) };
+    const lnote = joinNotes(task.filesNote, rnote);
+    return { source: 'live', root: rootReal, base, totals, files, ...(lnote ? { note: lnote } : {}) };
   }
 
   // ---- history: no usable base
@@ -289,3 +292,62 @@ async function headOf(top) {
 
 /** Compact stat stored on the task. */
 export const diffStat = (d) => (d && d.totals ? { files: d.totals.files, additions: d.totals.additions, deletions: d.totals.deletions } : null);
+
+// ------------------------------------------------------------------ T-66: which files did the task change?
+export const DELTA_NOTE = 'unattributed: every uncommitted change in the repo since this task started (no paths recorded for it)';
+const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/** Does any mention (a path or a command line) name this repo-relative file, by full path or as a whole-token basename? */
+function mentioned(rel, hay, tokens) {
+  if (hay.includes(rel)) return true;
+  const b = path.posix.basename(rel);
+  if (!tokens.has(b)) tokens.set(b, new RegExp(`(^|[^\\w.-])${esc(b)}($|[^\\w-])`));
+  return tokens.get(b).test(hay);
+}
+
+/**
+ * Derive a task's changed files from git. Delta = `git diff --name-only <base>` (tracked, vs the base snapshot)
+ * plus untracked files. Attribution: keep only delta files the task's own tool calls named (`mentions` + `hints`:
+ * recorded paths, Bash commands, activity summaries), so concurrent agents in one working tree do not steal each
+ * other's files. With no path info at all the whole delta comes back, labelled. Never rejects.
+ * @returns {Promise<{ files: string[], note: string|null, source: 'attributed'|'delta'|'none' }>} absolute paths
+ */
+export async function deriveFiles(task, { mentions = [], hints = [] } = {}) {
+  const none = { files: [], note: null, source: 'none' };
+  try {
+    const g = task.git && typeof task.git.root === 'string' ? task.git : null;
+    if (!g || !HEX.test(String(g.base || '')) || !fs.existsSync(g.root)) return none;
+    const cache = new Map();
+    const top = await repoTop(g.root, cache);
+    if (!top || fs.realpathSync(g.root) !== top) return none;
+    try { await git(top, ['cat-file', '-e', `${g.base}^{commit}`]); } catch (e) { if (e instanceof GitMissing) throw e; return none; }
+    const [tracked, fresh] = await Promise.all([
+      git(top, ['diff', '--name-only', '-z', '--no-renames', g.base], { okCodes: [0, 1] }),
+      git(top, ['ls-files', '--others', '--exclude-standard', '-z']),
+    ]);
+    const delta = [...new Set([...tracked.text.split('\0'), ...fresh.text.split('\0')].filter(Boolean))].sort().slice(0, MAX_FILES * 2);
+    if (!delta.length) return none;
+    const known = [...mentions, ...hints, ...(Array.isArray(task.filesChanged) ? task.filesChanged : [])].filter((x) => typeof x === 'string' && x);
+    if (!known.length) return { files: delta.map((r) => path.join(top, r)), note: DELTA_NOTE, source: 'delta' };
+    const rootPrefix = top + path.sep;
+    const hay = known.map((k) => (k.startsWith(rootPrefix) ? k.slice(rootPrefix.length) : k)).join('\n');
+    const tokens = new Map();
+    const picked = delta.filter((r) => mentioned(r, hay, tokens));
+    return { files: picked.map((r) => path.join(top, r)), note: null, source: picked.length ? 'attributed' : 'none' };
+  } catch (e) {
+    if (e instanceof GitMissing) return none;
+    return none;
+  }
+}
+
+/** HEAD of the repo at `root` as { root (real top), head }, or null (not a repo / git missing). For backfills. */
+export async function repoHead(root) {
+  try {
+    const cache = new Map();
+    const top = await repoTop(root, cache);
+    if (!top) return null;
+    const r = await git(top, ['rev-parse', '--verify', '-q', 'HEAD'], { okCodes: [0, 1, 128] });
+    const head = r.text.trim();
+    return HEX.test(head) ? { root: top, head } : null;
+  } catch { return null; }
+}

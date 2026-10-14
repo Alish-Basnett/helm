@@ -6,6 +6,7 @@ import { icon } from './icons.js';
 import { state, subscribe } from './store.js';
 import { addNote, editNote, deleteNote, startDrafts, canStart } from './actions.js';
 import { bindDraft, clearDraft } from './drafts.js';
+import { openContextMenu } from './contextmenu.js';
 import { codeOn, getPref, onPrefs } from './prefs.js';
 import { codeEditor, composerView, renderCodeBlock, stringDecl, varName } from './code.js';
 
@@ -50,11 +51,54 @@ export function createPreStart({ taskId }) {
     const text = h('div', { class: 'prestart-text' });
     const code = h('div', { class: 'prestart-code' });
     const edit = h('button', { class: 'icon-btn sm', type: 'button', 'aria-label': 'Edit note', title: 'Edit', onclick: () => beginEdit(row) }, icon('pencil', 14));
-    const del = h('button', { class: 'icon-btn sm', type: 'button', 'aria-label': 'Remove note', title: 'Remove', onclick: () => deleteNote(row.__id) }, icon('trash', 14));
-    const row = h('li', { class: 'prestart-note' }, h('div', { class: 'prestart-body' }, text, code), h('div', { class: 'note-actions' }, edit, del));
-    row.__text = text; row.__code = code; row.__id = n.id; row.__editing = false;
+    const del = h('button', { class: 'icon-btn sm', type: 'button', 'aria-label': 'Delete note', title: 'Delete', onclick: () => askDelete(row) }, icon('trash', 14));
+    const actions = h('div', { class: 'note-actions' }, edit, del);
+    const row = h('li', { class: 'prestart-note' }, h('div', { class: 'prestart-body' }, text, code), actions);
+    row.__text = text; row.__code = code; row.__id = n.id; row.__editing = false; row.__actions = actions; row.__editBtn = edit; row.__delBtn = del;
     text.addEventListener('click', () => { if (!getSelection().toString()) beginEdit(row); });
+    code.addEventListener('click', () => { if (!getSelection().toString()) beginEdit(row); });
+    row.addEventListener('contextmenu', (e) => {
+      if (row.__editing || (e.target.closest && e.target.closest('textarea, input'))) return;
+      e.preventDefault();
+      noteMenu(row, e.clientX, e.clientY, row);
+    });
+    row.addEventListener('keydown', (e) => {
+      if (!(e.key === 'ContextMenu' || (e.key === 'F10' && e.shiftKey)) || row.__editing) return;
+      e.preventDefault();
+      const r = (e.target.getBoundingClientRect ? e.target : row).getBoundingClientRect();
+      noteMenu(row, r.left, r.bottom, e.target, true);
+    });
     return row;
+  }
+  function noteMenu(row, x, y, from, focusFirst = false) {
+    openContextMenu({
+      x, y, restoreFocus: from, focusFirst,
+      items: [
+        { label: 'Edit note', icon: 'pencil', onSelect: () => beginEdit(row) },
+        { label: 'Delete note', icon: 'trash', danger: true, onSelect: () => askDelete(row) },
+      ],
+    });
+  }
+  // A small inline confirm in place of the two icons: Delete / Keep. Esc or Keep puts the icons back.
+  function askDelete(row) {
+    if (row.__confirming || row.__editing) return;
+    row.__confirming = true;
+    const yes = h('button', { class: 'btn btn-quiet btn-sm prestart-del-yes', type: 'button', 'aria-label': 'Confirm delete note' }, 'Delete');
+    const no = h('button', { class: 'btn btn-quiet btn-sm', type: 'button', 'aria-label': 'Keep note' }, 'Keep');
+    const box = h('div', { class: 'prestart-confirm', role: 'group', 'aria-label': 'Delete this note?' }, h('span', { class: 'prestart-confirm-q' }, 'Delete?'), yes, no);
+    const close = (refocus) => {
+      if (!row.__confirming) return;
+      row.__confirming = false;
+      box.remove();
+      row.__actions.hidden = false;
+      if (refocus) row.__delBtn.focus();
+    };
+    yes.addEventListener('click', () => { close(false); deleteNote(row.__id); });
+    no.addEventListener('click', () => close(true));
+    box.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); close(true); } });
+    row.__actions.hidden = true;
+    row.__actions.after(box);
+    no.focus();
   }
   function beginEdit(row) {
     const n = row.__note;
@@ -67,18 +111,19 @@ export function createPreStart({ taskId }) {
     host.hidden = true;
     host.after(ed.el);
     ed.sync();
-    const done = (save) => {
+    const done = (save, refocus = false) => {
       if (!row.__editing) return;
       row.__editing = false;
       const v = input.value;
       ed.destroy();
       ed.el.remove();
       host.hidden = false;
+      if (refocus) row.__editBtn.focus({ preventScroll: true });
       if (save && v.trim() && v.trim() !== n.text) editNote(n.id, v);
     };
     input.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); done(false); }
-      else if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); done(true); }
+      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); done(false, true); }
+      else if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); done(true, true); }
     });
     input.addEventListener('blur', () => done(true));
     input.focus();

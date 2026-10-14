@@ -3,7 +3,7 @@ import { h, setText, setAttr, setClass, setHidden, reconcile, startTicker } from
 import { icon } from '../icons.js';
 import { state, sel, subscribe, upsert, ingestActivity, setUI } from '../store.js';
 import { api } from '../api.js';
-import { patchTask, quickActions, runQuickAction, startTask, canStart, startDrafts, startLabel } from '../actions.js';
+import { patchTask, quickActions, runQuickAction, startTask, canStart, startDrafts, startLabel, isInterrupted } from '../actions.js';
 import { createPreStart } from '../prestart.js';
 import { createStartStatus } from '../replies.js';
 import { fmtTokens, fmtElapsed, fmtAgo, STATUS_META, ALL_STATUSES, agentLabel, truncate, cwdTail } from '../format.js';
@@ -209,8 +209,16 @@ export function createSheet(dock) {
 
     setHidden(c.startBtn, !canStart(t));
     const nDrafts = startDrafts(t.id).length;
-    setText(c.startBtn.querySelector('.start-label'), startLabel(nDrafts));
-    c.startBtn.title = nDrafts ? `Start this task and send its ${nDrafts} draft note${nDrafts === 1 ? '' : 's'} with it` : 'Start this task in a live session';
+    const resuming = isInterrupted(t);
+    setText(c.startBtn.querySelector('.start-label'), startLabel(nDrafts, t));
+    if (c.startBtn.dataset.mode !== (resuming ? 'resume' : 'start')) {
+      c.startBtn.dataset.mode = resuming ? 'resume' : 'start';
+      const ni = icon(resuming ? 'replay' : 'play', 13);
+      c.startBtn.replaceChild(ni, c.startBtn.firstChild);
+    }
+    const verb = resuming ? 'Resume' : 'Start';
+    c.startBtn.title = nDrafts ? `${verb} this task and send its ${nDrafts} draft note${nDrafts === 1 ? '' : 's'} with it`
+      : resuming ? 'Its agent was stopped mid-task: resume it in a live session' : 'Start this task in a live session';
     c.startStatus.update(t);
 
     // quick actions

@@ -15,6 +15,7 @@ import { createTalkSheet } from './views/talk.js';
 import { startTaskLinks } from './tasklinks.js';
 import { createSpotlight } from './spotlight.js';
 import { createShelf } from './shelf.js';
+import { createStudioPill } from './studio/pill.js';
 import * as board from './views/board.js';
 import * as projects from './views/projects.js';
 import * as office from './views/office.js';
@@ -28,10 +29,11 @@ import * as learn from './views/learn.js';
 import * as templates from './views/templates.js';
 import * as inbox from './views/inbox.js';
 import * as review from './views/review.js';
+import * as studio from './views/studio.js';
 import * as settings from './views/settings.js';
 import { getPref, applyPrefs, cycleTheme, onPrefs } from './prefs.js';
 
-const VIEW_MODS = { board, projects, office, health, threads, today, workflows, inbox, review, learn, templates, settings };
+const VIEW_MODS = { board, projects, office, health, threads, today, workflows, inbox, review, learn, templates, studio, settings };
 const VIEW_META = {
   board: { label: 'Board', icon: 'board' },
   projects: { label: 'Projects', icon: 'folder' },
@@ -44,6 +46,7 @@ const VIEW_META = {
   review: { label: 'Review', icon: 'review' },
   learn: { label: 'Learn', icon: 'learn' },
   templates: { label: 'Templates', icon: 'templates' },
+  studio: { label: 'Studio', icon: 'pencil' },
   settings: { label: 'Settings', icon: 'gear' },
 };
 
@@ -87,7 +90,8 @@ const diffPanel = createDiffPanel(dock);
 const talk = createTalkSheet(dock);
 const runPanel = createRunPanel(dock);
 bus.on('wf-run-panel', ({ runId, want }) => runPanel.show(runId, want)); // the Workflows view says which run's timeline to show
-const shelf = createShelf({ dock, talk, sheet, taskChat, diffPanel });
+const studioPill = createStudioPill();
+const shelf = createShelf({ dock, talk, sheet, taskChat, diffPanel, studio: studioPill });
 bus.on('toggle-panels', () => shelf.toggleAll());
 startTaskLinks();
 bus.on('open-talk', (sessionId) => talk.open(typeof sessionId === 'string' ? sessionId : undefined));
@@ -264,6 +268,7 @@ subscribe((changed) => {
 
 /* ---------- keyboard ---------- */
 document.addEventListener('keydown', (e) => {
+  if (!e.key) return; // browser autofill dispatches key-less keydown events
   if ((e.metaKey || e.ctrlKey) && !e.altKey && e.key.toLowerCase() === 'k') { e.preventDefault(); spotlight.toggle(); return; }
   // ⌘/Ctrl+. : minimise every open panel to the right-edge shelf, or bring them all back (works while typing)
   if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey && (e.key === '.' || e.code === 'Period')) { e.preventDefault(); shelf.toggleAll(); return; }

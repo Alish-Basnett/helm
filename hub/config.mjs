@@ -1,10 +1,16 @@
 // Configuration: paths, ports, sweep timings. Everything injectable via options or env.
+import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const HUB_DIR = path.dirname(fileURLToPath(import.meta.url));
-export const VERSION = '0.19.3';
+// One source of truth: the plugin manifest. (hub/package.json carries a copy; a test keeps the two equal.)
+function readVersion() {
+  try { return JSON.parse(fs.readFileSync(path.join(HUB_DIR, '..', '.claude-plugin', 'plugin.json'), 'utf8')).version || '0.0.0'; }
+  catch { return '0.0.0'; }
+}
+export const VERSION = readVersion();
 
 const int = (v, d) => {
   if (v === undefined || v === null || v === '') return d;
@@ -36,6 +42,7 @@ export function loadConfig(o = {}, env = process.env) {
     jobMs: int(o.jobMs ?? env.HELM_JOB_MS, 5 * 60_000), // job claimed (or queued) but never answered -> failed
     stepMs: int(o.stepMs ?? env.HELM_STEP_MS, 60 * 60_000), // workflow step claimed but never answered -> failed (node timeouts extend it)
     costWarnUsd: int(o.costWarnUsd ?? env.HELM_COST_WARN_USD, 25), // session health: warn when a session's cost today passes this
+    recapGraceMs: int(o.recapGraceMs ?? env.HELM_RECAP_GRACE_MS, 3 * 60_000), // T-76: a finished agent's task with no recap after this gets one from the sweep (negative: off)
     blockMs: int(o.blockMs ?? env.HELM_BLOCK_MS, 10 * 60_000),
     idleMs: int(o.idleMs ?? env.HELM_IDLE_MS, 2 * 60_000),
     sweepMs: int(o.sweepMs ?? env.HELM_SWEEP_MS, 30_000),

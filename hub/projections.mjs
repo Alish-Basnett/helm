@@ -8,7 +8,9 @@
 import path from 'node:path';
 import { applyWf, bookRunUsage } from './workflows.mjs';
 import { applyTemplate } from './templates.mjs';
+import { applyDoc } from './docs.mjs';
 import { applyConcept, conceptsOnRecap, storeSummary } from './concepts.mjs';
+import { recapFromJson } from './recap.mjs';
 
 export const STALL_REASON = 'no activity for 10 min';
 export const SENDING_TIMEOUT_ERROR = 'delivery unconfirmed — retry';
@@ -17,6 +19,7 @@ export const JOB_UNCLAIMED_ERROR = 'not picked up by a live session';
 export const TASK_STATUSES = ['backlog', 'next', 'in_progress', 'review', 'done', 'later', 'blocked', 'archived'];
 export const HUB_SESSION = '_hub';
 export const MAX_CHOICES = 30;
+const REPORT_MAX = 16000; // T-76: longest final report kept per agent
 export const CONFLICT_WINDOW_MS = 10 * 60_000; // a finished agent's file touch still counts for this long
 const LIVE = ['running', 'stalled', 'waiting'];
 const TOOL_EDIT_CAP = 50; // files per tool.called
@@ -39,7 +42,7 @@ const baseName = (p) => {
 };
 
 // ---------------------------------------------------------------- row mappers
-export const toProject = (r) => ({ id: r.id, name: r.name, createdAt: r.created_at, archived: !!r.archived, autoStart: !!r.auto_start });
+export const toProject = (r) => ({ id: r.id, name: r.name, createdAt: r.created_at, archived: !!r.archived, autoStart: !!r.auto_start, autoConcurrency: r.auto_concurrency || 1 });
 export const toSession = (r) => ({
   id: r.id, projectId: r.project_id, cwd: r.cwd, title: r.title, model: r.model,
   startedAt: r.started_at, lastSeenAt: r.last_seen_at, status: r.status, busy: !!r.busy,
@@ -127,6 +130,10 @@ export const toTask = (r) => ({
   startNoteId: r.start_note_id ?? null, git: parse(r.git, null), diffStat: parse(r.diff_stat, null),
   choices: parse(r.choices, []), parentTaskId: r.parent_task_id ?? null, autoStartedAt: r.auto_started_at ?? null,
   runId: r.run_id ?? null, nodeId: r.node_id ?? null, branch: parse(r.branch, null),
+  filesNote: r.files_note ?? null,
+  // T-70: the latest agent ended without success and the card is not finished: the UI offers Resume instead of Start.
+  interrupted: !!r.interrupted && r.status !== 'done' && r.status !== 'archived',
+  lastAgentId: r.agent_id ?? null,
 });
 export const toNote = (r) => ({
   id: r.id, target: { kind: r.target_kind, id: r.target_id }, sessionId: r.session_id, text: r.text,
@@ -153,9 +160,9 @@ export const toDigest = (r) => ({
   id: r.id, date: r.date, projectId: r.project_id ?? null, text: r.text, createdAt: r.created_at,
 });
 
-export const USAGE_KINDS = ['recap', 'answer', 'explain', 'digest', 'note_turn', 'wf_step', 'wf_review', 'wf_draft', 'concept_summary'];
+export const USAGE_KINDS = ['recap', 'answer', 'explain', 'digest', 'note_turn', 'wf_step', 'wf_review', 'wf_draft', 'concept_summary', 'doc_draft', 'doc_edit'];
 /** Kinds that count as work the user asked for (the rest is Helm's own overhead). */
-export const REQUESTED_KINDS = ['note_turn', 'wf_step'];
+export const REQUESTED_KINDS = ['note_turn', 'wf_step', 'doc_draft', 'doc_edit'];
 export const NOTE_VIAS = ['prompt', 'send_message', 'followup_spawn', 'answer', 'start', 'compact'];
 export const MAX_NOTE_ATTACHMENTS = 10;
 const pad2 = (n) => String(n).padStart(2, '0');
@@ -417,13 +424,16 @@ export class Projector {
     return this.getTask(id);
   }
   /** Move a task to `status`, maintaining order / blockedReason / doneAt. */
-  setTaskStatus(t, status, at, reason, order) {
+  setTaskStatus(t, status, at, reason, order, by) {
     const changed = t.status !== status;
     const ord = order !== undefined && order !== null ? order : changed ? this.endOrder(t.project_id, status) : t.ord;
     let br = null;
     if (status === 'blocked') br = reason !== undefined ? reason : t.status === 'blocked' ? t.blocked_reason : null;
+    // T-53: who set a block. Only a user PATCH passes by='user'; every other block (agent failure, stall, workflow, dependency)
+    // is hub-made (null). Re-saving an existing block without naming a source keeps whoever set it.
+    const bb = status !== 'blocked' ? null : by !== undefined ? by : t.status === 'blocked' ? t.blocked_by ?? null : null;
     this.upd('tasks', t.id, {
-      status, ord, blocked_reason: br, updated_at: at,
+      status, ord, blocked_reason: br, blocked_by: bb, updated_at: at,
       done_at: status === 'done' ? (t.done_at ?? at) : null,
     });
   }
@@ -501,19 +511,26 @@ export class Projector {
     this.answerQuestions({ agentId: a.id }, at); // a finished agent cannot be waiting for anyone
     this.recomputeConflicts(at);
     const t = this.getTask(a.task_id);
+    let keptBlocked = false;
     if (t) {
       const mine = !t.agent_id || t.agent_id === a.id;
       if (mine && t.status !== 'done' && t.status !== 'archived') {
-        if (ok) this.setTaskStatus(t, 'review', at, null);
+        // T-53: a card the user parked (later) or blocked keeps its status and reason; the rest of this method still records
+        // the end, tokens, interrupted flag and activity, and the caller keeps the report, files and recap.
+        const parked = t.status === 'later' || (t.status === 'blocked' && t.blocked_by === 'user');
+        if (parked) keptBlocked = t.status === 'blocked';
+        else if (ok) this.setTaskStatus(t, 'review', at, null);
         else this.setTaskStatus(t, 'blocked', at, cut(summary, 500) || 'agent failed');
       }
+      if (mine) this.upd('tasks', t.id, { interrupted: ok ? 0 : 1 });
       if (isNum(tokens) && tokens > 0) this.upd('tasks', t.id, { tokens: t.tokens + tokens });
       this.upd('tasks', t.id, { updated_at: at });
       this.pushTask(t.id);
     }
     this.addActivity({
       sessionId: a.session_id, agentId: a.id, taskId: a.task_id, kind: 'status',
-      summary: `${ok ? 'Agent finished' : 'Agent failed'}: ${cut(summary, 300) || a.description}`, ok, at,
+      summary: ok && keptBlocked ? 'Agent finished; card kept blocked by user'
+        : `${ok ? 'Agent finished' : 'Agent failed'}: ${cut(summary, 300) || a.description}`, ok, at,
     });
   }
   /** Rename a pending agent id to its real id everywhere. */
@@ -579,6 +596,7 @@ export class Projector {
     if (late) {
       this.db.run('DELETE FROM late_completions WHERE session_id = ? AND agent_id = ?', sid, agentId);
       this.completeAgent(this.getAgent(agentId), !!late.ok, late.summary, late.tokens, late.at);
+      this.keepReport(agentId, late.report);
     }
   }
 
@@ -593,10 +611,13 @@ export class Projector {
       case 'agent.spawned': return this.onAgentSpawned(ev);
       case 'agent.bound': return this.onAgentBound(ev);
       case 'agent.git': return this.onAgentGit(ev);
+      case 'task.git': return this.onTaskGit(ev);
+      case 'hub.task.files': return this.hTaskFiles(ev);
       case 'tool.called': return this.onToolCalled(ev);
       case 'tool.finished': return this.onToolFinished(ev);
       case 'agent.completed': return this.onAgentCompleted(ev);
       case 'recap.generated': return this.onRecap(ev);
+      case 'hub.agent.report': return this.hAgentReport(ev);
       case 'note.result': return this.onNoteResult(ev);
       case 'note.reply': return this.onNoteReply(ev);
       case 'reconcile': return this.onReconcile(ev);
@@ -628,6 +649,9 @@ export class Projector {
       case 'task.choices': return this.onTaskChoices(ev);
       case 'hub.task.choices': return this.hTaskChoices(ev);
       case 'hub.template.create': case 'hub.template.update': case 'hub.template.used': return applyTemplate(this, ev);
+      case 'hub.doc.create': case 'hub.doc.rename': case 'hub.doc.archive': case 'hub.doc.edit': case 'hub.doc.save': case 'hub.doc.export':
+      case 'hub.doc.drafted': case 'hub.doc.comment.add': case 'hub.doc.comment.update': case 'hub.doc.comment.delete':
+      case 'hub.doc.apply': case 'hub.doc.applied': case 'hub.doc.revert': return applyDoc(this, ev);
       case 'hub.concept.update': case 'hub.concept.merge': return applyConcept(this, ev);
       default:
         if (ev.type.startsWith('wf.')) return applyWf(this, ev);
@@ -772,7 +796,7 @@ export class Projector {
        VALUES (?, ?, ?, ?, ?, ?, ?, 'running', ?, NULL, ?, 'starting', 0, 0, ?)`,
       id, sid, task.id, toolUseId, subagentType, str(d.model), cut(description, 500), at, at, str(d.parentAgentId) || null);
     this.setTaskStatus(task, 'in_progress', at, null);
-    this.upd('tasks', task.id, { agent_id: id, updated_at: at, session_id: task.session_id ?? sid });
+    this.upd('tasks', task.id, { agent_id: id, interrupted: 0, updated_at: at, session_id: task.session_id ?? sid });
     this.indexTask(this.getTask(task.id));
     this.pushTask(task.id);
     this.pushAgent(id);
@@ -799,6 +823,7 @@ export class Projector {
     let a = toolUseId ? this.db.get('SELECT * FROM agents WHERE tool_use_id = ? AND session_id = ?', toolUseId, sid) : undefined;
     if (!a && agentId) a = this.getAgent(agentId);
     if (!a) { this.log?.warn(`agent.git for unknown agent (toolUseId ${toolUseId || '-'}, agentId ${agentId || '-'})`); return; }
+    if (d.discovered === true && a.git) return; // T-66: a late base taken for an agent found by reconcile never replaces a real one
     const at = isNum(d.at) ? d.at : ev.at;
     const git = { root, base, head, at };
     this.upd('agents', a.id, { git: JSON.stringify({ cwd: str(d.cwd), ...git }) });
@@ -808,6 +833,50 @@ export class Projector {
       this.upd('tasks', t.id, { git: JSON.stringify(git) });
       this.pushTask(t.id);
     }
+  }
+  /** task.git (T-66): the repo state when the main loop started working on a task itself (tool action "work"). First base wins. */
+  onTaskGit(ev) {
+    const d = ev.data;
+    const root = str(d.root), base = str(d.base), head = str(d.head);
+    if (!root || !path.isAbsolute(root)) { this.log?.warn('task.git: root must be an absolute path'); return; }
+    if (!GIT_REV_RE.test(base) || !GIT_REV_RE.test(head)) { this.log?.warn('task.git: base/head must be commit ids'); return; }
+    const t = this.getTask(str(d.taskId));
+    if (!t) { this.log?.warn(`task.git for unknown task ${d.taskId}`); return; }
+    if (t.status !== 'in_progress') return; // the card moved on before the base arrived: the main loop is no longer on it (T-51)
+    if (t.git) return;
+    this.upd('tasks', t.id, { git: JSON.stringify({ root, base, head, at: isNum(d.at) ? d.at : ev.at }) });
+    this.pushTask(t.id);
+  }
+  /** Remember paths a task's own tool calls mentioned (Edit/Write targets, paths inside Bash commands). Silent: nothing shows them. */
+  addMentions(taskId, list) {
+    const paths = Array.isArray(list) ? list.filter((f) => typeof f === 'string' && f && f.length <= 400) : [];
+    const t = paths.length && taskId ? this.getTask(taskId) : undefined;
+    if (!t) return;
+    const cur = parse(t.mentions, []);
+    let changed = false;
+    for (const f of paths) if (cur.length < 800 && !cur.includes(f)) { cur.push(f); changed = true; }
+    if (changed) this.upd('tasks', t.id, { mentions: JSON.stringify(cur) });
+  }
+  /**
+   * hub.task.files (T-66): { taskId, files, mode?: 'merge'|'replace', note?, git?: {root, base, head, at} }.
+   * The hub's decision about which files a task changed (derived from git, or attached by hand for a backfill).
+   * `note` labels how (null = precise). `git` is applied only when the task has no base yet.
+   */
+  hTaskFiles(ev) {
+    const d = ev.data;
+    const t = this.getTask(str(d.taskId));
+    if (!t) throw new Error('task not found');
+    const files = (Array.isArray(d.files) ? d.files : []).filter((f) => typeof f === 'string' && f && !f.includes('\0'));
+    const cur = d.mode === 'replace' ? [] : parse(t.files_changed, []);
+    for (const f of files) if (!cur.includes(f) && cur.length < 500) cur.push(f);
+    const f = { files_changed: JSON.stringify(cur), files_note: d.note ? cut(str(d.note), 300) : null };
+    const g = d.git;
+    if (!t.git && g && path.isAbsolute(str(g.root)) && GIT_REV_RE.test(str(g.base)) && GIT_REV_RE.test(str(g.head))) {
+      f.git = JSON.stringify({ root: str(g.root), base: str(g.base), head: str(g.head), at: isNum(g.at) ? g.at : ev.at });
+    }
+    this.upd('tasks', t.id, f);
+    this.pushTask(t.id);
+    return toTask(this.getTask(t.id));
   }
   /** hub.task.diff: freeze a diff for the task and take its stat. */
   hTaskDiff(ev) {
@@ -858,6 +927,17 @@ export class Projector {
     this.pushTask(taskId);
     return toTask(this.getTask(taskId));
   }
+  /**
+   * The task a main-loop event (tool.called / tool.finished / task.git) may be attributed to (T-51). The mod tags main-loop
+   * calls with the card it was told to "work" on, but a person can move that card on in the web UI at any time. The tag counts
+   * only while that task is in_progress when the event is projected. Projection runs in event order, so a rebuild reaches the
+   * same answer. Returns the task id, or null (the event stays session-level).
+   */
+  mainLoopTask(d) {
+    const id = str(d.taskId);
+    const t = id ? this.getTask(id) : undefined;
+    return t && t.status === 'in_progress' ? t.id : null;
+  }
   onToolCalled(ev) {
     const d = ev.data, sid = ev.sessionId, at = ev.at;
     this.ensureSession(sid, at);
@@ -866,8 +946,7 @@ export class Projector {
     const tool = str(d.tool);
     const agentId = str(d.agentId);
     const a = agentId ? this.resolveAgent(sid, agentId, at) : null;
-    // Main-loop calls carry the task the session said it is working on (mod: `mcp__helm__task` action "work").
-    const mainTask = !agentId && d.taskId && this.getTask(str(d.taskId)) ? str(d.taskId) : null;
+    const mainTask = agentId ? null : this.mainLoopTask(d);
     this.addActivity({
       sessionId: sid, agentId: a ? a.id : agentId || null, taskId: a ? a.task_id : mainTask,
       kind: 'tool', tool, summary, at,
@@ -898,6 +977,7 @@ export class Projector {
       }
     }
     if (a && Array.isArray(d.files)) this.touchFiles(a, d.files, at);
+    if (Array.isArray(d.paths)) this.addMentions(a ? a.task_id : mainTask, d.paths);
   }
   onToolFinished(ev) {
     const d = ev.data, sid = ev.sessionId, at = ev.at;
@@ -905,7 +985,7 @@ export class Projector {
     this.touchSession(sid, at);
     const agentId = str(d.agentId);
     const a = agentId ? this.resolveAgent(sid, agentId, at) : null;
-    const mainTask = !agentId && d.taskId && this.getTask(str(d.taskId)) ? str(d.taskId) : null;
+    const mainTask = agentId ? null : this.mainLoopTask(d);
     this.addActivity({
       sessionId: sid, agentId: a ? a.id : agentId || null, taskId: a ? a.task_id : mainTask, kind: 'tool_done',
       tool: str(d.tool), summary: cut(str(d.summary) || str(d.tool), 300),
@@ -947,18 +1027,24 @@ export class Projector {
     const a = this.resolveAgent(sid, agentId, at);
     if (!a) {
       this.db.run(
-        `INSERT OR REPLACE INTO late_completions(session_id, agent_id, ok, summary, tokens, at) VALUES (?, ?, ?, ?, ?, ?)`,
-        sid, agentId, ok ? 1 : 0, cut(str(d.summary), 1000), isNum(d.tokens) ? d.tokens : null, at);
+        `INSERT OR REPLACE INTO late_completions(session_id, agent_id, ok, summary, tokens, at, report) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        sid, agentId, ok ? 1 : 0, cut(str(d.summary), 1000), isNum(d.tokens) ? d.tokens : null, at, d.report ? cut(str(d.report), REPORT_MAX) : null);
       return;
     }
     this.completeAgent(a, ok, str(d.summary), isNum(d.tokens) ? d.tokens : undefined, at);
+    // T-76: the full final report is kept so a recap can always be rebuilt from it (never replaced by a later empty one).
+    this.keepReport(a.id, d.report);
     // Files the agent reported in its final message (edits made through Bash never pass Edit/Write).
     this.addFiles(a.task_id, d.files, at);
   }
   onRecap(ev) {
-    const d = ev.data, at = ev.at;
-    const t = this.getTask(str(d.taskId));
-    if (!t) { this.log?.warn(`recap.generated for unknown task ${d.taskId}`); return; }
+    const d = ev.data;
+    this.applyRecap(str(d.taskId), d, ev.at, ev.sessionId);
+  }
+  /** Set a task's recap (recap.generated, the recap job's result, a backfill). */
+  applyRecap(taskId, d, at, sessionId) {
+    const t = this.getTask(taskId);
+    if (!t) { this.log?.warn(`recap.generated for unknown task ${taskId}`); return; }
     const concepts = [];
     for (const c of Array.isArray(d.concepts) ? d.concepts : []) {
       const v = cut(str(c).trim(), 60);
@@ -969,11 +1055,21 @@ export class Projector {
     this.indexRecap(this.getTask(t.id));
     conceptsOnRecap(this, t.id, concepts, at);
     this.pushTask(t.id);
-    this.ensureSession(ev.sessionId, at);
+    this.ensureSession(sessionId, at);
     this.addActivity({
-      sessionId: t.session_id || ev.sessionId, agentId: t.agent_id, taskId: t.id, kind: 'recap',
+      sessionId: t.session_id || sessionId, agentId: t.agent_id, taskId: t.id, kind: 'recap',
       summary: cut(recap.what || 'Recap generated', 400), at,
     });
+  }
+  /** Store an agent's final report once (the first non-empty one wins; a recovered completion carries none). */
+  keepReport(agentId, report) {
+    const text = typeof report === 'string' ? report.trim() : '';
+    const a = text ? this.getAgent(agentId) : null;
+    if (a && !a.report) this.upd('agents', a.id, { report: cut(text, REPORT_MAX) });
+  }
+  /** hub.agent.report (T-76): attach a final report recovered from elsewhere (a transcript) to an agent that has none. */
+  hAgentReport(ev) {
+    this.keepReport(str(ev.data.agentId), ev.data.report);
   }
   onNoteResult(ev) {
     const d = ev.data, at = ev.at;
@@ -1031,10 +1127,26 @@ export class Projector {
       this.db.run(
         `INSERT INTO agents(id, session_id, task_id, tool_use_id, subagent_type, model, description, status,
            started_at, ended_at, last_activity_at, now_doing, tool_count, tokens)
-         VALUES (?, ?, NULL, ?, 'unknown', '', 'Agent discovered by reconcile', 'running', ?, NULL, ?, '', 0, 0)`,
-        u.agentId, sid, `reconcile:${u.agentId}`, at, at);
+         VALUES (?, ?, NULL, ?, ?, '', ?, 'running', ?, NULL, ?, '', 0, 0)`,
+        u.agentId, sid, `reconcile:${u.agentId}`, str(u.type) || 'unknown',
+        cut(str(u.description).replace(TAG_RE, '').trim(), 500) || 'Agent discovered by reconcile', at, at);
       this.pushAgent(u.agentId);
       this.addActivity({ sessionId: sid, agentId: u.agentId, kind: 'status', summary: 'Agent discovered by reconcile', at });
+    }
+    // 1b. a discovered agent whose description carries [helm:T-n] belongs to that card (spawns the mod made itself).
+    for (const r of report) {
+      const m = alive(r.status) && TAG_RE.exec(str(r.description));
+      const a = m && this.getAgent(r.agentId);
+      if (!a || a.task_id) continue;
+      const task = this.getTask(m[1].toUpperCase());
+      if (!task) continue;
+      this.upd('agents', a.id, { task_id: task.id });
+      if (a.status === 'stalled') this.upd('agents', a.id, { status: 'running' });
+      this.setTaskStatus(task, 'in_progress', at, null);
+      this.upd('tasks', task.id, { agent_id: a.id, interrupted: 0, updated_at: at });
+      this.db.run('UPDATE activity SET task_id = ? WHERE agent_id = ? AND task_id IS NULL', task.id, a.id);
+      this.pushTask(task.id);
+      this.pushAgent(a.id);
     }
     // 2. hub says live but the engine says finished / has no such agent.
     for (const a of live()) {
@@ -1086,9 +1198,19 @@ export class Projector {
       this.upd('jobs', j.id, { state: 'running', claimed_at: j.claimed_at ?? at, result: cut(text, 20000), error: null, done_at: null });
       this.pushJob(j.id);
       return;
+    } else if (j.kind === 'doc_draft' || j.kind === 'doc_edit') {
+      // v0.15: like wf_draft, keep the raw reply on a still-running job; hub/docsengine.mjs judges it right after this commit.
+      this.upd('jobs', j.id, { state: 'running', claimed_at: j.claimed_at ?? at, result: cut(text, 40000), error: null, done_at: null });
+      this.pushJob(j.id);
+      return;
     } else if (j.kind === 'concept_summary') {
       // v0.13: the page becomes Concept.summary (the slug may have been merged away since the job was made)
       storeSummary(this, str(parse(j.input, {}).concept?.slug), text, at);
+    } else if (j.kind === 'recap') {
+      // T-76: a Haiku recap built from the task's activity trail (the safety net / backfill when no report is stored)
+      const r = recapFromJson(text);
+      if (!r) { this.failJob(j, 'recap reply was not the expected JSON', at); return; }
+      if (this.getTask(j.task_id)) this.applyRecap(j.task_id, r, at, ev.sessionId);
     } else if (j.kind === 'digest') {
       this.createDigest({ date: str(parse(j.input, {}).date), projectId: j.project_id, text: cut(text, 20000), at });
     }
@@ -1216,6 +1338,7 @@ export class Projector {
     if (d.name !== undefined) { f.name = cut(str(d.name), 200); f.auto = 0; }
     if (d.archived !== undefined) f.archived = d.archived ? 1 : 0;
     if (d.autoStart !== undefined) f.auto_start = d.autoStart ? 1 : 0;
+    if (d.autoConcurrency !== undefined) f.auto_concurrency = Math.min(5, Math.max(1, d.autoConcurrency | 0));
     this.upd('projects', p.id, f);
     const np = this.getProject(p.id);
     this.setDoc('project', np.id, np.name, '', { at: ev.at });
@@ -1328,7 +1451,9 @@ export class Projector {
     if (p.status !== undefined || p.order !== undefined || p.blockedReason !== undefined) {
       const cur = this.getTask(id);
       const status = p.status ?? cur.status;
-      this.setTaskStatus(cur, status, ev.at, p.blockedReason, p.order);
+      // T-53: this event is the user's PATCH, so a block it sets (status 'blocked' or a non-null reason) is the user's.
+      const by = status === 'blocked' && (p.status === 'blocked' || (p.blockedReason !== undefined && p.blockedReason !== null)) ? 'user' : undefined;
+      this.setTaskStatus(cur, status, ev.at, p.blockedReason, p.order, by);
     }
     const nt = this.getTask(id);
     this.indexTask(nt);
@@ -1447,10 +1572,12 @@ export class Projector {
       this.pushNote(fid);
     }
     const nid = this.nextId('N');
+    // T-70 Resume: a task-targeted note, so the mod spawns the follow-up builder itself (see register.ts runNote).
+    const resume = ev.data.resume === true;
     this.db.run(
       `INSERT INTO notes(id, target_kind, target_id, session_id, text, state, created_at, queued_at, ran_at, via, error, sending_at)
-       VALUES (?, 'session', ?, ?, ?, 'queued', ?, ?, NULL, NULL, NULL, NULL)`,
-      nid, sessionId, sessionId, text, ev.at, ev.at);
+       VALUES (?, ?, ?, ?, ?, 'queued', ?, ?, NULL, NULL, NULL, NULL)`,
+      nid, resume ? 'task' : 'session', resume ? id : sessionId, sessionId, text, ev.at, ev.at);
     this.indexNote(this.getNote(nid));
     this.pushNote(nid);
     this.addActivity({
