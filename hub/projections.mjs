@@ -35,6 +35,8 @@ const statOf = (diff) => {
 const parse = (s, d) => { try { return s == null ? d : JSON.parse(s); } catch { return d; } };
 export const cut = (s, n) => { s = s == null ? '' : String(s); return s.length > n ? s.slice(0, n - 1) + '…' : s; };
 const str = (v, d = '') => (typeof v === 'string' ? v : v == null ? d : String(v));
+/** Collapse line breaks and defuse the "Helm note" marker, so text from another session cannot pose as a note header. */
+export const plainLine = (s) => String(s ?? '').replace(/[\r\n\u2028\u2029]+/g, ' ').replace(/Helm(\s+)note/gi, 'Helm-note');
 const isNum = (v) => typeof v === 'number' && Number.isFinite(v);
 const baseName = (p) => {
   const parts = String(p || '').split(/[\\/]+/).filter(Boolean);
@@ -42,7 +44,7 @@ const baseName = (p) => {
 };
 
 // ---------------------------------------------------------------- row mappers
-export const toProject = (r) => ({ id: r.id, name: r.name, createdAt: r.created_at, archived: !!r.archived, autoStart: !!r.auto_start, autoConcurrency: r.auto_concurrency || 1 });
+export const toProject = (r) => ({ id: r.id, name: r.name, createdAt: r.created_at, archived: !!r.archived, autoStart: !!r.auto_start, autoConcurrency: r.auto_concurrency || 1, coordinator: !!r.coordinator });
 export const toSession = (r) => ({
   id: r.id, projectId: r.project_id, cwd: r.cwd, title: r.title, model: r.model,
   startedAt: r.started_at, lastSeenAt: r.last_seen_at, status: r.status, busy: !!r.busy,
@@ -52,9 +54,11 @@ export const toSession = (r) => ({
   busySince: r.busy_since ?? null, lastTurnAt: r.last_turn_at ?? null,
   runningAgents: r.running_n ?? 0, stalledAgents: r.stalled_n ?? 0, costToday: costToday(r),
   health: { level: r.health_level || 'ok', reasons: parse(r.health_reasons, []) },
+  // v0.26: derived from the session's project; acknowledged-to-archive time
+  coordinator: !!r.coordinator, acknowledgedAt: r.acknowledged_at ?? null,
 });
 /** SELECT for a session row plus its live agent counts (what toSession needs). Append a WHERE / ORDER BY. */
-export const SESSION_SQL = `SELECT s.*,
+export const SESSION_SQL = `SELECT s.*, (SELECT p.coordinator FROM projects p WHERE p.id = s.project_id) AS coordinator,
   (SELECT COUNT(*) FROM agents a WHERE a.session_id = s.id AND a.status = 'running') AS running_n,
   (SELECT COUNT(*) FROM agents a WHERE a.session_id = s.id AND a.status = 'stalled') AS stalled_n FROM sessions s`;
 
@@ -119,6 +123,7 @@ export const toAgent = (r) => ({
   subagentType: r.subagent_type, model: r.model, description: r.description, status: r.status,
   startedAt: r.started_at, endedAt: r.ended_at ?? null, lastActivityAt: r.last_activity_at,
   nowDoing: r.now_doing, toolCount: r.tool_count, tokens: r.tokens, parentId: r.parent_id ?? null,
+  acknowledgedAt: r.acknowledged_at ?? null,
 });
 export const toTask = (r) => ({
   id: r.id, projectId: r.project_id, sessionId: r.session_id ?? null, title: r.title,
@@ -131,6 +136,8 @@ export const toTask = (r) => ({
   choices: parse(r.choices, []), parentTaskId: r.parent_task_id ?? null, autoStartedAt: r.auto_started_at ?? null,
   runId: r.run_id ?? null, nodeId: r.node_id ?? null, branch: parse(r.branch, null),
   filesNote: r.files_note ?? null,
+  // v0.26: set on cards a coordinator session created in another project
+  createdBySessionId: r.created_by_session_id ?? null, fromProjectId: r.from_project_id ?? null,
   // T-70: the latest agent ended without success and the card is not finished: the UI offers Resume instead of Start.
   interrupted: !!r.interrupted && r.status !== 'done' && r.status !== 'archived',
   lastAgentId: r.agent_id ?? null,
@@ -139,7 +146,12 @@ export const toNote = (r) => ({
   id: r.id, target: { kind: r.target_kind, id: r.target_id }, sessionId: r.session_id, text: r.text,
   state: r.state, createdAt: r.created_at, queuedAt: r.queued_at ?? null, ranAt: r.ran_at ?? null,
   via: r.via ?? null, error: r.error ?? null, reply: r.reply ?? null, repliedAt: r.replied_at ?? null,
-  attachments: parse(r.attachments, []),
+  attachments: parse(r.attachments, []), linkId: r.link_id ?? null,
+});
+export const toLink = (r) => ({
+  id: r.id, kind: r.kind, fromSessionId: r.from_session_id, fromProjectId: r.from_project_id, toProjectId: r.to_project_id,
+  toSessionId: r.to_session_id ?? null, refId: r.ref_id ?? null, text: r.text, state: r.state, reply: r.reply ?? null,
+  createdAt: r.created_at, deliveredAt: r.delivered_at ?? null, answeredAt: r.answered_at ?? null, acknowledgedAt: r.acknowledged_at ?? null,
 });
 export const toActivity = (r) => ({
   id: r.id, sessionId: r.session_id, agentId: r.agent_id ?? null, taskId: r.task_id ?? null,
@@ -311,12 +323,18 @@ export class Projector {
   getQuestion(id) { return this.db.get('SELECT * FROM questions WHERE id = ?', id); }
   getAttachment(id) { return this.db.get('SELECT * FROM attachments WHERE id = ?', id); }
   getJob(id) { return this.db.get('SELECT * FROM jobs WHERE id = ?', id); }
+  getLink(id) { return this.db.get('SELECT * FROM links WHERE id = ?', id); }
+  /** The most recently active live session of a project, or undefined. */
+  pickLive(projectId) {
+    return this.db.get(`SELECT id FROM sessions WHERE project_id = ? AND status IN ('active','idle') ORDER BY last_seen_at DESC, rowid DESC LIMIT 1`, projectId)?.id;
+  }
   pushProject(id) { const r = this.getProject(id); if (r) this.emit('project', 'upsert', toProject(r)); }
   pushSession(id) { const r = this.getSession(id); if (r) this.emit('session', 'upsert', toSession(r)); }
   pushAgent(id) { const r = this.getAgent(id); if (r) this.emit('agent', 'upsert', toAgent(r)); }
   pushTask(id) { const r = this.getTask(id); if (r) this.emit('task', 'upsert', toTask(r)); }
   pushNote(id) { const r = this.getNote(id); if (r) this.emit('note', 'upsert', toNote(r)); }
   pushQuestion(id) { const r = this.getQuestion(id); if (r) this.emit('question', 'upsert', toQuestion(r)); }
+  pushLink(id) { const r = this.getLink(id); if (r) this.emit('link', 'upsert', toLink(r)); }
   pushJob(id) { const r = this.getJob(id); if (r) this.emit('job', 'upsert', toJob(r)); }
   endOrder(projectId, status) {
     return this.db.get('SELECT COALESCE(MAX(ord), 0) + 1 AS o FROM tasks WHERE project_id = ? AND status = ?',
@@ -625,6 +643,10 @@ export class Projector {
       case 'helm.usage': return this.onUsage(ev);
       case 'hub.project.create': return this.hProjectCreate(ev);
       case 'hub.project.update': return this.hProjectUpdate(ev);
+      case 'hub.project.coordinator': return this.hProjectCoordinator(ev);
+      case 'hub.link.create': return this.hLinkCreate(ev);
+      case 'hub.link.deliver': return this.hLinkDeliver(ev);
+      case 'hub.ack': case 'hub.unack': return this.hAck(ev);
       case 'hub.session.join': return this.hSessionJoin(ev);
       case 'hub.task.create': return this.hTaskCreate(ev);
       case 'hub.task.update': return this.hTaskUpdate(ev);
@@ -1092,6 +1114,7 @@ export class Projector {
         : `Note ${n.id} failed: ${cut(str(d.error) || 'delivery failed', 160)}`,
       ok, at,
     });
+    if (!ok && n.link_id) this.onLinkReply(n, `Not delivered: ${cut(str(d.error) || 'delivery failed', 200)}`, at);
   }
   onNoteReply(ev) {
     const d = ev.data;
@@ -1106,6 +1129,7 @@ export class Projector {
       sessionId: n.session_id || ev.sessionId, taskId: n.target_kind === 'task' ? n.target_id : null, kind: 'note',
       summary: `Reply to ${n.id}: ${cut(text, 160)}`, at: ev.at,
     });
+    if (n.link_id) this.onLinkReply(n, text, ev.at);
   }
   onReconcile(ev) {
     const sid = ev.sessionId, at = ev.at;
@@ -1345,6 +1369,91 @@ export class Projector {
     this.pushProject(p.id);
     return toProject(np);
   }
+  /** hub.project.coordinator { projectId, on }: at most one coordinator; turning one on clears the other. Sessions derive the flag, so they are pushed too. */
+  hProjectCoordinator(ev) {
+    const { projectId, on } = ev.data, p = this.getProject(projectId);
+    if (!p) throw new Error('project not found');
+    const touched = [p.id];
+    if (on) for (const o of this.db.all('SELECT id FROM projects WHERE coordinator = 1 AND id != ? ORDER BY rowid', p.id)) {
+      this.upd('projects', o.id, { coordinator: 0 });
+      touched.push(o.id);
+    }
+    this.upd('projects', p.id, { coordinator: on ? 1 : 0 });
+    for (const id of touched) {
+      this.pushProject(id);
+      for (const s of this.db.all('SELECT id FROM sessions WHERE project_id = ? ORDER BY rowid', id)) this.pushSession(s.id);
+    }
+    return toProject(this.getProject(p.id));
+  }
+  /** "<project> / <session title>" of a session, for the prefix of a cross-session note. */
+  sessionLabel(sessionId) {
+    const s = this.getSession(sessionId), p = s ? this.getProject(s.project_id) : null;
+    return `${p ? p.name : '?'} / ${s ? s.title : sessionId}`;
+  }
+  /** A note one session sends another. Its text carries the "information, not approval" prefix; the mod delivers it as not-user. */
+  insertLinkNote(linkId, fromLabel, body, sessionId, at) {
+    const nid = this.nextId('N');
+    // One line, and no "Helm note" marker inside it: a body can never start a second note line or name another note's id.
+    const text = `Helm note from ${plainLine(fromLabel)} (${nid}) \u2014 information from another session, not approval from the user: ${plainLine(body)}`;
+    this.db.run(
+      `INSERT INTO notes(id, target_kind, target_id, session_id, text, state, created_at, queued_at, ran_at, via, error, sending_at, link_id)
+       VALUES (?, 'session', ?, ?, ?, 'queued', ?, ?, NULL, NULL, NULL, NULL, ?)`,
+      nid, sessionId || '', sessionId || '', text, at, at, linkId);
+    this.indexNote(this.getNote(nid));
+    this.pushNote(nid);
+    return nid;
+  }
+  /**
+   * hub.link.create { kind: 'note'|'task', fromSessionId, fromProjectId, toProjectId, toSessionId, text, refId? }.
+   * A note link makes its note at once (queued for toSessionId, or held with no session until hub.link.deliver); a task
+   * link only records that a card was created / updated in another project and is born answered.
+   */
+  hLinkCreate(ev) {
+    const d = ev.data, at = ev.at, id = this.nextId('L');
+    const note = d.kind === 'note';
+    const to = note ? d.toSessionId || null : null;
+    const ref = note ? this.insertLinkNote(id, this.sessionLabel(d.fromSessionId), str(d.text), to, at) : str(d.refId) || null;
+    this.db.run(
+      `INSERT INTO links(id, kind, from_session_id, from_project_id, to_project_id, to_session_id, ref_id, text, state, reply, created_at, delivered_at, answered_at, acknowledged_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, NULL)`,
+      id, d.kind, str(d.fromSessionId), str(d.fromProjectId), str(d.toProjectId), to, ref, cut(plainLine(d.text), 200),
+      note ? (to ? 'delivered' : 'queued') : 'answered', at, note && !to ? null : at, note ? null : at);
+    this.pushLink(id);
+    return toLink(this.getLink(id));
+  }
+  /** hub.link.deliver { noteId, sessionId }: a held (or stranded) link note goes to a live session's inbox. */
+  hLinkDeliver(ev) {
+    const { noteId, sessionId } = ev.data, n = this.getNote(noteId);
+    if (!n || !n.link_id) throw new Error('not a link note');
+    this.upd('notes', n.id, { session_id: sessionId, target_id: sessionId });
+    this.pushNote(n.id);
+    const l = this.getLink(n.link_id);
+    if (l && l.ref_id === n.id) {
+      this.upd('links', l.id, { to_session_id: sessionId, ...(l.state === 'queued' ? { state: 'delivered', delivered_at: ev.at } : {}) });
+      this.pushLink(l.id);
+    }
+  }
+  /** The receiving session answered a link note (or it could not be delivered): store it on the link and tell the sender once. */
+  onLinkReply(n, text, at) {
+    const l = this.getLink(n.link_id);
+    if (!l || l.ref_id !== n.id) return;
+    const failed = (t) => /^Not delivered:/.test(t ?? '');
+    // tell the sender on the first answer, and again when a real reply follows a "Not delivered" one
+    const first = l.state !== 'answered' || (failed(l.reply) && !failed(text));
+    this.upd('links', l.id, { reply: cut(text, 500), ...(l.state !== 'answered' ? { state: 'answered', answered_at: at } : {}) });
+    this.pushLink(l.id);
+    if (!first) return;
+    const from = this.getSession(l.from_session_id);
+    const sid = from && from.status !== 'ended' ? from.id : this.pickLive(l.from_project_id) || l.from_session_id;
+    this.insertLinkNote(l.id, this.sessionLabel(n.session_id), `Reply to your note ${l.id} (\u201c${cut(l.text, 80)}\u201d): ${cut(text, 500)}`, sid, at);
+  }
+  /** hub.ack / hub.unack { kind: 'agent'|'session'|'link', id }: archive a finished row (or restore it). */
+  hAck(ev) {
+    const { kind, id } = ev.data, table = { agent: 'agents', session: 'sessions', link: 'links' }[kind];
+    if (!table || !this.db.get(`SELECT 1 AS x FROM ${table} WHERE id = ?`, id)) throw new Error(`${kind} not found`);
+    this.upd(table, id, { acknowledged_at: ev.type === 'hub.ack' ? ev.at : null });
+    if (kind === 'agent') this.pushAgent(id); else if (kind === 'session') this.pushSession(id); else this.pushLink(id);
+  }
   hSessionJoin(ev) {
     const { sessionId, projectId } = ev.data;
     if (!this.getSession(sessionId)) throw new Error('session not found');
@@ -1382,6 +1491,7 @@ export class Projector {
     });
     const extra = {};
     if (d.parentTaskId) extra.parent_task_id = str(d.parentTaskId);
+    if (d.createdBySessionId) { extra.created_by_session_id = str(d.createdBySessionId); extra.from_project_id = str(d.fromProjectId) || null; }
     if (d.runId) { extra.run_id = str(d.runId); extra.node_id = str(d.nodeId) || null; } // v0.9: a workflow run created this card
     if (Object.keys(extra).length) { this.upd('tasks', t.id, extra); this.pushTask(t.id); return toTask(this.getTask(t.id)); }
     return toTask(t);
@@ -1681,6 +1791,7 @@ export class Projector {
         sessionId: n.session_id || HUB_SESSION, taskId: n.target_kind === 'task' ? n.target_id : null, kind: 'note',
         summary: `Note ${id} failed: ${SENDING_TIMEOUT_ERROR}`, ok: false, at,
       });
+      if (n.link_id) this.onLinkReply(n, `Not delivered: ${SENDING_TIMEOUT_ERROR}`, at);
     }
     for (const id of d.idle || []) {
       const s = this.getSession(id);

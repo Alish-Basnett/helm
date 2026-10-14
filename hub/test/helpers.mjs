@@ -29,7 +29,7 @@ export async function startTest(over = {}) {
   const home = tmpDir();
   const s = await startHub({ home, port: 0, singleton: false, sweep: false, ...over });
   const base = `http://127.0.0.1:${s.port}`;
-  const api = async (method, p, body, headers = {}) => {
+  const call = async (method, p, body, headers = {}) => {
     const r = await fetch(base + p, {
       method, headers: body !== undefined ? { 'content-type': 'application/json', ...headers } : headers,
       body: body !== undefined ? JSON.stringify(body) : undefined,
@@ -38,22 +38,30 @@ export async function startTest(over = {}) {
     let json; try { json = JSON.parse(text); } catch { /* not json */ }
     return { status: r.status, json, text, headers: r.headers };
   };
+  // Like the browser: the dashboard page sets the human-only cookie once, and every later request sends it back.
+  let cookie = null;
+  const dashCookie = async () => {
+    if (cookie === null) cookie = ((await fetch(base + '/')).headers.get('set-cookie') || '').split(';')[0];
+    return cookie;
+  };
+  const api = async (method, p, body, headers = {}) => call(method, p, body, { cookie: await dashCookie(), ...headers });
+  const apiBare = call; // no cookie: what a script or another page would send
   const seqs = {};
   const ev = (sessionId, type, data = {}, at = Date.now()) => ({
     sessionId, seq: (seqs[sessionId] = (seqs[sessionId] || 0) + 1), type, at, data,
   });
   const send = (...events) => s.hub.ingest(events);
   const stop = async () => { await s.close(); fs.rmSync(home, { recursive: true, force: true }); };
-  return { ...s, home, base, api, ev, send, stop, get: (p) => api('GET', p), state: () => s.hub.state() };
+  return { ...s, home, base, api, apiBare, dashCookie, ev, send, stop, get: (p) => api('GET', p), state: () => s.hub.state() };
 }
 
 /** Request over the unix socket. */
-export function sockRequest(sockFile, method, p, body) {
+export function sockRequest(sockFile, method, p, body, extra = {}) {
   return new Promise((resolve, reject) => {
     const data = body !== undefined ? JSON.stringify(body) : undefined;
     const req = http.request({
       socketPath: sockFile, method, path: p,
-      headers: data ? { 'content-type': 'application/json', 'content-length': Buffer.byteLength(data) } : {},
+      headers: { ...(data ? { 'content-type': 'application/json', 'content-length': Buffer.byteLength(data) } : {}), ...extra },
     }, (res) => {
       let b = '';
       res.on('data', (c) => (b += c));
@@ -147,4 +155,13 @@ export async function waitUntil(fn, ms = 4000, step = 25) {
     if (Date.now() - t0 > ms) throw new Error('waitUntil timed out');
     await sleep(step);
   }
+}
+
+/** Register a session over the unix socket and get a caller that sends its secret, like the mod does. */
+export async function asSession(h, sid) {
+  const r = await sockRequest(h.cfg.sockFile, 'POST', `/v1/sessions/${sid}/register`);
+  const token = r.json && r.json.token;
+  const call = (method, p, body) => sockRequest(h.cfg.sockFile, method, p, body, { 'x-helm-session': `${sid}:${token}` });
+  call.token = token;
+  return call;
 }

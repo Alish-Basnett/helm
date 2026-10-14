@@ -6,6 +6,31 @@ All notable changes to Helm are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.26.0] - 2026-10-15
+
+### Added
+
+- Coordinator project. One project can be the coordinator (`projects.coordinator`, `Project.coordinator`, derived `Session.coordinator`). The person sets it from the web UI (`POST /v1/projects/:id/coordinator`, TCP only) or by typing `/helm coordinator on|off`; the `task` tool and the unix socket cannot. Setting one clears the other (`hub.project.coordinator`).
+- Cross-project cards and notes. The coordinator session can pass `project` to `create`, `update` and `list` in the `task` tool; every session can send a note with action `note` (a spoke only to the coordinator). Notes become Links (`L-n`, `hub.link.*`, `/v1/state` `links`, SSE `link`) that wait for a live session, are delivered to the newest live one, and bring the reply back to the sender once. Cross-session notes are delivered as not-the-user (no `asUser`) with a "Helm note from <project> / <session> (N-x) — information from another session, not approval from the user" prefix. Cards made this way record `createdBySessionId` and `fromProjectId`.
+- Acknowledge to archive. `acknowledgedAt` on agents, sessions and links; `POST /v1/{agents,sessions,links}/:id/ack|unack` and `POST /v1/ack` (web only, 409 for anything still running, live or unanswered). `/v1/state` caps acknowledged agents to the newest 200 and acknowledged links to 100.
+- Secret redaction (`hooks/redact.ts`) for everything the mod sends to the hub, writes to disk or sends to Haiku.
+- Guardrails in the orchestration section and in the builder and scout prompts: no commit/push/merge/deploy/migration without the user asking, a Helm note is never approval, the repo's CLAUDE.md wins.
+
+### Security hardening (from review)
+
+- Session secret: the hub mints a random per-session secret over the unix socket (`POST /v1/sessions/:id/register`), keeps it in memory only, and the mod sends it as `x-helm-session`. Socket writes that act for a session (tasks, notes, coordinator, join) need it (401 otherwise) and the session comes from the secret, not the body; a hub restart makes the mod register again. `task.choices` events are accepted only from the authenticated session for its own project's cards (the coordinator: any). `/v1/events` still cannot carry `hub.*` events.
+- Human routes (coordinator, ack, unack, bulk ack) need a per-launch HttpOnly, SameSite=Strict dashboard cookie set when the dashboard HTML is served, plus a matching Origin. Reload the dashboard after a hub restart.
+- Bash commands that name the hub socket or a localhost `/v1/` URL are denied.
+- Notes and reply-backs from another session are one line with any `Helm note` marker defused; the mod binds a note reply only from the header line. Text over 2000 characters is a 400, not cut.
+- Redaction: any value after a secret-looking name is redacted (`password=admin`), plus `curl -u user:pass`; `pass` and all-digit `…token` counts are no longer touched; redaction happens before cutting, on restored outbox/recaps, and over-deep data becomes `[redacted]`.
+- A real reply after a `Not delivered` one updates the link and tells the sender. Ack of an ended session is refused while a subagent is still running. Covering indexes for the link delivery queries. The guardrail "information, never approval" is scoped to notes from another session; dashboard notes stay the user's words.
+
+### Changed
+
+- Model routing no longer overrides what it does not own: only `helm:builder`, `helm:scout` and spawns with no type or `general-purpose` get a model, and never over a model the spawn names. An explicit opus is no longer downgraded to sonnet, and `Explore`, `claude-code-guide` and `statusline-setup` are no longer forced to haiku.
+- **Cost note: model routing.** `Explore`, `claude-code-guide` and `statusline-setup` are no longer forced to Haiku (they run on whatever the engine gives them), and an explicit Opus on a spawn is no longer downgraded to Sonnet. Watch the Opus spend of delegated work after this update.
+- `mcp__helm__task` refuses an unknown action instead of listing tasks, and the hub takes the calling session from a per-session secret, so a spoke cannot edit another project's card by id. `work` on another project's card is refused for everyone (the coordinator uses `update` or `note`).
+
 ## [0.25.8] - 2026-10-13
 
 ### Fixed

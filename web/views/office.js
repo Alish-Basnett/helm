@@ -1,32 +1,30 @@
 // views/office.js — "the floor": each session is a desk, its subagents sit beside it.
 import { h, reconcile, setText, setClass, setHidden, startTicker } from '../dom.js';
 import { icon } from '../icons.js';
-import { state, sel } from '../store.js';
+import { state, sel, lsGet, lsSet } from '../store.js';
 import { fmtElapsed, fmtTokens, fmtUsd, cwdTail, agentLabel, truncate, plural } from '../format.js';
 import { avatar, updateAvatar, modelBadge, updateModelBadge, nowDoingLine, emptyState } from '../ui.js';
 import { navigate, openTask } from '../router.js';
 import { api } from '../api.js';
 import { ctxRing, ctxText, levelOf, LEVEL_LABEL } from '../health.js';
+import { mount as mountFlow } from './officeflow.js';
 
 const CREW_PREVIEW = 8;
 const WAIT_LABEL = 'Waiting for you';
 const S_ORDER = { active: 0, idle: 1, ended: 2 };
 
-export function mount(container) {
-  const expanded = new Set();
-  startTicker();
-  const floor = h('div', { class: 'floor' });
-  const empty = h('div', { class: 'view-empty' }, emptyState({
-    iconName: 'office', title: 'No sessions yet',
-    body: 'Start Claude Code with Helm installed — every session gets a desk here and its subagents sit beside it.',
-  }));
+/** Conflict radar strip (v0.2): two agents editing the same file. Shared by both Office views. */
+function createRadar() {
   /* ---------- conflict radar strip (v0.2) ---------- */
   const radarCount = h('span', { class: 'radar-count mono' }, '0');
   const radarChips = h('div', { class: 'radar-chips' });
   const radarQuiet = h('span', { class: 'radar-quiet' }, 'No overlapping edits');
-  const radar = h('section', { class: 'radar', 'aria-label': 'Conflict radar', hidden: true },
-    h('div', { class: 'radar-head' }, icon('radar', 15), h('span', { class: 'radar-title' }, 'Radar'), radarCount),
-    radarChips, radarQuiet);
+  const radarSum = h('span', { class: 'radar-sum' }, 'no overlapping files');
+  const radarChev = icon('chevronRight', 14, 'radar-chev');
+  let radarOpen = lsGet('helm.office.radar', '0') === '1'; // collapsed to one line by default
+  const radarHead = h('button', { class: 'radar-head radar-toggle', type: 'button', 'aria-expanded': 'false', onclick: () => { radarOpen = !radarOpen; lsSet('helm.office.radar', radarOpen ? '1' : '0'); renderRadar(); } },
+    icon('radar', 15), h('span', { class: 'radar-title' }, 'Radar'), radarCount, radarSum, radarChev);
+  const radar = h('section', { class: 'radar', 'aria-label': 'Conflict radar', hidden: true }, radarHead, radarChips, radarQuiet);
   let conflicts = null; // null = not loaded yet; array once known
   let radarTimer = null;
   let radarReq = 0;
@@ -69,8 +67,11 @@ export function mount(container) {
     setHidden(radar, !show);
     setClass(radar, 'hot', list.length > 0);
     setText(radarCount, String(list.length));
-    setHidden(radarQuiet, list.length > 0);
-    setHidden(radarChips, list.length === 0);
+    setText(radarSum, list.length ? `${list.length} overlapping ${list.length === 1 ? 'file' : 'files'}` : 'no overlapping files');
+    radarHead.setAttribute('aria-expanded', String(radarOpen));
+    setClass(radar, 'open', radarOpen);
+    setHidden(radarQuiet, !radarOpen || list.length > 0);
+    setHidden(radarChips, !radarOpen || list.length === 0);
     reconcile(radarChips, list, (c) => c.path, (c) => {
       const b = h('button', { class: 'radar-chip', type: 'button' }, icon('warning', 13), h('span', { class: 'radar-file mono' }), h('span', { class: 'radar-who mono' }));
       return b;
@@ -87,7 +88,24 @@ export function mount(container) {
     });
   }
 
-  const wrap = h('div', { class: 'office' }, radar, floor, empty);
+  return {
+    el: radar,
+    render: renderRadar,
+    load: loadRadar,
+    schedule: scheduleRadar,
+    destroy() { clearTimeout(radarTimer); radarReq++; radar.remove(); },
+  };
+}
+
+/** The desks view (the original Office): each session a desk, its subagents beside it. */
+function mountDesks(container) {
+  const expanded = new Set();
+  const floor = h('div', { class: 'floor' });
+  const empty = h('div', { class: 'view-empty' }, emptyState({
+    iconName: 'office', title: 'No sessions yet',
+    body: 'Start Claude Code with Helm installed — every session gets a desk here and its subagents sit beside it.',
+  }));
+  const wrap = h('div', { class: 'desks' }, floor, empty);
   container.appendChild(wrap);
 
   /* ---------- desk group ---------- */
@@ -229,19 +247,56 @@ export function mount(container) {
     reconcile(floor, secs, (x) => x.key, makeSection, updateSection);
     setHidden(empty, !(state.ready && sessions.length === 0));
     setHidden(floor, sessions.length === 0);
-    renderRadar();
   }
   render();
-  loadRadar();
 
   return {
-    watch: ['session', 'agent', 'project', 'ui', 'ready', 'task', 'question'],
+    watch: ['session', 'agent', 'project', 'ui', 'ready', 'question'],
+    update() { render(); },
+    destroy() { wrap.remove(); },
+  };
+}
+
+const VIEW_KEY = 'helm.office.view';
+
+export function mount(container) {
+  startTicker();
+  let mode = lsGet(VIEW_KEY, 'flow') === 'desks' ? 'desks' : 'flow';
+  let child = null;
+  const radar = createRadar();
+  const host = h('div', { class: 'office-host' });
+  const segBtn = (label, value, title) => h('button', { class: 'th-seg-btn', type: 'button', 'data-v': value, 'aria-pressed': 'false', title, onclick: () => setMode(value) }, label);
+  const seg = h('div', { class: 'th-seg', role: 'group', 'aria-label': 'Office view' },
+    segBtn('Flow', 'flow', 'Flow: the main session, the others and their subagents as a live graph'),
+    segBtn('Desks', 'desks', 'Desks: every session as a desk with its subagents beside it'));
+  const bar = h('div', { class: 'office-bar' }, seg);
+  const wrap = h('div', { class: 'office', 'data-mode': mode }, bar, radar.el, host);
+  container.appendChild(wrap);
+
+  function setMode(m) {
+    if (child && m === mode) return;
+    if (child) { try { child.destroy(); } catch (e) { console.error(e); } child = null; }
+    host.textContent = '';
+    mode = m;
+    lsSet(VIEW_KEY, m);
+    wrap.setAttribute('data-mode', m);
+    for (const b of seg.children) b.setAttribute('aria-pressed', String(b.getAttribute('data-v') === m));
+    child = (m === 'flow' ? mountFlow : mountDesks)(host);
+  }
+  setMode(mode);
+  radar.render();
+  radar.load();
+
+  return {
+    watch: ['session', 'agent', 'project', 'ui', 'ready', 'task', 'question', 'link'],
     update(changed) {
-      if (changed.has('task') || changed.has('agent')) scheduleRadar();
-      // task-only changes only touch the radar strip, not the whole floor
-      if (['session', 'agent', 'project', 'ui', 'ready', 'question'].some((k) => changed.has(k))) render(); else renderRadar();
+      if (changed.has('task') || changed.has('agent')) radar.schedule();
+      // task-only changes only touch the radar strip, not the graph or the desks
+      if (['session', 'agent', 'ui', 'ready'].some((k) => changed.has(k))) radar.render();
+      const w = child && child.watch;
+      if (child && (!w || w.some((k) => changed.has(k)))) child.update(changed);
     },
     setRoute() {},
-    destroy() { clearTimeout(radarTimer); radarReq++; wrap.remove(); },
+    destroy() { if (child) child.destroy(); radar.destroy(); wrap.remove(); },
   };
 }
