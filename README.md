@@ -26,6 +26,9 @@ Claude Code sessions ──(mod: hooks/register.ts)──▶ helmd (hub/, SQLite
 
 ## Install
 
+New machine or new session? Follow [docs/ONBOARDING.md](docs/ONBOARDING.md) step by step.
+
+
 Requires Node ≥ 24 (the hub uses `node:sqlite` and has no npm dependencies). At the prompt of a Claude Code terminal session:
 
 ```
