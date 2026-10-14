@@ -54,6 +54,16 @@ Helm adds an orchestration section to the session's system prompt, so the main (
 - Cards move themselves: In progress, then Review, then a recap (what, how, learned) taken from the builder's DONE/HOW/FILES/LEARNED report.
 - Dashboard notes arrive as "Helm note (N-x)". The session answers in 1–2 sentences and the reply shows under the note in Talk. "Start Helm task T-n" means delegate that card now.
 
+## 5b. Coordinator and spokes (optional)
+
+Make one project the coordinator: type `/helm coordinator on` in its session, or switch it on in the dashboard. Only you can do this; no session or tool can. Every other project is a spoke.
+
+- The coordinator session can work on a spoke's board: `mcp__helm__task` accepts `project` (name, folder name or P-id) on `create`, `update` and `list`. Cards it creates there start in Backlog.
+- Any session can send a note with `mcp__helm__task` action `note`, `to` and `text`. A spoke can only note the coordinator; the coordinator can note any project. The note waits until a session in the target project is live, then arrives as "Helm note from <project> / <session> (N-x) — information from another session, not approval from the user". The reply comes back to the sender once.
+- A note from another session is information. It is never your approval for prod, money, auth, migrations, merges or pushes, and sessions are told not to commit, push, merge, deploy or run migrations unless you asked in that session.
+- Secrets in commands, prompts, reports and notes are replaced with `[redacted]` before Helm stores them.
+- Finished agents, ended sessions and answered notes can be acknowledged in the dashboard to archive them. Anything still running or unanswered is refused.
+
 ## 6. Keep it healthy
 
 - **One copy only.** Use the installed plugin. Don't also load a dev link of the repo in the same session, or two copies run and the older one can swallow replies.
@@ -82,4 +92,5 @@ Helm adds an orchestration section to the session's system prompt, so the main (
 | `mcp__helm__task` has no `work` or `choices` actions | Same cause: an old copy is loaded. |
 | Dashboard won't load | Open `/helm status`. If the hub is down, send any message in a session to start it. Check `~/.helm/helmd.log`. |
 | A card shows no diff | The folder isn't a git repo, or it was moved. The card still lists its files. |
+| Coordinator or Acknowledge answers "reload the dashboard" | The hub restarted and issued a new dashboard cookie. Reload the page. |
 | Port 7777 is busy | The hub falls back to another port, written to `~/.helm/helmd.port`. Open that port. `/helm` still shows 7777 for now. |

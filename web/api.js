@@ -78,6 +78,15 @@ export const api = {
   linkPr: (id, url) => request('POST', `/v1/tasks/${enc(id)}/pr`, { url }),
   deleteBranch: (id, opts = {}) => request('DELETE', `/v1/tasks/${enc(id)}/branch${q({ deleteBranch: opts.deleteBranch ? 1 : '', force: opts.force ? 1 : '' })}`),
   refreshCi: (id) => request('POST', `/v1/tasks/${enc(id)}/ci/refresh`),
+  // Office flow: acknowledge finished nodes (409 while still running / live / undelivered; the message is the hub's reason)
+  ackAgent: (id) => request('POST', `/v1/agents/${enc(id)}/ack`),
+  unackAgent: (id) => request('POST', `/v1/agents/${enc(id)}/unack`),
+  ackSession: (id) => request('POST', `/v1/sessions/${enc(id)}/ack`),
+  unackSession: (id) => request('POST', `/v1/sessions/${enc(id)}/unack`),
+  ackLink: (id) => request('POST', `/v1/links/${enc(id)}/ack`),
+  unackLink: (id) => request('POST', `/v1/links/${enc(id)}/unack`),
+  ack: (body) => request('POST', '/v1/ack', body), // { agentIds?, sessionIds?, linkIds? } -> { acked, refused: [{ id, reason }] }
+  setCoordinator: (projectId, on) => request('POST', `/v1/projects/${enc(projectId)}/coordinator`, { on: !!on }),
   // v0.4
   usage: (days = 7) => request('GET', `/v1/usage${q({ days })}`),
   // cost analytics: spend per day / project / model / task (404 on hubs that predate it)

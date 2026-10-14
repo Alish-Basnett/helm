@@ -16,6 +16,7 @@ const KEYS = {
   workflow: 'workflows', run: 'runs', // v0.9
   template: 'templates', doc: 'docs', // v0.11, v0.15 Studio documents (no blocks)
   concept: 'concepts', // v0.13: keyed by slug (normalizeRow mirrors it into `id`)
+  link: 'links', // Office flow: session-to-session notes and tasks (a hub without them sends no `links`)
 };
 
 export const state = {
@@ -32,8 +33,10 @@ export const state = {
   templates: new Map(), // v0.11 task templates (archived ones included; selectors filter)
   docs: new Map(), // v0.15 Studio documents (metadata and version; blocks are fetched by the Studio screen)
   concepts: new Map(), // v0.13 top concepts by last seen (no summaries; the page fetches its own)
+  links: new Map(), // Office flow links; empty on a hub that predates them
   activity: new Map(), // id -> Activity (bounded)
   usageToday: { overheadUsd: 0, requestedUsd: 0 }, // v0.4 Helm overhead meter
+  caps: { ack: false, coordinator: false }, // what the connected hub can do (learned from its rows)
   seq: 0,
   conn: 'connecting', // connecting | live | reconnecting
   ready: false,
@@ -44,7 +47,7 @@ export const state = {
   },
 };
 
-const ver = { project: 0, session: 0, agent: 0, task: 0, note: 0, question: 0, job: 0, digest: 0, workflow: 0, run: 0, template: 0, doc: 0, concept: 0, activity: 0, usage: 0 };
+const ver = { project: 0, session: 0, agent: 0, task: 0, note: 0, question: 0, job: 0, digest: 0, workflow: 0, run: 0, template: 0, doc: 0, concept: 0, link: 0, activity: 0, usage: 0 };
 
 /* ---------- subscriptions ---------- */
 const listeners = new Set();
@@ -79,8 +82,17 @@ export function normalizeRow(entity, row) {
     if (row.autoStartedAt === undefined) row.autoStartedAt = null; // v0.7
     if (row.branch === undefined) row.branch = null; // v0.12 branch / PR / CI
   } else if (entity === 'project') {
+    if (row.coordinator === undefined) row.coordinator = false; // the main session's project
     if (row.autoStart === undefined) row.autoStart = false; // v0.7 Up next auto mode
     if (row.autoConcurrency === undefined) row.autoConcurrency = 1; // T-71
+  } else if (entity === 'session') {
+    if (row.coordinator === undefined) row.coordinator = false;
+    if (row.acknowledgedAt === undefined) row.acknowledgedAt = null;
+  } else if (entity === 'agent') {
+    if (row.acknowledgedAt === undefined) row.acknowledgedAt = null;
+    if (row.parentId === undefined) row.parentId = null;
+  } else if (entity === 'link') {
+    for (const k of ['toSessionId', 'reply', 'deliveredAt', 'answeredAt', 'acknowledgedAt']) if (row[k] === undefined) row[k] = null;
   } else if (entity === 'run') {
     if (!Array.isArray(row.nodes)) row.nodes = []; // v0.9
   } else if (entity === 'workflow') {
@@ -116,6 +128,14 @@ export function normalizeRow(entity, row) {
 export function setUsageToday(u) {
   state.usageToday = { overheadUsd: Number(u && u.overheadUsd) || 0, requestedUsd: Number(u && u.requestedUsd) || 0 };
   mark('usage');
+}
+
+/** What the hub can do, learned only from rows the hub sent (never from our own optimistic patches). */
+function noteCaps(entity, row) {
+  if (!row) return;
+  if ((entity === 'session' || entity === 'agent') && row.acknowledgedAt !== undefined) state.caps.ack = true;
+  else if (entity === 'link') state.caps.ack = true;
+  else if (entity === 'project' && row.coordinator !== undefined) state.caps.coordinator = true;
 }
 
 export function upsert(entity, row) {
@@ -167,9 +187,10 @@ function replaceAll(s) {
   for (const k in KEYS) {
     const map = state[KEYS[k]];
     map.clear();
-    for (const row of s[KEYS[k]] || []) { normalizeRow(k, row); map.set(row.id, row); }
+    for (const row of s[KEYS[k]] || []) { noteCaps(k, row); normalizeRow(k, row); map.set(row.id, row); }
     mark(k);
   }
+  if (Array.isArray(s.links)) state.caps.ack = true; // a hub with links also acknowledges
   setUsageToday(s.usageToday);
   state.seq = s.seq || 0;
   state.ready = true;
@@ -186,7 +207,7 @@ export function applyChange(msg) {
   }
   if (msg.entity === 'usage') { if (msg.op !== 'delete') setUsageToday(msg.row); return; }
   if (msg.op === 'delete') remove(msg.entity, msg.row && (msg.row.id != null ? msg.row.id : msg.row.slug));
-  else upsert(msg.entity, msg.row);
+  else { noteCaps(msg.entity, msg.row); upsert(msg.entity, msg.row); }
 }
 
 /* ---------- selectors ---------- */

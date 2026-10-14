@@ -1,11 +1,12 @@
 // Hub core: ingest, commands, queries, sweep, rebuild. Transport-agnostic (http.mjs wraps it).
 import fs from 'node:fs';
+import crypto from 'node:crypto';
 import path from 'node:path';
 import { Db } from './db.mjs';
 import {
   Projector, HUB_SESSION, TASK_STATUSES, JOB_TIMEOUT_ERROR, JOB_UNCLAIMED_ERROR, cut, computeConflicts,
   localDate, usageSummary, usageBreakdown, usageToday, toAttachment, MAX_NOTE_ATTACHMENTS,
-  toProject, toSession, SESSION_SQL, computeHealth, HEALTH, costToday, toAgent, toTask, toNote, toActivity, toQuestion, toJob, toDigest,
+  toProject, toSession, SESSION_SQL, computeHealth, HEALTH, costToday, toAgent, toTask, toNote, toActivity, toQuestion, toJob, toDigest, toLink,
 } from './projections.mjs';
 import { computeDiff, diffStat, deriveFiles, repoHead, within } from './diff.mjs';
 import { search as ftsSearch, learn as ftsLearn } from './search.mjs';
@@ -32,10 +33,15 @@ const TABLES = [
   'agent_files', 'conflicts', 'questions', 'jobs', 'digests', 'attachments', 'usage', 'task_diffs',
   'workflows', 'workflow_versions', 'runs', 'run_nodes', 'steps', 'templates', 'concepts', 'concept_tasks', 'concept_keys',
   'session_samples',
-  'docs', 'doc_versions', 'doc_comments',
+  'docs', 'doc_versions', 'doc_comments', 'links',
 ];
 export const RESUME_MARK = '[helm:resume]';
 const MAX_AUTO_CONCURRENCY = 5; // T-71: the most tasks Up next auto mode runs at once
+const COORD_MSG = 'Only the coordinator session can work on another project\'s board. Send it to the coordinator with action note.';
+const WORK_MSG = 'work only applies to cards of this session\'s own project. To get another project\'s card done, update it or send its project a note.';
+const MAX_ACK_BULK = 1000;
+const MAX_ACKED_AGENTS = 200; // /v1/state keeps this many acknowledged agents
+const MAX_ACKED_LINKS = 100;
 const START_FROM = ['backlog', 'next', 'later', 'blocked'];
 const DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
 export { localDate };
@@ -57,6 +63,9 @@ export class Hub {
     this.closed = false;
     this.inAuto = false;            // re-entrancy guard for autoTick (also held during rebuild)
     this.lastAuto = [];             // task ids the most recent autoTick started
+    this.tokens = new Map();        // v0.26: session id -> secret, IN MEMORY ONLY (never an event, a row, the state or SSE); gone on restart
+    this.dashSecret = crypto.randomBytes(24).toString('hex'); // v0.26: per-launch secret of the dashboard cookie
+    this.inLinks = false;           // re-entrancy guard for deliverLinks
     this.replaying = false;         // true during rebuild(): replay applies recorded workflow events and never decides
     this.gitBusy = new Set();       // v0.12: task ids with a git operation in flight (one at a time per task)
     this.gitSync = new GitSync(this, { fetchImpl }); // v0.12: PR + CI polling for pushed branches (the timer lives in server.mjs)
@@ -83,7 +92,7 @@ export class Hub {
       onRollback: () => { this.p.dirty = false; },
     });
     // v0.7: every committed ingest / command may free the project's slot, so re-evaluate auto mode.
-    if (outer) { this.autoTick(); this.wf.tick(); this.docs.tick(); } // v0.9: results/steps/sessions may have unblocked a workflow run
+    if (outer) { this.autoTick(); this.wf.tick(); this.docs.tick(); this.deliverLinks(); } // v0.9: results/steps/sessions may have unblocked a workflow run
     return r;
   }
   seqNow() {
@@ -141,7 +150,33 @@ export class Hub {
     return null;
   }
 
-  ingest(events) {
+  /** POST /v1/sessions/:id/register (socket only): mint the session's secret. Returned once; a new call replaces it. */
+  registerSession(id) {
+    if (!isStr(id) || !id || id.length > 200) throw bad('invalid session id');
+    const token = crypto.randomBytes(32).toString('hex');
+    this.tokens.set(id, token);
+    return { token };
+  }
+  checkToken(id, token) {
+    const want = this.tokens.get(id);
+    if (!want || !isStr(token) || token.length !== want.length) return false;
+    return crypto.timingSafeEqual(Buffer.from(want), Buffer.from(token));
+  }
+  /** The Set-Cookie value of the dashboard, and the check the human-only routes make against the cookie the browser sends back. */
+  dashCookie() { return `helm_dash=${this.dashSecret}; HttpOnly; SameSite=Strict; Path=/`; }
+  checkDash(cookieHeader) {
+    const m = /(?:^|;\s*)helm_dash=([0-9a-f]+)/.exec(String(cookieHeader ?? ''));
+    return !!m && m[1].length === this.dashSecret.length && crypto.timingSafeEqual(Buffer.from(m[1]), Buffer.from(this.dashSecret));
+  }
+  /** A task.choices event may change only a card of the sender's own project (or any, from the coordinator), and only as the authenticated session. */
+  mayWriteChoices(e, authSession) {
+    if (!authSession || authSession !== e.sessionId) return false;
+    const s = this.p.getSession(e.sessionId), t = this.p.getTask(e.data && e.data.taskId);
+    if (!s) return false;
+    return !t || t.project_id === s.project_id || !!this.p.getProject(s.project_id)?.coordinator;
+  }
+
+  ingest(events, opts) {
     if (!Array.isArray(events)) throw bad('events must be an array');
     const now = this.now();
     const valid = [];
@@ -161,6 +196,11 @@ export class Hub {
     this.tx(() => {
       const maxSeen = new Map();
       for (const ev of valid) {
+        if (opts && ev.type === 'task.choices' && !this.mayWriteChoices(ev, opts.authSession)) {
+          rejected++;
+          this.log?.warn(`rejected task.choices from ${ev.sessionId}: not allowed for that session`);
+          continue;
+        }
         if (!maxSeen.has(ev.sessionId)) {
           maxSeen.set(ev.sessionId,
             this.db.get('SELECT COALESCE(MAX(seq), -1) AS m FROM events WHERE session_id = ?', ev.sessionId).m);
@@ -702,17 +742,23 @@ export class Hub {
   // -------------------------------------------------------------- queries
   state(projectId) {
     const q = (sql, ...p) => this.db.all(sql, ...p);
-    let sessions, agents, tasks, notes, questions, jobs, digests;
+    let sessions, agents, tasks, notes, questions, jobs, digests, links;
     const projects = q('SELECT * FROM projects ORDER BY rowid').map(toProject);
     // open / in-flight rows plus a bounded tail of finished ones
     const qSql = (scope) => `SELECT * FROM questions WHERE ${scope} AND (state = 'open' OR rowid IN (
       SELECT rowid FROM questions WHERE ${scope} AND state = 'answered' ORDER BY answered_at DESC, rowid DESC LIMIT 50)) ORDER BY rowid`;
     const jSql = (scope) => `SELECT * FROM jobs WHERE ${scope} AND (state IN ('queued','running') OR rowid IN (
       SELECT rowid FROM jobs WHERE ${scope} AND state IN ('done','failed') ORDER BY done_at DESC, rowid DESC LIMIT 20)) ORDER BY rowid`;
+    // acknowledged rows stay in the state (the web hides them) but only the newest few, so it cannot grow without bound
+    const agSql = (scope) => `SELECT * FROM agents WHERE ${scope} AND (acknowledged_at IS NULL OR rowid IN (
+      SELECT rowid FROM agents WHERE ${scope} AND acknowledged_at IS NOT NULL ORDER BY acknowledged_at DESC, rowid DESC LIMIT ${MAX_ACKED_AGENTS}))`;
+    const lkSql = (scope) => `SELECT * FROM links WHERE ${scope} AND (acknowledged_at IS NULL OR rowid IN (
+      SELECT rowid FROM links WHERE ${scope} AND acknowledged_at IS NOT NULL ORDER BY acknowledged_at DESC, rowid DESC LIMIT ${MAX_ACKED_LINKS}))`;
     if (projectId) {
       if (!this.p.getProject(projectId)) throw notFound('project not found');
       sessions = q(`${SESSION_SQL} WHERE s.project_id = ? ORDER BY s.rowid`, projectId);
-      agents = q('SELECT * FROM agents WHERE session_id IN (SELECT id FROM sessions WHERE project_id = ?) ORDER BY rowid', projectId);
+      agents = q(`${agSql('session_id IN (SELECT id FROM sessions WHERE project_id = ?)')} ORDER BY rowid`, projectId, projectId);
+      links = q(`${lkSql('(from_project_id = ? OR to_project_id = ?)')} ORDER BY rowid`, projectId, projectId, projectId, projectId);
       tasks = q('SELECT * FROM tasks WHERE project_id = ? ORDER BY ord, rowid', projectId);
       notes = q(
         `SELECT * FROM notes WHERE (target_kind = 'task' AND target_id IN (SELECT id FROM tasks WHERE project_id = ?))
@@ -725,7 +771,8 @@ export class Hub {
       digests = q('SELECT * FROM digests WHERE project_id = ? ORDER BY date DESC, created_at DESC, rowid DESC LIMIT 14', projectId);
     } else {
       sessions = q(`${SESSION_SQL} ORDER BY s.rowid`);
-      agents = q('SELECT * FROM agents ORDER BY rowid');
+      agents = q(`${agSql('1 = 1')} ORDER BY rowid`);
+      links = q(`${lkSql('1 = 1')} ORDER BY rowid`);
       tasks = q('SELECT * FROM tasks ORDER BY project_id, ord, rowid');
       notes = q('SELECT * FROM notes ORDER BY rowid');
       questions = q(qSql('1 = 1'));
@@ -743,7 +790,7 @@ export class Hub {
     return {
       projects, templates, docs, concepts, sessions: sessions.map(toSession), agents: agents.map(toAgent),
       tasks: tasks.map(toTask), notes: notes.map(toNote), questions: questions.map(toQuestion),
-      jobs: jobs.map(toJob), digests: digests.map(toDigest), workflows, runs,
+      jobs: jobs.map(toJob), digests: digests.map(toDigest), workflows, runs, links: links.map(toLink),
       usageToday: usageToday(this.db, this.now()), seq: this.seqNow(),
     };
   }
@@ -1041,8 +1088,13 @@ export class Hub {
       sessionId = body.sessionId;
     }
     const start = body.start === true;
+    const from = this.crossFrom(body.fromSessionId, body.projectId);
     return this.tx(() => {
-      const task = this.command('hub.task.create', { projectId: body.projectId, title, description, status, dependsOn, sessionId }, at);
+      const task = this.command('hub.task.create', {
+        projectId: body.projectId, title, description, status, dependsOn, sessionId,
+        ...(from ? { createdBySessionId: from.id, fromProjectId: from.project_id } : {}),
+      }, at);
+      if (from) this.command('hub.link.create', this.taskLink(from, body.projectId, task.id, `created ${task.id}: ${cut(task.title, 120)}`), at);
       if (!start) return { task };
       let plan;
       try { plan = this.startPlan(this.p.getTask(task.id)); } catch (e) {
@@ -1173,7 +1225,16 @@ export class Hub {
       if (body.blockedReason !== null && !isStr(body.blockedReason)) throw bad('blockedReason must be a string or null');
       patch.blockedReason = body.blockedReason === null ? null : cut(body.blockedReason, 500);
     }
-    const out = this.tx(() => ({ task: this.command('hub.task.update', { id, patch }, at) }));
+    const from = this.crossFrom(body.fromSessionId, t.project_id);
+    if (from && body.work === true) throw new HttpError(403, WORK_MSG); // `work` is for a session's own cards, even the coordinator's
+    const out = this.tx(() => {
+      const task = this.command('hub.task.update', { id, patch }, at);
+      if (from) {
+        const what = Object.keys(patch).map((k) => (k === 'status' ? `status \u2192 ${patch.status}` : k)).join(', ');
+        this.command('hub.link.create', this.taskLink(from, t.project_id, id, `updated ${id}: ${what}`), at);
+      }
+      return { task };
+    });
     // A task the main loop did itself has no agent.completed to trigger a snapshot: moving it to review/done does.
     if (this.autoSnapshot && t.git && (patch.status === 'review' || patch.status === 'done')) {
       const p = new Promise((r) => setImmediate(r)).then(() => this.snapshotTask(id))
@@ -1428,6 +1489,170 @@ export class Hub {
       if (!ids.length) return { jobs: [] };
       return { jobs: this.command('hub.job.claim', { ids, sessionId }, at) };
     });
+  }
+
+  // ------------------------------------------- coordinator, links and acknowledge (v0.26)
+  /**
+   * A mod call made on behalf of a session: the session row when `sessionId` is given and `projectId` is another project's
+   * (allowed only from the coordinator project), null when the call stays in the session's own project or names no session.
+   */
+  crossFrom(sessionId, projectId) {
+    if (sessionId === undefined || sessionId === null) return null;
+    const s = isStr(sessionId) ? this.p.getSession(sessionId) : null;
+    if (!s) throw notFound('session not found');
+    if (s.project_id === projectId) return null;
+    if (!this.p.getProject(s.project_id)?.coordinator) throw new HttpError(403, COORD_MSG);
+    return s;
+  }
+  taskLink(from, toProjectId, refId, text) {
+    return { kind: 'task', fromSessionId: from.id, fromProjectId: from.project_id, toProjectId, toSessionId: null, refId, text };
+  }
+  /** Projects a reference names: a P-id, a name (case-insensitive) or the last folder of a session's cwd. Archived ones only by id. */
+  findProjects(ref) {
+    if (!isStr(ref) || !ref.trim()) throw bad('project reference must be a non-empty string');
+    const r = ref.trim(), low = r.toLowerCase();
+    const byId = this.p.getProject(r);
+    if (byId) return [byId];
+    const live = this.db.all('SELECT * FROM projects WHERE archived = 0 ORDER BY rowid');
+    const tails = new Map();
+    for (const x of this.db.all('SELECT project_id, cwd FROM sessions ORDER BY rowid')) {
+      const tail = x.cwd.split(/[\\/]+/).filter(Boolean).pop();
+      if (tail) tails.set(x.project_id, [...(tails.get(x.project_id) ?? []), tail.toLowerCase()]);
+    }
+    const by = (pred) => live.filter(pred);
+    return by((p) => p.name.toLowerCase() === low).length ? by((p) => p.name.toLowerCase() === low)
+      : by((p) => (tails.get(p.id) ?? []).includes(low));
+  }
+  /** GET /v1/projects/resolve?ref=: exactly one project (404 none, 409 more than one). */
+  resolveProject(ref) {
+    const found = this.findProjects(ref);
+    if (!found.length) throw notFound(`no project matches \u201c${cut(ref, 80)}\u201d`);
+    if (found.length > 1) throw new HttpError(409, `\u201c${cut(ref, 80)}\u201d matches several projects: ${found.map((p) => p.id).join(', ')}`);
+    return { project: toProject(found[0]) };
+  }
+  /** Human-only (the route checks the transport): make a project the coordinator, or stop it being one. */
+  setCoordinator(projectId, on, at = this.now()) {
+    if (!this.p.getProject(projectId)) throw notFound('project not found');
+    if (typeof on !== 'boolean') throw bad('on must be a boolean');
+    return this.tx(() => ({ project: this.command('hub.project.coordinator', { projectId, on }, at) }));
+  }
+  /** Mod-only (the /helm coordinator command): the same, for the project of the session that typed it. */
+  setSessionCoordinator(sessionId, on, at = this.now()) {
+    const s = this.p.getSession(sessionId);
+    if (!s) throw notFound('session not found');
+    return this.setCoordinator(s.project_id, on, at);
+  }
+  /**
+   * POST /v1/links { kind: 'note', fromSessionId, to, text }: a session sends a note to another project. A spoke may only note
+   * the coordinator; the coordinator may note any other project. It goes to the target project's newest live session, or waits
+   * (state queued) until one starts. The decision (target session) is carried in the event, so replay never re-decides.
+   */
+  createLink(body, at = this.now()) {
+    if (!isObj(body) || body.kind !== 'note') throw bad('body must be { kind: "note", fromSessionId, to, text }');
+    const from = isStr(body.fromSessionId) ? this.p.getSession(body.fromSessionId) : null;
+    if (!from) throw notFound('session not found');
+    const [target, ...more] = this.findProjects(body.to);
+    if (!target) throw notFound(`no project matches \u201c${cut(String(body.to), 80)}\u201d`);
+    if (more.length) throw new HttpError(409, `\u201c${cut(String(body.to), 80)}\u201d matches several projects`);
+    if (target.id === from.project_id) throw bad('a note goes to another project: this session is already in it');
+    const fromIsCoordinator = !!this.p.getProject(from.project_id)?.coordinator;
+    if (!fromIsCoordinator && !target.coordinator) {
+      throw new HttpError(403, this.db.get('SELECT 1 AS x FROM projects WHERE coordinator = 1')
+        ? 'Only the coordinator session can note a project other than the coordinator.'
+        : 'No coordinator project is set, so there is nobody to send this to. The user can set one with /helm coordinator on.');
+    }
+    if (isStr(body.text) && body.text.length > 2000) throw bad('text must be at most 2000 characters');
+    const text = cleanText(body.text, 'text', 2000, false);
+    return this.tx(() => ({
+      link: this.command('hub.link.create', {
+        kind: 'note', fromSessionId: from.id, fromProjectId: from.project_id, toProjectId: target.id,
+        toSessionId: this.p.pickLive(target.id) ?? null, text,
+      }, at),
+    }));
+  }
+  /** After every committed change: hand held link notes to a session that is now live, and rescue ones stranded on an ended session. */
+  deliverLinks(at = this.now()) {
+    if (this.inLinks || this.replaying || this.closed) return;
+    this.inLinks = true;
+    try {
+      const num = (id) => Number(String(id).slice(2)) || 0; // N-<n>: oldest first (the query has no ORDER BY so the covering index serves it)
+      const held = this.db.all(`SELECT ref_id, to_project_id FROM links WHERE kind = 'note' AND state = 'queued'`)
+        .map((l) => ({ noteId: l.ref_id, projectId: l.to_project_id })).sort((a, b) => num(a.noteId) - num(b.noteId));
+      const stranded = this.db.all(
+        `SELECT n.id, n.link_id, l.ref_id, l.to_project_id, l.from_project_id FROM notes n
+           JOIN sessions s ON s.id = n.session_id JOIN links l ON l.id = n.link_id
+          WHERE n.link_id IS NOT NULL AND n.state = 'queued' AND s.status = 'ended' ORDER BY n.rowid`)
+        .map((r) => ({ noteId: r.id, projectId: r.id === r.ref_id ? r.to_project_id : r.from_project_id }));
+      for (const j of [...held, ...stranded]) {
+        const sessionId = this.p.pickLive(j.projectId);
+        if (sessionId) this.tx(() => this.command('hub.link.deliver', { noteId: j.noteId, sessionId }, at));
+      }
+    } catch (e) {
+      this.log?.error('link delivery failed', e);
+    } finally {
+      this.inLinks = false;
+    }
+  }
+  /** Why a row cannot be acknowledged yet (a string), or null. Throws 404 when it does not exist. */
+  ackBlock(kind, id) {
+    if (kind === 'agent') {
+      const a = this.p.getAgent(id);
+      if (!a) throw notFound('agent not found');
+      return ['running', 'stalled', 'waiting'].includes(a.status) ? `the agent is ${a.status}` : null;
+    }
+    if (kind === 'session') {
+      const s = this.p.getSession(id);
+      if (!s) throw notFound('session not found');
+      if (s.status !== 'ended') return 'the session is still live';
+      const n = this.db.get(`SELECT COUNT(*) AS n FROM agents WHERE session_id = ? AND status IN ('running','stalled','waiting')`, id).n;
+      return n ? `${n} subagent${n === 1 ? '' : 's'} still running` : null;
+    }
+    const l = this.p.getLink(id);
+    if (!l) throw notFound('link not found');
+    return l.state === 'answered' ? null : `the link is ${l.state}, not answered yet`;
+  }
+  ackRow(kind, id) {
+    if (kind === 'agent') return { agent: toAgent(this.p.getAgent(id)) };
+    if (kind === 'session') return { session: toSession(this.p.getSession(id)) };
+    return { link: toLink(this.p.getLink(id)) };
+  }
+  rowOf(kind, id) { return kind === 'agent' ? this.p.getAgent(id) : kind === 'session' ? this.p.getSession(id) : this.p.getLink(id); }
+  /** Human-only. Acknowledge one finished agent, ended session or answered link (409 with the reason otherwise). */
+  ack(kind, id, at = this.now()) {
+    const why = this.ackBlock(kind, id);
+    if (why) throw new HttpError(409, `cannot acknowledge: ${why}`);
+    if (!this.rowOf(kind, id).acknowledged_at) this.tx(() => this.command('hub.ack', { kind, id }, at));
+    return this.ackRow(kind, id);
+  }
+  unack(kind, id, at = this.now()) {
+    this.ackBlock(kind, id);
+    if (this.rowOf(kind, id).acknowledged_at) this.tx(() => this.command('hub.unack', { kind, id }, at));
+    return this.ackRow(kind, id);
+  }
+  /** POST /v1/ack { agentIds?, sessionIds?, linkIds? }: acknowledge what can be; the rest is listed in `refused` and never fails the batch. */
+  ackBulk(body, at = this.now()) {
+    if (!isObj(body)) throw bad('body must be an object');
+    const lists = { agent: body.agentIds, session: body.sessionIds, link: body.linkIds };
+    let total = 0;
+    for (const v of Object.values(lists)) {
+      if (v === undefined) continue;
+      if (!Array.isArray(v) || v.some((x) => !isStr(x))) throw bad('agentIds, sessionIds and linkIds must be arrays of ids');
+      total += v.length;
+    }
+    if (total > MAX_ACK_BULK) throw bad(`at most ${MAX_ACK_BULK} ids per request`);
+    const acked = [], refused = [];
+    this.tx(() => {
+      for (const [kind, ids] of Object.entries(lists)) {
+        for (const id of [...new Set(ids ?? [])]) {
+          let why;
+          try { why = this.ackBlock(kind, id); } catch (e) { if (e instanceof HttpError) why = e.message; else throw e; }
+          if (why) { refused.push({ id, reason: why }); continue; }
+          if (!this.rowOf(kind, id).acknowledged_at) this.command('hub.ack', { kind, id }, at);
+          acked.push(id);
+        }
+      }
+    });
+    return { acked, refused };
   }
 
   close() {

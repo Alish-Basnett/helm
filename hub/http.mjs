@@ -57,13 +57,67 @@ route('GET', '/v1/health', ({ hub, cfg, boot }) => ({
 }));
 route('GET', '/v1/state', ({ hub, query }) => hub.state(query.get('projectId') || undefined));
 route('GET', '/v1/stream', () => STREAM);
-route('POST', '/v1/events', async ({ hub, json }) => {
+// v0.26: who is calling. A mod sends `x-helm-session: <sessionId>:<secret>` (the secret comes from POST /v1/sessions/:id/register and
+// lives in the hub's memory only). A header that does not match is a 401, so a restarted hub makes the mod register again.
+function sessionAuth(ctx) {
+  const h = ctx.req.headers['x-helm-session'];
+  if (!h) return null;
+  const v = Array.isArray(h) ? h[0] : h, i = v.lastIndexOf(':');
+  if (i < 1 || !ctx.hub.checkToken(v.slice(0, i), v.slice(i + 1))) throw new HttpError(401, 'session token invalid: register again');
+  return v.slice(0, i);
+}
+// A write on the unix socket that acts for a session must prove which one; the session comes from the secret, never from the body.
+function actingSession(ctx, body) {
+  if (ctx.viaTcp) { delete body.fromSessionId; return body; } // the dashboard acts as the person, with no session
+  const s = sessionAuth(ctx);
+  if (!s) throw new HttpError(401, 'session token required');
+  body.fromSessionId = s;
+  return body;
+}
+route('POST', '/v1/sessions/:id/register', ({ hub, params, viaTcp }) => {
+  if (viaTcp) throw new HttpError(403, 'sessions register over the unix socket');
+  return hub.registerSession(params.id);
+});
+route('POST', '/v1/events', async (ctx) => {
+  const { hub, json } = ctx;
   const body = await json();
   if (!Array.isArray(body.events)) throw new HttpError(400, 'body must be { events: [...] }');
-  const r = hub.ingest(body.events);
+  const r = hub.ingest(body.events, { authSession: sessionAuth(ctx) });
   return { accepted: r.accepted, duplicates: r.duplicates, lastSeq: r.lastSeq, rejected: r.rejected, lastSeqBySession: r.lastSeqBySession };
 });
+// v0.26: who may call what. The web UI reaches the hub over TCP (Host/Origin guarded); the mod uses the unix socket.
+// Coordinator and acknowledge changes are the person's: refused over the socket, so no tool or session can make them.
+// ... and over TCP they need the dashboard cookie the hub set when it served the page (per launch, HttpOnly, SameSite=Strict), plus an
+// Origin that is the dashboard's own when the browser sends one. A page reload after a hub restart fetches the new cookie.
+const humanOnly = (ctx) => {
+  if (!ctx.viaTcp || ctx.remoteListener) throw new HttpError(403, 'only the dashboard can do this');
+  if (!ctx.hub.checkDash(ctx.req.headers.cookie)) throw new HttpError(403, 'dashboard session missing: reload the dashboard');
+  const origin = ctx.req.headers.origin;
+  let same = !origin;
+  if (origin) { try { same = new URL(origin).host === ctx.req.headers.host; } catch { /* malformed */ } }
+  if (!same) throw new HttpError(403, 'forbidden origin');
+};
+const bool = (b) => { if (typeof b.on !== 'boolean') throw new HttpError(400, 'body must be { on: boolean }'); return b.on; };
 route('GET', '/v1/projects', ({ hub }) => ({ projects: hub.state().projects }));
+route('GET', '/v1/projects/resolve', ({ hub, query }) => hub.resolveProject(query.get('ref') ?? ''));
+route('POST', '/v1/projects/:id/coordinator', async (ctx) => { humanOnly(ctx); return ctx.hub.setCoordinator(ctx.params.id, bool(await ctx.json())); });
+// the /helm coordinator command: the mod calls this itself, never from the task tool; refused over TCP
+route('POST', '/v1/sessions/:id/coordinator', async (ctx) => {
+  if (ctx.viaTcp) throw new HttpError(403, 'only the /helm command can do this');
+  const who = sessionAuth(ctx);
+  if (!who) throw new HttpError(401, 'session token required');
+  if (who !== ctx.params.id) throw new HttpError(403, 'a session can only change its own project');
+  return ctx.hub.setSessionCoordinator(ctx.params.id, bool(await ctx.json()));
+});
+route('POST', '/v1/links', async (ctx) => {
+  if (ctx.viaTcp) throw new HttpError(403, 'notes are sent by sessions, over the unix socket');
+  return created(ctx.hub.createLink(actingSession(ctx, await ctx.json())));
+});
+for (const [seg, kind] of [['agents', 'agent'], ['sessions', 'session'], ['links', 'link']]) {
+  route('POST', `/v1/${seg}/:id/ack`, (ctx) => { humanOnly(ctx); return ctx.hub.ack(kind, ctx.params.id); });
+  route('POST', `/v1/${seg}/:id/unack`, (ctx) => { humanOnly(ctx); return ctx.hub.unack(kind, ctx.params.id); });
+}
+route('POST', '/v1/ack', async (ctx) => { humanOnly(ctx); return ctx.hub.ackBulk(await ctx.json()); });
 route('GET', '/v1/projects/:id', ({ hub, params }) => {
   const project = hub.state().projects.find((p) => p.id === params.id);
   if (!project) throw new HttpError(404, 'project not found');
@@ -77,13 +131,14 @@ route('GET', '/v1/tasks', ({ hub, query }) => ({
     projectId: query.get('projectId') || undefined,
   }),
 }));
-route('POST', '/v1/tasks', async ({ hub, json, remote, remoteListener }) => {
-  const r = hub.createTask(await json());
+route('POST', '/v1/tasks', async (ctx) => {
+  const { hub, remote, remoteListener } = ctx;
+  const r = hub.createTask(actingSession(ctx, await ctx.json()));
   if (remoteListener && r.note) remote.trackNote(r.note.id); // a start note's reply goes back to the phone too
   return created(r);
 });
 route('GET', '/v1/tasks/:id', ({ hub, params }) => hub.taskDetail(params.id));
-route('PATCH', '/v1/tasks/:id', async ({ hub, params, json }) => hub.updateTask(params.id, await json()));
+route('PATCH', '/v1/tasks/:id', async (ctx) => ctx.hub.updateTask(ctx.params.id, actingSession(ctx, await ctx.json())));
 route('GET', '/v1/sessions/:id/inbox', ({ hub, params }) => hub.claimInbox(params.id));
 route('GET', '/v1/sessions/:id/jobs', ({ hub, params }) => hub.claimJobs(params.id));
 route('GET', '/v1/sessions/:id/steps', ({ hub, params }) => hub.wf.claimSteps(params.id));
@@ -95,7 +150,10 @@ route('GET', '/v1/sessions/:id/activity', ({ hub, params, query }) => {
 });
 route('GET', '/v1/sessions/:id/health', ({ hub, params, query }) => hub.sessionHealth(params.id, intParam(query.get('hours'), 24, 1, 168)));
 route('GET', '/v1/health/sessions', ({ hub }) => hub.healthSummary());
-route('POST', '/v1/sessions/:id/join', async ({ hub, params, json }) => hub.joinSession(params.id, await json()));
+route('POST', '/v1/sessions/:id/join', async (ctx) => {
+  if (!ctx.viaTcp && sessionAuth(ctx) !== ctx.params.id) throw new HttpError(401, 'session token required'); // the /helm join command: a session moves only itself
+  return ctx.hub.joinSession(ctx.params.id, await ctx.json());
+});
 route('POST', '/v1/tasks/:id/files', async ({ hub, params, json }) => hub.attachTaskFiles(params.id, await json()));
 route('GET', '/v1/tasks/:id/diff', ({ hub, params, query }) => hub.taskDiff(params.id, { refresh: /^(1|true|yes)$/i.test(query.get('refresh') || '') }));
 // v0.12 branch per task
@@ -350,7 +408,7 @@ function handleStream(hub, cfg, req, res, query, sseClients, redact = false) {
 }
 
 // -------------------------------------------------------------------- static
-function serveStatic(cfg, req, res, pathname, noFallback = false) {
+function serveStatic(cfg, req, res, pathname, noFallback = false, setCookie = null) {
   const root = cfg.webRoot;
   let rel;
   try { rel = decodeURIComponent(pathname); } catch { return sendJson(res, 400, { error: 'bad path' }); }
@@ -374,7 +432,7 @@ function serveStatic(cfg, req, res, pathname, noFallback = false) {
       const body = '<!doctype html><meta charset="utf-8"><title>Helm hub</title><body style="font:16px system-ui;padding:2rem">'
         + '<h1>Helm hub is running</h1><p>The web UI is not installed (no <code>web/index.html</code> found). '
         + 'The API is available under <code>/v1/</code>.</p></body>';
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Content-Length': Buffer.byteLength(body) });
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Content-Length': Buffer.byteLength(body), ...(setCookie ? { 'Set-Cookie': setCookie } : {}) });
       return res.end(req.method === 'HEAD' ? undefined : body);
     }
     return sendJson(res, 404, { error: 'not found' });
@@ -383,6 +441,7 @@ function serveStatic(cfg, req, res, pathname, noFallback = false) {
     'Content-Type': MIME[path.extname(hit.real).toLowerCase()] || 'application/octet-stream',
     'Content-Length': hit.st.size, 'Cache-Control': 'no-store', // tiny local files: never let a browser mix stale modules with new ones
     'X-Content-Type-Options': 'nosniff',
+    ...(setCookie && /\.html?$/i.test(hit.real) ? { 'Set-Cookie': setCookie } : {}), // the dashboard page carries the human-only secret
   });
   if (req.method === 'HEAD') return res.end();
   const rs = fs.createReadStream(hit.real);
@@ -409,7 +468,7 @@ export function createHandler({ hub, cfg, log, boot = {}, viaTcp, sseClients, re
       if (!pathname.startsWith('/v1/') && pathname !== '/v1') {
         if (method !== 'GET' && method !== 'HEAD') return sendJson(res, 405, { error: 'method not allowed' });
         guard(req, viaTcp, false, remoteListener);
-        return serveStatic(cfg, req, res, pathname, remoteListener);
+        return serveStatic(cfg, req, res, pathname, remoteListener, !remoteListener && viaTcp ? hub.dashCookie() : null);
       }
 
       let matched = null;
@@ -433,7 +492,7 @@ export function createHandler({ hub, cfg, log, boot = {}, viaTcp, sseClients, re
       guard(req, viaTcp, method !== 'GET' && method !== 'HEAD' || isInbox, remoteListener);
 
       const ctx = {
-        hub, cfg, boot, remote, remoteListener, params: matched.params, query: url.searchParams, req, res,
+        hub, cfg, boot, remote, remoteListener, viaTcp, params: matched.params, query: url.searchParams, req, res,
         json: () => parseJsonBody(req),
         raw: (limit) => readBody(req, limit),
       };

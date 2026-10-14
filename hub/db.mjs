@@ -226,6 +226,16 @@ CREATE TABLE IF NOT EXISTS doc_comments (
 );
 CREATE INDEX IF NOT EXISTS doc_comments_doc ON doc_comments(doc_id, state);
 
+-- v0.26: cross-project links (notes and cards a session sent to another project). Projection of hub.link.* events; see hub/projections.mjs.
+CREATE TABLE IF NOT EXISTS links (
+  id TEXT PRIMARY KEY, kind TEXT NOT NULL, from_session_id TEXT NOT NULL, from_project_id TEXT NOT NULL,
+  to_project_id TEXT NOT NULL, to_session_id TEXT, ref_id TEXT, text TEXT NOT NULL DEFAULT '',
+  state TEXT NOT NULL, reply TEXT, created_at INTEGER NOT NULL, delivered_at INTEGER, answered_at INTEGER, acknowledged_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS links_state ON links(state);
+-- covers deliverLinks' held-note query without touching the table
+CREATE INDEX IF NOT EXISTS links_deliver ON links(kind, state, to_project_id, ref_id);
+
 CREATE TABLE IF NOT EXISTS changes (
   seq INTEGER PRIMARY KEY AUTOINCREMENT, entity TEXT NOT NULL, op TEXT NOT NULL, row TEXT NOT NULL
 );
@@ -338,6 +348,15 @@ export class Db {
       this.raw.exec(`UPDATE tasks SET interrupted = 1 WHERE agent_id IN (SELECT id FROM agents WHERE status = 'failed')
         AND status NOT IN ('done','archived')`);
     }
+    // v0.26: coordinator project, cross-project cards, note links, acknowledge-to-archive. Additive + defaulted/nullable; `helmd --rebuild` back-fills.
+    if (!has('projects', 'coordinator')) this.raw.exec('ALTER TABLE projects ADD COLUMN coordinator INTEGER NOT NULL DEFAULT 0');
+    if (!has('sessions', 'acknowledged_at')) this.raw.exec('ALTER TABLE sessions ADD COLUMN acknowledged_at INTEGER');
+    if (!has('agents', 'acknowledged_at')) this.raw.exec('ALTER TABLE agents ADD COLUMN acknowledged_at INTEGER');
+    if (!has('tasks', 'created_by_session_id')) this.raw.exec('ALTER TABLE tasks ADD COLUMN created_by_session_id TEXT');
+    if (!has('tasks', 'from_project_id')) this.raw.exec('ALTER TABLE tasks ADD COLUMN from_project_id TEXT');
+    if (!has('notes', 'link_id')) this.raw.exec('ALTER TABLE notes ADD COLUMN link_id TEXT');
+    this.raw.exec('CREATE INDEX IF NOT EXISTS notes_link ON notes(link_id)');
+    this.raw.exec('CREATE INDEX IF NOT EXISTS notes_link_queued ON notes(state, link_id, session_id)'); // deliverLinks' stranded-note query
   }
   prep(sql) {
     let s = this.cache.get(sql);
