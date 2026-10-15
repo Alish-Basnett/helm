@@ -176,7 +176,10 @@ route('POST', '/v1/tasks/:id/push', async ({ hub, params, json }) => hub.pushBra
 route('POST', '/v1/tasks/:id/pr', async ({ hub, params, json }) => hub.linkPr(params.id, await json()));
 route('POST', '/v1/tasks/:id/ci/refresh', ({ hub, params }) => hub.refreshCi(params.id));
 route('GET', '/v1/tasks/:id/start-target', ({ hub, params }) => hub.startTarget(params.id));
-route('POST', '/v1/tasks/:id/move', async (ctx) => ctx.hub.moveTask(ctx.params.id, actingSession(ctx, await ctx.json())));
+route('POST', '/v1/tasks/:id/move', async (ctx) => {
+  if (ctx.viaTcp) humanOnly(ctx); // the dashboard only (cookie + origin); the socket is the coordinator session's way in
+  return ctx.hub.moveTask(ctx.params.id, actingSession(ctx, await ctx.json()));
+});
 route('POST', '/v1/tasks/:id/start', ({ hub, params }) => hub.startTask(params.id));
 route('POST', '/v1/tasks/:id/start/cancel', ({ hub, params }) => hub.cancelStart(params.id));
 route('POST', '/v1/tasks/:id/resume', ({ hub, params }) => hub.resumeTask(params.id));

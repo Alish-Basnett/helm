@@ -1,7 +1,7 @@
 // v0.28: move a card to another project; GET /v1/tasks/:id/start-target shows where a Start would go.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { startTest, asSession, sockRequest } from './helpers.mjs';
+import { startTest, asSession, sockRequest, rawRequest } from './helpers.mjs';
 
 // alpha (sA, coordinator), beta (sB), gamma (sG); "dormant" is a hand-made project with no session.
 async function world(h) {
@@ -176,4 +176,42 @@ test('start-target: a task session in another project is ignored', async (t) => 
   assert.equal((await actual(h, c.id)).sessionId, 'sB');
   assert.equal((await h.get('/v1/tasks/T-999/start-target')).status, 404);
   void gamma;
+});
+
+test('over TCP a move needs the dashboard cookie; the phone listener is refused', async (t) => {
+  const h = await startTest({ remoteHost: '127.0.0.1', remotePort: 0 }); t.after(h.stop);
+  const { beta, gamma } = await world(h);
+  const c = await mk(h, beta);
+  const bare = await h.apiBare('POST', `/v1/tasks/${c.id}/move`, { projectId: gamma });
+  assert.equal(bare.status, 403, 'no cookie');
+  const foreign = await h.api('POST', `/v1/tasks/${c.id}/move`, { projectId: gamma }, { origin: 'http://evil.example' });
+  assert.equal(foreign.status, 403, 'foreign origin');
+  assert.equal(task(h, c.id).projectId, beta);
+  const ok = await mv(h, c.id, gamma);
+  assert.equal(ok.status, 200, ok.text);
+  assert.equal(task(h, c.id).projectId, gamma);
+  const r = await h.api('POST', '/v1/remote', { enabled: true });
+  assert.equal(r.status, 200, r.text);
+  const phone = await rawRequest(r.json.port, { method: 'POST', path: `/v1/tasks/${c.id}/move`,
+    headers: { authorization: `Bearer ${r.json.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ projectId: beta }) });
+  assert.equal(phone.status, 403, phone.text);
+  assert.equal(task(h, c.id).projectId, gamma);
+});
+
+test('a card with a running, stalled or waiting agent cannot be moved (409); a finished one can', async (t) => {
+  const h = await startTest(); t.after(h.stop);
+  const { beta, gamma } = await world(h);
+  const c = await mk(h, beta);
+  h.send(h.ev('sB', 'agent.spawned', { toolUseId: 'u1', subagentType: 'helm:builder', model: 'sonnet', description: `[helm:${c.id}] go`, prompt: '' }));
+  h.send(h.ev('sB', 'agent.bound', { toolUseId: 'u1', agentId: 'ag1' }));
+  assert.equal(h.hub.p.getAgent('ag1').status, 'running');
+  const r = await mv(h, c.id, gamma);
+  assert.equal(r.status, 409, r.text);
+  assert.match(r.json.error, /agent still running on this card/);
+  assert.equal(task(h, c.id).projectId, beta);
+  const sock = await (await who(h, 'sA'))('POST', `/v1/tasks/${c.id}/move`, { projectId: gamma });
+  assert.equal(sock.status, 409, 'the coordinator is refused too');
+  h.send(h.ev('sB', 'agent.completed', { agentId: 'ag1', ok: true, summary: 'done' }));
+  assert.equal((await mv(h, c.id, gamma)).status, 200);
+  rebuildSame(h);
 });

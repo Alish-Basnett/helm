@@ -1205,6 +1205,9 @@ export class Hub {
     const dest = this.p.getProject(body.projectId);
     if (!dest || dest.archived) throw new HttpError(409, 'the target project does not exist or is archived');
     if (dest.id === t.project_id) return { task: toTask(t) };
+    if (this.db.get(`SELECT 1 AS x FROM agents WHERE task_id = ? AND status IN ('running','stalled','waiting') LIMIT 1`, id)) {
+      throw new HttpError(409, 'agent still running on this card');
+    }
     const fromId = t.project_id;
     return this.tx(() => {
       const task = this.command('hub.task.move', { id, from: fromId, to: dest.id }, at);
