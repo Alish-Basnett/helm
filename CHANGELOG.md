@@ -6,6 +6,13 @@ All notable changes to Helm are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.27.2] - 2026-10-15
+
+### Changed
+
+- API behaviour change: Start, Resume, create-with-start, template use and Choices start with no live session in the project now return 200 (201 for create/template) with a held note instead of 409 `no live session`. Callers that relied on the 409 must read the note (`target.kind === 'project'`).
+- Held Starts follow the card: delivery uses the card's current project (a project merge or a card move re-routes it), a merge retargets held notes, and archiving a project fails its held Starts with "Project archived" (card back to backlog; the archive is never blocked).
+
 ## [0.27.1] - 2026-10-15
 
 ### Fixed

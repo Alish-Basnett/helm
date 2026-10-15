@@ -1450,10 +1450,25 @@ export class Projector {
     this.upd('sessions', sessionId, { app_title: cut(str(title), 200), app_session_id: appSessionId ? cut(str(appSessionId), 200) : null });
     this.pushSession(sessionId);
   }
+  /** A Start held for a project that is being archived can never be delivered: fail it and put its card back in the backlog. */
+  failHeldStarts(projectId, at) {
+    const held = this.db.all(
+      `SELECT n.id AS note_id, t.id AS task_id FROM notes n JOIN tasks t ON t.start_note_id = n.id
+        WHERE n.target_kind = 'project' AND n.state = 'queued' AND t.project_id = ? ORDER BY n.rowid`, projectId);
+    for (const h of held) {
+      this.upd('notes', h.note_id, { state: 'failed', ran_at: at, error: 'Project archived' });
+      this.pushNote(h.note_id);
+      const t = this.getTask(h.task_id);
+      if (t.status === 'next') this.setTaskStatus(t, 'backlog', at, null);
+      this.upd('tasks', t.id, { auto_started_at: null });
+      this.pushTask(t.id);
+    }
+  }
   /** hub.project.archive / hub.project.unarchive { id }: hide a project from the pickers (or bring it back). Nothing inside it is touched. */
   hProjectArchive(ev) {
     const p = this.getProject(ev.data.id);
     if (!p) throw new Error('project not found');
+    if (ev.type === 'hub.project.archive') this.failHeldStarts(p.id, ev.at);
     this.upd('projects', p.id, { archived: ev.type === 'hub.project.archive' ? 1 : 0 });
     this.pushProject(p.id);
     return toProject(this.getProject(p.id));
@@ -1480,6 +1495,7 @@ export class Projector {
     this.db.run(`UPDATE links SET state = 'answered', answered_at = COALESCE(answered_at, ?), acknowledged_at = COALESCE(acknowledged_at, ?)
                   WHERE from_project_id = ? AND to_project_id = ? AND (state != 'answered' OR acknowledged_at IS NULL)`, ev.at, ev.at, targetId, targetId);
     this.db.run('UPDATE tasks SET from_project_id = ? WHERE from_project_id = ?', targetId, sourceId);
+    this.db.run(`UPDATE notes SET target_id = ? WHERE target_kind = 'project' AND target_id = ?`, targetId, sourceId); // held Starts follow their cards
     const docs = this.db.all('SELECT id FROM docs WHERE project_id = ? ORDER BY rowid', sourceId);
     this.db.run('UPDATE docs SET project_id = ? WHERE project_id = ?', targetId, sourceId);
     this.upd('projects', sourceId, { archived: 1 });

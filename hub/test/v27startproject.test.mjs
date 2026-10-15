@@ -164,3 +164,46 @@ test('rebuild reproduces held, delivered, cancelled and superseded starts exactl
   assert.deepEqual(h.hub.dump(), before);
   assert.deepEqual({ ...h.state(), seq: 0 }, { ...st, seq: 0 });
 });
+
+test('a held Start follows a project merge: delivered to a session of the target project', async (t) => {
+  const h = await startTest(); t.after(h.stop);
+  const { trips } = await world(h);
+  const task = await mkTask(h, trips);
+  const note = (await h.api('POST', `/v1/tasks/${task.id}/start`)).json.note;
+  const target = (await h.api('POST', '/v1/projects', { name: 'target' })).json.project.id;
+  const m = await h.api('POST', `/v1/projects/${trips}/merge-into/${target}`);
+  assert.equal(m.status, 200, m.text);
+  assert.deepEqual(h.state().notes.find((n) => n.id === note.id).target, { kind: 'project', id: target });
+  h.send(h.ev('sM', 'session.started', { cwd: '/w/target', title: 'Target', model: 'm' }));
+  assert.equal(h.state().notes.find((n) => n.id === note.id).sessionId, 'sM');
+  assert.deepEqual(inbox(h, 'sM').map((n) => n.id), [note.id]);
+  const before = h.hub.dump(); h.hub.rebuild(); assert.deepEqual(h.hub.dump(), before);
+});
+
+test('a held Start follows its card when the card moves projects', async (t) => {
+  const h = await startTest(); t.after(h.stop);
+  const { trips } = await world(h);
+  h.send(h.ev('sN', 'session.started', { cwd: '/w/elsewhere', title: 'N', model: 'm' }));
+  const task = await mkTask(h, trips, { sessionId: 'sN' }); // sN lives in another project: ignored for routing
+  const note = (await h.api('POST', `/v1/tasks/${task.id}/start`)).json.note;
+  assert.deepEqual(h.state().notes.find((n) => n.id === note.id).target, { kind: 'project', id: trips });
+  const dest = (await h.api('POST', '/v1/projects', { name: 'dest' })).json.project.id;
+  await h.api('POST', '/v1/sessions/sN/join', { projectId: dest }); // sN carries the card into dest
+  assert.equal(h.state().tasks.find((x) => x.id === task.id).projectId, dest);
+  const n = h.state().notes.find((x) => x.id === note.id);
+  assert.equal(n.sessionId, 'sN', "delivered by the card's current project, not the one it was queued for");
+  assert.equal(h.state().sessions.find((s) => s.id === 'sN').projectId, dest);
+});
+
+test('archiving a project fails its held Start ("Project archived") and returns the card to the backlog', async (t) => {
+  const h = await startTest(); t.after(h.stop);
+  const { trips } = await world(h);
+  const task = await mkTask(h, trips);
+  const note = (await h.api('POST', `/v1/tasks/${task.id}/start`)).json.note;
+  const a = await h.api('POST', `/v1/projects/${trips}/archive`);
+  assert.equal(a.status, 200, a.text);
+  const n = h.state().notes.find((x) => x.id === note.id);
+  assert.deepEqual([n.state, n.error], ['failed', 'Project archived']);
+  assert.equal(h.state().tasks.find((x) => x.id === task.id).status, 'backlog');
+  const before = h.hub.dump(); h.hub.rebuild(); assert.deepEqual(h.hub.dump(), before);
+});
