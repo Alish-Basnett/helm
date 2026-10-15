@@ -1,10 +1,13 @@
 // views/projects.js — project grid: counts, segmented task bar, sessions with "Move to project…".
 import { h, reconcile, setText, setClass, setHidden, startTicker } from '../dom.js';
 import { icon } from '../icons.js';
-import { state, sel, setUI } from '../store.js';
+import { state, sel, setUI, upsert } from '../store.js';
+import { createCleanupBanner } from '../cleanup.js';
+import { api } from '../api.js';
+import { openModal } from '../modal.js';
 import { createProject, patchProject, archiveProject, joinSession } from '../actions.js';
-import { fmtAgo, cwdTail, plural, STATUS_META } from '../format.js';
-import { emptyState } from '../ui.js';
+import { fmtAgo, cwdTail, plural, STATUS_META, sessionLabel } from '../format.js';
+import { emptyState, toastError } from '../ui.js';
 import { navigate } from '../router.js';
 
 const SEG = ['backlog', 'next', 'in_progress', 'review', 'done', 'later', 'blocked'];
@@ -39,7 +42,8 @@ export function mount(container) {
     h('div', { class: 'composer-row' }, h('span', { class: 'spacer' }),
       h('button', { class: 'btn btn-quiet btn-sm', type: 'button', onclick: () => { creating = false; createCard.hidden = true; } }, 'Cancel'),
       h('button', { class: 'btn btn-primary btn-sm', type: 'submit' }, 'Create')));
-  const wrap = h('div', { class: 'projects' }, bar, createCard, grid, empty);
+  const cleanup = createCleanupBanner();
+  const wrap = h('div', { class: 'projects' }, cleanup.el, bar, createCard, grid, empty);
   container.appendChild(wrap);
 
   function startCreate() {
@@ -97,9 +101,34 @@ export function mount(container) {
     input.focus(); input.select();
   }
 
+  /** Archive / restore a project: a human action, so it asks first. Uses the v0.27 routes, the old PATCH on a hub without them. */
+  let archiveOpen = false;
   function toggleArchive(p) {
-    if (!p.archived && state.ui.projectId === p.id) setUI({ projectId: 'all' });
-    archiveProject(p.id, !p.archived);
+    if (archiveOpen) return;
+    archiveOpen = true;
+    const on = !p.archived;
+    const tasks = sel.tasksOfProject(p.id).length;
+    const card = h('div', { class: 'md-card ak-card', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'pa-h' },
+      h('h2', { id: 'pa-h' }, on ? `Archive “${p.name}”?` : `Restore “${p.name}”?`),
+      h('p', { class: 'ak-note' }, on ? `It leaves the pickers and the Board (${plural(tasks, 'card')} stay in it). Nothing is deleted; restore it any time from Show archived.` : 'It comes back in the pickers and on the Board.'));
+    const cancel = h('button', { class: 'btn', type: 'button', onclick: () => m.close() }, 'Cancel');
+    const go = h('button', { class: 'btn btn-primary', type: 'button', onclick: async () => {
+      go.disabled = true; cancel.disabled = true; m.setBusy(true);
+      let ok = false;
+      try {
+        const res = await (on ? api.archiveProject(p.id) : api.unarchiveProject(p.id));
+        if (res && res.project) upsert('project', res.project); else upsert('project', { ...p, archived: on });
+        ok = true;
+      } catch (e) {
+        if (e && (e.status === 404 || e.status === 405)) ok = !!(await archiveProject(p.id, on)); // a hub without the routes
+        else toastError(e, on ? 'Could not archive project' : 'Could not restore project');
+      }
+      if (ok && on && state.ui.projectId === p.id) setUI({ projectId: 'all' }); // the scope moves only once it worked
+      m.setBusy(false);
+      m.close();
+    } }, on ? 'Archive' : 'Restore');
+    card.append(h('div', { class: 'ak-foot' }, cancel, go));
+    const m = openModal(card, { initialFocus: () => cancel, onClose: () => { archiveOpen = false; } });
   }
 
   function updateCard(card, p) {
@@ -159,7 +188,7 @@ export function mount(container) {
     const r = row.__r;
     row.__s = s;
     r.dot.className = `pdot ${s.status}${s.busy ? ' busy' : ''}`;
-    setText(r.title, s.title || cwdTail(s.cwd) || s.id);
+    setText(r.title, sessionLabel(s));
     setText(r.sub, `${cwdTail(s.cwd)} · ${s.status}`);
     const others = sel.projects().filter((p) => p.id !== s.projectId);
     const sig = others.map((p) => p.id + p.name).join('|');
@@ -180,5 +209,5 @@ export function mount(container) {
   }
   render();
 
-  return { watch: ['project', 'session', 'task', 'ui', 'ready'], update: render, setRoute() {}, destroy() { wrap.remove(); } };
+  return { watch: ['project', 'session', 'task', 'ui', 'ready'], update: render, setRoute() {}, destroy() { cleanup.destroy(); wrap.remove(); } };
 }

@@ -118,13 +118,22 @@ for (const [seg, kind] of [['agents', 'agent'], ['sessions', 'session'], ['links
   route('POST', `/v1/${seg}/:id/unack`, (ctx) => { humanOnly(ctx); return ctx.hub.unack(kind, ctx.params.id); });
 }
 route('POST', '/v1/ack', async (ctx) => { humanOnly(ctx); return ctx.hub.ackBulk(await ctx.json()); });
+route('GET', '/v1/projects/duplicates', ({ hub }) => hub.duplicateProjects());
+route('POST', '/v1/projects/archive', async (ctx) => { humanOnly(ctx); return ctx.hub.archiveProjects(await ctx.json()); });
+route('POST', '/v1/projects/:id/archive', (ctx) => { humanOnly(ctx); return ctx.hub.archiveProject(ctx.params.id); });
+route('POST', '/v1/projects/:id/unarchive', (ctx) => { humanOnly(ctx); return ctx.hub.unarchiveProject(ctx.params.id); });
+route('POST', '/v1/projects/:id/merge-into/:target', (ctx) => { humanOnly(ctx); return ctx.hub.mergeProject(ctx.params.id, ctx.params.target); });
 route('GET', '/v1/projects/:id', ({ hub, params }) => {
   const project = hub.state().projects.find((p) => p.id === params.id);
   if (!project) throw new HttpError(404, 'project not found');
   return { project };
 });
 route('POST', '/v1/projects', async ({ hub, json }) => created(hub.createProject(await json())));
-route('PATCH', '/v1/projects/:id', async ({ hub, params, json }) => hub.updateProject(params.id, await json()));
+route('PATCH', '/v1/projects/:id', async (ctx) => {
+  const body = await ctx.json();
+  if (body && body.archived !== undefined) humanOnly(ctx); // v0.27: archiving is the person's, with the same checks as /archive
+  return ctx.hub.updateProject(ctx.params.id, body);
+});
 route('GET', '/v1/tasks', ({ hub, query }) => ({
   tasks: hub.tasks({
     sessionId: query.get('sessionId') || undefined, status: query.get('status') || undefined,

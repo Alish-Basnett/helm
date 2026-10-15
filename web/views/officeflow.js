@@ -4,14 +4,17 @@
 // (except on a hub that cannot acknowledge: there finished things drop off after a while).
 import { h, setText, setHidden, reconcile, reducedMotion, startTicker } from '../dom.js';
 import { icon } from '../icons.js';
-import { state, sel, upsert, onActivity } from '../store.js';
+import { state, sel, upsert, onActivity, showOld } from '../store.js';
 import { api } from '../api.js';
+import { ackBulk } from '../actions.js';
+import { openAckAll, openBundleAck, openAckDialog } from '../ackdialog.js';
+import { createOldToggle } from '../oldtoggle.js';
 import { onPrefs } from '../prefs.js';
-import { fmtElapsed, fmtTokens, fmtUsd, fmtAgo, agentLabel, truncate, plural, cwdTail } from '../format.js';
+import { fmtElapsed, fmtTokens, fmtUsd, fmtAgo, agentLabel, truncate, plural, cwdTail, sessionLabel } from '../format.js';
 import { modelBadge, nowDoingLine, toast, toastError } from '../ui.js';
 import { navigate, openTask } from '../router.js';
 import { ctxText, ctxLevel, LEVEL_LABEL, levelOf } from '../health.js';
-import { buildModel, Sim, fitTransform, quadAt, linkControl, easeOutBack } from '../officemodel.js';
+import { buildModel, Sim, fitTransform, quadAt, linkControl, easeOutBack, FINISHED_CAP } from '../officemodel.js';
 
 const AGENT_STATUS = { running: 'Running', done: 'Done', failed: 'Failed', stalled: 'Stalled', waiting: 'Waiting for you' };
 const POP_MS = 520;
@@ -20,7 +23,8 @@ const COLORS = {
   bg: '--bg', bg2: '--bg-2', label: '--label', label2: '--label-2', label3: '--label-3', sep: '--separator-strong',
   accent: '--accent', green: '--green', orange: '--orange', red: '--red', indigo: '--indigo', purple: '--purple', gray: '--gray', blue: '--blue',
 };
-const LINK_COLOR = { note: 'accent', task: 'blue' };
+const LINK_STATE_LABEL = { queued: 'Queued', delivered: 'Delivered', answered: 'Answered' };
+const BUNDLE_ROWS = 60;
 const TIP_ID = 'of-tip';
 
 const errReason = (e) => (e && (e.status === 404 || e.status === 405) ? 'Update the hub to acknowledge' : (e && e.data && e.data.reason) || (e && e.message) || 'Could not acknowledge');
@@ -35,6 +39,7 @@ export function mount(container) {
   let hoverKey = null;
   let model = null;
   let pendingAll = { agents: [], sessions: [], links: [] };
+  let oldIsOn = false;
   let primed = false;
   let autoFit = true;
   let listPinned = false;
@@ -45,6 +50,10 @@ export function mount(container) {
   const edgeByKey = new Map();
   const particles = [];
   const linkStates = new Map();
+  const linkEdge = new Map();   // link id -> its bundle edge
+  const lastBundle = new Map(); // bundle key -> last time a particle ran along it
+  let chipHits = [];            // screen boxes of the "+N more" chips drawn last frame
+  let bundleRows = BUNDLE_ROWS;
   const lastStruct = new Map(); // session key -> last time a structural particle left main for it
   let C = {};
   let colorsDirty = true;
@@ -60,10 +69,11 @@ export function mount(container) {
   const mainHint = h('span', { class: 'of-hint', hidden: true }, 'Update the hub to choose a main session');
   const projSel = h('select', { class: 'select select-sm', 'aria-label': 'Filter by project', onchange: () => { projFilter = projSel.value; refresh(); } });
   const pendingN = h('span', { class: 'of-count mono' }, '0');
-  const pendingLbl = h('span', { class: 'of-pending-lbl of-t' }, 'Finished, not acknowledged');
+  const pendingLbl = h('span', { class: 'of-pending-lbl' }, 'need your OK');
   const pendingIc = h('span', { class: 'of-pend-ic', 'aria-hidden': 'true' }, icon('checkCircle', 15));
-  const ackAllBtn = h('button', { class: 'btn btn-sm btn-accent', type: 'button', 'aria-label': 'Acknowledge all finished…', onclick: () => openConfirm() }, icon('checkCircle', 14), h('span', { class: 'of-t' }, 'Acknowledge all…'));
-  const pendingBox = h('div', { class: 'of-pending', role: 'status' }, pendingIc, pendingLbl, h('span', {}, '('), pendingN, h('span', {}, ')'), ackAllBtn);
+  const ackAllBtn = h('button', { class: 'btn btn-sm btn-accent', type: 'button', 'aria-label': 'Acknowledge all finished…', onclick: () => openAckAll() }, icon('checkCircle', 14), h('span', {}, 'Acknowledge all…'));
+  const pendingBox = h('div', { class: 'of-pending', role: 'status' }, pendingIc, pendingN, pendingLbl, ackAllBtn);
+  const oldToggle = createOldToggle('flow');
   const archN = h('span', { class: 'of-count mono' }, '0');
   const archBtn = h('button', { class: 'th-seg-btn of-arch', type: 'button', 'aria-pressed': 'false', title: 'Show acknowledged nodes, dimmed, with Restore', onclick: () => { showArchived = !showArchived; refresh(); } }, icon('archive', 14), h('span', { class: 'of-t' }, 'Archived'), archN);
   archBtn.setAttribute('aria-label', 'Archived');
@@ -72,10 +82,10 @@ export function mount(container) {
   const zoomBtn = (label, title, fn) => h('button', { class: 'th-seg-btn', type: 'button', title, 'aria-label': title, onclick: fn }, label);
   const zoomSeg = h('div', { class: 'th-seg', role: 'group', 'aria-label': 'Zoom' },
     h('span', { class: 'of-zoombtns' }, zoomBtn('−', 'Zoom out (-)', () => zoomBy(1 / 1.3)), zoomBtn('+', 'Zoom in (+)', () => zoomBy(1.3))), zoomBtn('Fit', 'Fit the whole graph (0)', () => fit()));
-  const toolbar = h('div', { class: 'of-toolbar' },
+  const toolbar = h('div', { class: 'of-toolbar' }, pendingBox,
     h('label', { class: 'of-field' }, h('span', { class: 'of-field-k' }, 'Main'), mainSel), mainHint,
     h('label', { class: 'of-field' }, h('span', { class: 'of-field-k' }, 'Project'), projSel),
-    h('span', { class: 'spacer' }), pendingBox,
+    h('span', { class: 'spacer' }), oldToggle.el,
     h('div', { class: 'th-seg' }, archBtn, listBtn), zoomSeg);
 
   const legendItem = (swatch, text) => h('li', { class: 'of-leg' }, swatch, h('span', {}, text));
@@ -138,7 +148,7 @@ export function mount(container) {
   }
   function nodeSub(v) {
     if (v.kind === 'agent') return v.row.description ? truncate(v.row.description.replace(/^\[helm:T-\d+\]\s*/, ''), 60) : '';
-    if (v.row) return truncate(v.row.title || cwdTail(v.row.cwd) || v.row.id, 40);
+    if (v.row) return truncate(sessionLabel(v.row), 40);
     return v.kind === 'main' ? 'No live session in this project' : 'No live session';
   }
   function nodeStatus(v) {
@@ -146,10 +156,8 @@ export function mount(container) {
     return sessionStatus(v.row);
   }
   const linkText = (L) => `${L.kind === 'task' ? 'Task' : 'Note'}: ${truncate(L.text || '', 80)}`;
-  function linkTitle(e) {
-    const L = e.link;
-    return `${L.kind === 'task' ? 'Task' : 'Note'} ${pname(L.fromProjectId) || 'session'} → ${pname(L.toProjectId) || 'session'}`;
-  }
+  const bundleTitle = (e) => `${pname(e.bundle.fromProjectId) || 'session'} ${e.bundle.ab && e.bundle.ba ? '↔' : '→'} ${pname(e.bundle.toProjectId) || 'session'}`;
+  const countsText = (c) => [c.answered && `${c.answered} answered`, c.delivered && `${c.delivered} delivered`, c.queued && `${c.queued} queued`, c.archived && `${c.archived} archived`].filter(Boolean).join(' · ');
   function nodeSince(v) {
     const r = v.row;
     if (!r) return null;
@@ -176,14 +184,13 @@ export function mount(container) {
     const now = Date.now();
     if (projFilter !== 'all' && !sel.project(projFilter)) projFilter = 'all'; // the filtered project was archived or removed
     else if (projFilter !== 'all' && sel.project(projFilter).archived) projFilter = 'all';
-    const input = {
-      projects: sel.projects(), sessions: Array.from(state.sessions.values()), agents: Array.from(state.agents.values()),
-      links: Array.from(state.links.values()), caps: state.caps, now,
-    };
-    const m = buildModel({ ...input, showArchived, scope: inScope });
-    // "Finished, not acknowledged" counts every project: a filter must not hide what is waiting for you elsewhere
-    const filtered = state.ui.projectId !== 'all' || projFilter !== 'all';
-    pendingAll = filtered ? buildModel({ ...input, showArchived: false, scope: () => true }).pending : m.pending;
+    oldIsOn = showOld('flow');
+    const m = buildModel({
+      projects: sel.projects(true), sessions: Array.from(state.sessions.values()), agents: Array.from(state.agents.values()),
+      links: Array.from(state.links.values()), caps: state.caps, now, showArchived, showOld: oldIsOn, scope: inScope,
+    });
+    // "need your OK" counts every project and the things not drawn too: a filter must not hide what is waiting for you elsewhere
+    pendingAll = sel.pendingAck();
     model = m;
     const t = performance.now();
     const calm = reducedMotion();
@@ -200,10 +207,14 @@ export function mount(container) {
       if (v && !calm) dying.push({ ...v, p: null, x: r.x, y: r.y, dieAt: t });
     }
     edgeByKey.clear();
-    for (const e of m.edges) edgeByKey.set(e.key, e);
+    linkEdge.clear();
+    for (const e of m.edges) {
+      edgeByKey.set(e.key, e);
+      if (e.kind === 'link') for (const it of e.bundle.items) linkEdge.set(it.link.id, e);
+    }
     trackLinks(t);
     if (calm) sim.settle();
-    if (selectedKey && !vn.has(selectedKey) && !edgeByKey.has(selectedKey)) closePanel(false);
+    if (selectedKey && !viewOf(selectedKey)) closePanel(false);
     paintChrome();
     paintList();
     paintPanel(false);
@@ -212,19 +223,25 @@ export function mount(container) {
     kick();
   }
 
-  /** A particle runs along a link when it is created, delivered (sender to receiver) or answered (back). */
+  /** One particle per bundle (not per link) when a link in it is created, delivered (sender to receiver) or answered (back). */
   function trackLinks(t) {
+    const touched = new Map();
     for (const L of state.links.values()) {
-      const e = edgeByKey.get(`l:${L.id}`);
       const prev = linkStates.get(L.id);
       linkStates.set(L.id, L.state);
-      if (!primed || reducedMotion() || !e) continue;
-      if (prev === undefined || prev !== L.state) {
-        const back = prev !== undefined && L.state === 'answered';
-        particles.push({ kind: 'link', ekey: e.key, rev: back, t0: t, dur: 1100, color: back ? 'green' : LINK_COLOR[L.kind] || 'accent' });
-      }
+      if (!primed || reducedMotion()) continue;
+      const e = linkEdge.get(L.id);
+      if (!e || (prev !== undefined && prev === L.state)) continue;
+      const back = prev !== undefined && L.state === 'answered';
+      if (!touched.has(e.key) || !back) touched.set(e.key, back);
+    }
+    for (const [ekey, back] of touched) {
+      if (t - (lastBundle.get(ekey) || -1e9) < 900) continue;
+      lastBundle.set(ekey, t);
+      particles.push({ kind: 'link', ekey, rev: back, t0: t, dur: 1100, color: back ? 'green' : 'accent' });
     }
     for (const id of Array.from(linkStates.keys())) if (!state.links.has(id)) linkStates.delete(id);
+    for (const k of Array.from(lastBundle.keys())) if (!edgeByKey.has(k)) lastBundle.delete(k);
   }
 
   /* ---------- chrome: counts, selects, prompt, empty ---------- */
@@ -234,8 +251,10 @@ export function mount(container) {
     setText(pendingN, String(pend));
     ackAllBtn.disabled = !pend || !state.caps.ack;
     ackAllBtn.title = state.caps.ack ? (pend ? 'Review and archive everything that has finished, in every project' : 'Nothing to acknowledge') : 'Update the hub to acknowledge';
-    pendingBox.title = 'Counted across all projects, whatever the filter';
+    pendingBox.title = 'Counted across all projects, whatever the filter, including old things that are not drawn';
+    pendingBox.classList.toggle('has', pend > 0);
     setHidden(pendingBox, !state.caps.ack);
+    oldToggle.set(m.oldCount);
     archBtn.setAttribute('aria-pressed', String(showArchived));
     setText(archN, String(m.archivedCount));
     setHidden(archBtn, !state.caps.ack);
@@ -282,80 +301,7 @@ export function mount(container) {
     const fn = { agent: [api.ackAgent, api.unackAgent], session: [api.ackSession, api.unackSession], link: [api.ackLink, api.unackLink] }[entity][on ? 0 : 1];
     try { await fn(id); patchAck(entity, id, on ? Date.now() : null); } catch (e) { toastError(errReason(e)); }
   }
-  /** Returns { refused: [{id, reason}], acked: n } or null when the call failed. Only ids the hub accepted count and are patched. */
-  async function ackBulk(body, okLabel) {
-    try {
-      const res = await api.ack(body);
-      const refused = (res && res.refused) || [];
-      const bad = new Set(refused.map((x) => x.id));
-      const now = Date.now();
-      let n = 0;
-      for (const id of body.agentIds || []) if (!bad.has(id)) { patchAck('agent', id, now); n++; }
-      for (const id of body.sessionIds || []) if (!bad.has(id)) { patchAck('session', id, now); n++; }
-      for (const id of body.linkIds || []) if (!bad.has(id)) { patchAck('link', id, now); n++; }
-      if (n) toast(`${okLabel || 'Acknowledged'} ${plural(n, 'item')}`, { kind: 'success' });
-      return { refused, acked: n };
-    } catch (e) { toastError(errReason(e)); return null; }
-  }
   const finishedKidsOf = (sessionId) => (model ? model.pending.agents.filter((n) => n.sessionId === sessionId) : []);
-
-  /* ---------- confirm dialog ---------- */
-  let dialog = null;
-  function openConfirm() {
-    const pend = pendingAll;
-    if (dialog || !model) return;
-    const items = [
-      ...pend.sessions.map((n) => ({ kind: 'session', id: n.id, project: pname(n.projectId), icon: 'terminal', title: nodeTitle(n), sub: `Session · ${nodeSub(n)}` })),
-      ...pend.agents.map((n) => ({ kind: 'agent', id: n.id, project: pname(n.projectId), icon: n.row.status === 'failed' ? 'close' : 'check', title: nodeTitle(n), sub: `${AGENT_STATUS[n.row.status]} · ${pname(n.projectId)}` })),
-      ...pend.links.map((e) => ({ kind: 'link', id: e.link.id, project: pname(e.link.fromProjectId), icon: 'link', title: linkTitle(e), sub: linkText(e.link) })),
-    ];
-    if (!items.length) return;
-    const opener = document.activeElement;
-    const perProject = new Map();
-    for (const it of items) perProject.set(it.project || 'Unknown', (perProject.get(it.project || 'Unknown') || 0) + 1);
-    const byProject = Array.from(perProject, ([k, v]) => `${k} (${v})`).join(', ');
-    const fill = (rows, reasons) => rows.map((it) => h('li', {}, icon(it.icon, 14), h('span', { class: 'of-ci-t' }, it.title), h('span', { class: 'of-ci-s' }, reasons ? `${it.sub} — ${reasons.get(it.id)}` : it.sub)));
-    const list = h('ul', { class: 'of-confirm-list' }, fill(items));
-    const head = h('h2', { id: 'of-confirm-h' }, `Acknowledge ${plural(items.length, 'finished item')}?`);
-    const note = h('p', {}, 'They will be archived and leave the graph. You can bring them back from Archived.');
-    const scope = h('p', { class: 'of-confirm-scope' }, `Across all projects: ${byProject}`);
-    const cancel = h('button', { class: 'btn', type: 'button', onclick: () => close() }, 'Cancel');
-    const go = h('button', { class: 'btn btn-primary', type: 'button', onclick: async () => {
-      go.disabled = true;
-      const body = {};
-      for (const it of items) (body[`${it.kind}Ids`] = body[`${it.kind}Ids`] || []).push(it.id);
-      const res = await ackBulk(body, 'Archived');
-      if (!res) { go.disabled = false; return; }
-      if (!res.refused.length) { close(); return; }
-      // partial refusal: say so, keep the dialog open on exactly what the hub refused
-      const why = new Map(res.refused.map((x) => [x.id, x.reason]));
-      list.textContent = '';
-      list.append(...fill(items.filter((it) => why.has(it.id)), why));
-      setText(head, `${plural(res.refused.length, 'item')} could not be acknowledged`);
-      setText(note, res.acked ? `${plural(res.acked, 'item')} were archived. The hub refused these:` : 'The hub refused these:');
-      go.hidden = true; scope.hidden = true;
-      setText(cancel, 'Close');
-      cancel.focus();
-    } }, `Acknowledge ${items.length}`);
-    const card = h('div', { class: 'of-confirm', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'of-confirm-h' }, head, note, scope, list, h('div', { class: 'of-confirm-foot' }, cancel, go));
-    const scrim = h('div', { class: 'of-scrim' }, card);
-    // keys are caught on the document while the dialog is open, so focus that sits outside it cannot escape the trap
-    const onKey = (e) => {
-      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); close(); return; }
-      if (e.key !== 'Tab') return;
-      const f = [cancel, go].filter((b) => !b.disabled && !b.hidden);
-      const i = f.indexOf(document.activeElement);
-      if (i < 0) { e.preventDefault(); f[0].focus(); }
-      else if (e.shiftKey && i === 0) { e.preventDefault(); f[f.length - 1].focus(); }
-      else if (!e.shiftKey && i === f.length - 1) { e.preventDefault(); f[0].focus(); }
-    };
-    document.addEventListener('keydown', onKey, true);
-    scrim.addEventListener('pointerdown', (e) => { if (e.target === scrim) close(); });
-    function close() { document.removeEventListener('keydown', onKey, true); scrim.remove(); dialog = null; if (opener && opener.isConnected) opener.focus(); }
-    dialog = { close };
-    dialogHost.append(scrim);
-    cancel.focus();
-  }
 
   /* ---------- panel ---------- */
   function select(key, fromList) {
@@ -364,7 +310,7 @@ export function mount(container) {
     kick();
     const v = viewOf(key);
     if (v) {
-      const what = v.type === 'link' ? `${linkTitle(v)}, ${v.link.state}` : `${nodeTitle(v)}, ${nodeStatus(v).text}`;
+      const what = v.type === 'bundle' ? `${bundleTitle(v)}, ${plural(v.n, 'link')}` : v.type === 'more' ? `${nodeTitle(v.node)}, ${plural(v.rows.length, 'more finished subagent')}` : `${nodeTitle(v)}, ${nodeStatus(v).text}`;
       setText(live, `Selected ${what}${v.needsOk ? ', needs your OK' : ''}. Details panel opened.`);
     }
     if (fromList) panel.focus({ preventScroll: true }); // keyboard and screen-reader users land in the details
@@ -402,10 +348,14 @@ export function mount(container) {
       out.actions.push(btn(`Acknowledge ${label}`, 'btn-primary', () => ackOne(v, true), 'ack'));
       if (!isLink && v.kind !== 'agent') {
         const kids = finishedKidsOf(v.id);
-        if (kids.length) out.actions.push(btn(`Acknowledge session + ${plural(kids.length, 'finished subagent')}`, 'btn-accent', async () => {
-          const res = await ackBulk({ sessionIds: [v.id], agentIds: kids.map((k) => k.id) }, 'Archived');
-          if (res && res.refused.length) toastError(`${plural(res.refused.length, 'item')} not archived: ${res.refused[0].reason}`);
-          else if (res) closePanel();
+        if (kids.length) out.actions.push(btn(`Acknowledge session + ${plural(kids.length, 'finished subagent')}`, 'btn-accent', () => {
+          openAckDialog({
+            title: `Acknowledge this session and ${plural(kids.length, 'finished subagent')}?`, note: `${nodeTitle(v)}. They are archived and leave the graph.`,
+            groups: [
+              { id: 'sessions', title: 'Session', iconName: 'terminal', entries: [{ id: `s:${v.id}`, label: nodeTitle(v), items: [{ kind: 'session', id: v.id, title: nodeTitle(v) }] }] },
+              { id: 'agents', title: 'Finished subagents', iconName: 'check', entries: [{ id: `k:${v.id}`, label: nodeTitle(v), items: kids.map((k) => ({ kind: 'agent', id: k.id, title: agentLabel(k.row) })) }] },
+            ],
+          });
         }, 'ack-all'));
       }
     } else if (v.cls === 'archived') {
@@ -418,15 +368,96 @@ export function mount(container) {
     const v = vn.get(key);
     if (v) return v;
     const e = edgeByKey.get(key);
-    return e && e.kind === 'link' ? { ...e, type: 'link' } : null;
+    if (e && e.kind === 'link') return { ...e, type: 'bundle' };
+    if (key && key.startsWith('m:')) {
+      const node = vn.get(key.slice(2));
+      if (node && node.more && node.more.length) return { type: 'more', key, node, rows: node.more };
+    }
+    return null;
+  }
+
+  /** A collection in the side panel: a link bundle, or the finished subagents behind a "+N more" chip. */
+  function paintCollection(v, force) {
+    const bundle = v.type === 'bundle';
+    const items = bundle ? v.bundle.items : v.rows;
+    const sig = JSON.stringify([v.type, bundle ? [v.bundle.counts, bundleRows] : 0, items.map((i) => (bundle ? [i.link.id, i.link.state, i.link.reply, !!i.link.acknowledgedAt] : [i.id, i.row.status, !!i.row.acknowledgedAt])), state.caps.ack]);
+    if (!force && panel.__sig === sig) return;
+    panel.__sig = sig;
+    const focusAct = panel.contains(document.activeElement) ? document.activeElement.getAttribute('data-act') : null;
+    const keepScroll = panel.scrollTop;
+    panel.textContent = '';
+    const closeBtn = h('button', { class: 'icon-btn sm', type: 'button', 'aria-label': 'Close details', 'data-act': 'close', onclick: () => closePanel() }, icon('close', 16));
+    const btn = (text, cls, fn, act, iconName) => h('button', { class: `btn btn-sm ${cls}`, type: 'button', 'data-act': act, onclick: fn }, icon(iconName || 'checkCircle', 14), text);
+    let kicker, title, chips, actions = [], rows, note = null;
+    if (bundle) {
+      const B = v.bundle, c = B.counts;
+      kicker = 'Link bundle';
+      title = bundleTitle(v);
+      chips = [chip(plural(B.n, 'link'), 'accent')];
+      if (c.needOk) chips.push(chip(`${c.needOk} need your OK`, 'purple'));
+      if (c.queued) chips.push(chip(`${c.queued} queued`, 'orange'));
+      if (c.delivered) chips.push(chip(`${c.delivered} delivered`, 'accent'));
+      if (c.answered) chips.push(chip(`${c.answered} answered`, 'green'));
+      if (c.archived) chips.push(chip(`${c.archived} archived`, 'gray'));
+      if (c.needOk && state.caps.ack) actions.push(btn(`Acknowledge all ${c.needOk} in this bundle`, 'btn-primary', () => { const cur = edgeByKey.get(v.key); if (cur) openBundleAck(cur.bundle); }, 'ack-bundle'));
+      else if (c.needOk) note = 'Update the hub to acknowledge.';
+      rows = [];
+      const shown = items.slice(0, bundleRows);
+      const ul = h('ul', { class: 'of-blist', role: 'list', 'aria-label': 'Links in this bundle' }, shown.map((it) => {
+        const L = it.link;
+        const ackBtn = it.needsOk ? btn('Acknowledge', 'btn-accent', () => ackOne({ type: 'link', link: L }, true), `ack-${L.id}`)
+          : it.archived ? btn('Restore', '', () => ackOne({ type: 'link', link: L }, false), `restore-${L.id}`, 'undo') : null;
+        if (ackBtn) ackBtn.setAttribute('aria-label', `${it.archived ? 'Restore' : 'Acknowledge'} ${linkText(L)}`);
+        const task = /^T-\d+$/.test(L.refId || '') && state.tasks.has(L.refId)
+          ? h('button', { class: 'btn btn-sm', type: 'button', 'data-act': `task-${L.id}`, onclick: () => openTask(L.refId) }, icon('file', 14), L.refId) : null;
+        return h('li', { class: 'of-bl' },
+          h('div', { class: 'of-bl-top' }, chip(L.kind === 'task' ? 'Task' : 'Note', L.kind === 'task' ? 'accent' : 'gray'),
+            chip(LINK_STATE_LABEL[L.state] || L.state, L.state === 'answered' ? 'green' : L.state === 'queued' ? 'orange' : 'accent'),
+            it.needsOk ? chip('Needs OK', 'purple') : null, it.archived ? chip('Archived', 'gray') : null,
+            h('span', { class: 'of-bl-t mono' }, fmtAgo(L.createdAt))),
+          h('div', { class: 'of-bl-text', title: L.text || '' }, truncate(L.text || '—', 140)),
+          L.reply ? h('div', { class: 'of-bl-reply' }, `Reply: ${truncate(L.reply, 100)}`) : null,
+          ackBtn || task ? h('div', { class: 'of-actions' }, task, ackBtn) : null);
+      }));
+      rows.push(ul);
+      if (items.length > shown.length) rows.push(btn(`Show ${Math.min(BUNDLE_ROWS, items.length - shown.length)} more of ${items.length - shown.length} left`, '', () => { bundleRows += BUNDLE_ROWS; paintPanel(true); }, 'more-rows', 'chevronRight'));
+    } else {
+      const n = v.node;
+      kicker = 'Finished subagents';
+      title = `${nodeTitle(n)} · ${v.rows.length} more`;
+      chips = [chip(`${v.rows.length} need your OK`, 'purple'), chip(`only the newest ${FINISHED_CAP} are drawn`, 'gray')];
+      const groupFor = () => ({ id: 'agents', title: 'Finished subagents', iconName: 'check', entries: [{ id: `more:${n.key}`, label: nodeTitle(n), items: v.rows.map((r) => ({ kind: 'agent', id: r.id, title: agentLabel(r.row) })) }] });
+      if (state.caps.ack) actions.push(btn(`Acknowledge all ${v.rows.length}`, 'btn-primary', () => openAckDialog({ title: `Acknowledge ${plural(v.rows.length, 'finished subagent')}?`, note: `${nodeTitle(n)}. They are archived and leave the graph.`, groups: [groupFor()] }), 'ack-more'));
+      rows = [h('ul', { class: 'of-blist', role: 'list', 'aria-label': 'More finished subagents' }, v.rows.slice(0, bundleRows).map((r) => {
+        const a = r.row;
+        const ackBtn = btn('Acknowledge', 'btn-accent', () => ackOne(r, true), `ack-${r.id}`);
+        ackBtn.setAttribute('aria-label', `Acknowledge ${agentLabel(a)}`);
+        return h('li', { class: 'of-bl' },
+          h('div', { class: 'of-bl-top' }, chip(AGENT_STATUS[a.status] || a.status, a.status === 'failed' ? 'red' : 'green'), h('span', { class: 'of-bl-t mono' }, fmtAgo(a.endedAt || a.lastActivityAt))),
+          h('div', { class: 'of-bl-text', title: a.description || '' }, `${agentLabel(a)}${a.taskId ? ` · ${a.taskId}` : ''}`),
+          h('div', { class: 'of-actions' }, ackBtn, h('button', { class: 'btn btn-sm', type: 'button', 'data-act': `thread-${r.id}`, onclick: () => navigate('threads', [a.sessionId, a.id]) }, icon('threads', 14), 'Open thread')));
+      }))];
+      if (v.rows.length > bundleRows) rows.push(btn('Show more', '', () => { bundleRows += BUNDLE_ROWS; paintPanel(true); }, 'more-rows', 'chevronRight'));
+    }
+    panel.append(...[
+      h('div', { class: 'of-p-head' }, h('div', { class: 'of-p-titles' }, h('div', { class: 'of-kicker' }, kicker), h('h2', { class: 'of-p-title' }, title)), closeBtn),
+      h('div', { class: 'of-chips' }, chips),
+      actions.length ? h('div', { class: 'of-actions of-ack' }, actions) : null,
+      note ? ackNote(note) : null,
+      h('div', { class: 'of-rows' }, rows),
+    ].filter(Boolean));
+    setHidden(panel, false);
+    panel.scrollTop = keepScroll;
+    if (focusAct) { const el = panel.querySelector(`[data-act="${focusAct}"]`); if (el) el.focus({ preventScroll: true }); }
   }
 
   function paintPanel(force) {
     if (!selectedKey) return;
     const v = viewOf(selectedKey);
     if (!v) return;
-    const nd = v.type === 'link' ? null : (v.kind === 'agent' ? agentNow(v.row) : v.row && v.row.nowDoing);
-    const sig = JSON.stringify([v.cls, v.blocked, v.row && [v.row.status, v.row.busy, v.row.title, v.row.model, v.row.tokens, v.row.costUsd, v.row.contextPercent, v.row.acknowledgedAt], v.link && [v.link.state, v.link.reply, v.link.acknowledgedAt], nd, v.kind === 'agent' ? null : finishedKidsOf(v.id).length, model.main && model.main.key === v.key, state.caps.coordinator]);
+    if (v.type === 'bundle' || v.type === 'more') { paintCollection(v, force); return; }
+    const nd = v.kind === 'agent' ? agentNow(v.row) : v.row && v.row.nowDoing;
+    const sig = JSON.stringify([v.cls, v.blocked, v.row && [v.row.status, v.row.busy, v.row.title, v.row.model, v.row.tokens, v.row.costUsd, v.row.contextPercent, v.row.acknowledgedAt], nd, v.kind === 'agent' ? null : finishedKidsOf(v.id).length, model.main && model.main.key === v.key, state.caps.coordinator]);
     if (!force && panel.__sig === sig) return;
     panel.__sig = sig;
     const focusAct = panel.contains(document.activeElement) ? document.activeElement.getAttribute('data-act') : null;
@@ -435,21 +466,7 @@ export function mount(container) {
     const controls = ackControls(v);
     const closeBtn = h('button', { class: 'icon-btn sm', type: 'button', 'aria-label': 'Close details', 'data-act': 'close', onclick: () => closePanel() }, icon('close', 16));
     let kicker, title, chips, rows, links = [];
-    if (v.type === 'link') {
-      const L = v.link;
-      kicker = L.kind === 'task' ? 'Task link' : 'Note link';
-      title = linkTitle(v);
-      chips = [chip(L.state === 'answered' ? 'Answered' : L.state === 'delivered' ? 'Delivered' : 'Queued', L.state === 'answered' ? 'green' : L.state === 'queued' ? 'orange' : 'accent')];
-      if (v.needsOk) chips.push(chip('Needs your OK', 'purple'));
-      rows = [
-        kv('Text', h('span', { class: 'of-v of-pre' }, L.text || '—')),
-        kv('Reply', h('span', { class: 'of-v of-pre' }, L.reply || (L.state === 'answered' ? '—' : 'No reply yet'))),
-        kv('Created', fmtAgo(L.createdAt)),
-        L.deliveredAt && kv('Delivered', fmtAgo(L.deliveredAt)),
-        L.answeredAt && kv('Answered', fmtAgo(L.answeredAt)),
-      ];
-      if (/^T-\d+$/.test(L.refId || '') && state.tasks.has(L.refId)) links.push(h('button', { class: 'btn btn-sm', type: 'button', 'data-act': 'task', onclick: () => openTask(L.refId) }, icon('file', 14), `Open ${L.refId}`));
-    } else {
+    {
       const st = nodeStatus(v);
       const r = v.row;
       const isMain = v.kind === 'main';
@@ -507,7 +524,8 @@ export function mount(container) {
     const items = [
       ...model.nodes.filter((n) => n.kind !== 'agent').map((n) => ({ key: n.key, v: n })),
       ...model.nodes.filter((n) => n.kind === 'agent').map((n) => ({ key: n.key, v: n })),
-      ...model.edges.filter((e) => e.kind === 'link').map((e) => ({ key: e.key, v: { ...e, type: 'link' } })),
+      ...model.edges.filter((e) => e.kind === 'link').map((e) => ({ key: e.key, v: { ...e, type: 'bundle' } })),
+      ...model.nodes.filter((n) => n.more && n.more.length).map((n) => ({ key: `m:${n.key}`, v: { type: 'more', node: n, rows: n.more } })),
     ];
     reconcile(listUl, items, (it) => it.key, (it) => {
       const r = {};
@@ -522,16 +540,17 @@ export function mount(container) {
     }, (li, it) => {
       const r = li.__r;
       const v = it.v;
-      const isLink = v.type === 'link';
-      const kind = isLink ? (v.link.kind === 'task' ? 'Task link' : 'Note link') : v.kind === 'agent' ? 'Subagent' : v.kind === 'main' ? 'Main session' : v.ghost ? 'Project' : 'Session';
-      const status = isLink ? ({ queued: 'Queued', delivered: 'Delivered', answered: 'Answered' }[v.link.state] || v.link.state) : nodeStatus(v).text;
-      const title = isLink ? linkTitle(v) : nodeTitle(v);
+      const coll = v.type === 'bundle' || v.type === 'more';
+      let kind, status, title;
+      if (v.type === 'bundle') { kind = 'Link bundle'; status = `${plural(v.n, 'link')}${v.needsOk ? `, ${v.bundle.counts.needOk} need your OK` : ''}`; title = bundleTitle(v); }
+      else if (v.type === 'more') { kind = 'Finished subagents'; status = `${v.rows.length} more, need your OK`; title = nodeTitle(v.node); }
+      else { kind = v.kind === 'agent' ? 'Subagent' : v.kind === 'main' ? 'Main session' : v.ghost ? 'Project' : 'Session'; status = nodeStatus(v).text; title = nodeTitle(v); }
       setText(r.title, title);
-      setText(r.sub, `${kind}, ${status}${v.needsOk ? ', needs your OK' : ''}${v.archived ? ', archived' : ''}${v.kind === 'agent' ? ` — ${pname(v.projectId)}` : ''}`);
+      setText(r.sub, coll ? `${kind}, ${status}` : `${kind}, ${status}${v.needsOk ? ', needs your OK' : ''}${v.archived ? ', archived' : ''}${v.kind === 'agent' ? ` — ${pname(v.projectId)}` : ''}`);
       li.classList.toggle('sel', selectedKey === it.key);
       r.pick.setAttribute('aria-pressed', String(selectedKey === it.key));
       r.pick.onclick = () => select(it.key, true);
-      const can = (v.cls === 'finished' && !v.blocked) || v.cls === 'archived';
+      const can = !coll && ((v.cls === 'finished' && !v.blocked) || v.cls === 'archived');
       setHidden(r.ack, !can);
       if (can) {
         setText(r.ack, v.cls === 'archived' ? 'Restore' : 'Acknowledge');
@@ -621,13 +640,15 @@ export function mount(container) {
       if (e.kind !== 'link') continue;
       const g = linkGeom(e);
       if (!g) continue;
-      const L = e.link;
-      const col = L.state === 'answered' ? C.green : C[LINK_COLOR[L.kind] || 'accent'];
+      const c = e.bundle.counts;
+      const dominant = c.answered >= c.delivered && c.answered >= c.queued ? 'answered' : c.delivered >= c.queued ? 'delivered' : 'queued';
+      const col = dominant === 'answered' ? C.green : dominant === 'queued' ? C.orange : C.accent;
       const al = e.archived ? 0.35 : 1;
-      stroke(col, e.key === selectedKey || e.key === hoverKey ? 3 : 2, 0.9 * al, L.state === 'queued' ? [6, 5] : null);
+      const focus = e.key === selectedKey || e.key === hoverKey;
+      stroke(col, e.width + (focus ? 1.5 : 0), 0.85 * al, dominant === 'queued' ? [6, 5] : null);
       ctx.beginPath(); ctx.moveTo(g.s.x, g.s.y); ctx.quadraticCurveTo(g.c.x, g.c.y, g.t.x, g.t.y); ctx.stroke();
-      arrow(g.t, g.c, col, 0.9 * al);
-      if (L.state === 'answered') arrow(g.s, g.c, col, 0.0); // reply travels back as a particle, no second head
+      if (e.bundle.ab) arrow(g.t, g.c, col, 0.9 * al);
+      if (e.bundle.ba) arrow(g.s, g.c, col, 0.9 * al);
     }
     ctx.setLineDash([]);
   }
@@ -817,28 +838,30 @@ export function mount(container) {
       }
       addBox([sx - w / 2 - 3, y - 13, sx + w / 2 + 3, y + 14 * (lines - 1) + 4]);
     }
-    // 2. links: purple ring dot when it needs your OK, "queued" pill when there is room
+    // 2. link bundles: ONE badge with the count per edge, one small purple dot when any member needs your OK
     for (const e of model.edges) {
       if (e.kind !== 'link') continue;
       const g = linkGeom(e);
       if (!g) continue;
       const mx = vp.x + g.mid.x * vp.k, my = vp.y + g.mid.y * vp.k;
       if (mx < -40 || my < -40 || mx > W + 40 || my > Hh + 40) continue;
-      const L = e.link;
       const focus = e.key === selectedKey || e.key === hoverKey;
       ctx.globalAlpha = e.archived ? 0.45 : 1;
-      if (e.needsOk) { ctx.setLineDash([]); ctx.fillStyle = C.purple; ctx.beginPath(); ctx.arc(mx, my, 5.5, 0, 6.2832); ctx.fill(); ctx.strokeStyle = C.bg2; ctx.lineWidth = 1.6; ctx.stroke(); }
-      else {
-        ctx.fillStyle = L.state === 'answered' ? C.green : L.state === 'queued' ? C.orange : C[LINK_COLOR[L.kind] || 'accent'];
-        ctx.beginPath(); ctx.arc(mx, my, focus ? 5 : 3.5, 0, 6.2832); ctx.fill();
-      }
-      const text = focus ? (e.needsOk ? 'Needs your OK' : L.state) : L.state === 'queued' ? 'queued' : null;
-      if (text) {
-        ctx.font = `700 9.5px ${FONT}`;
-        const w = tw(text) + 10;
-        const b = [mx - w / 2, my - 22, mx + w / 2, my - 8];
-        if (focus || !clash(b)) { addBox(pill(text, mx, my - 15, C.bg2, e.needsOk ? C.purple : C.orange, 9.5)); }
-      }
+      const box = pill(String(e.n), mx, my, C.bg2, C.label, 10.5);
+      ctx.setLineDash([]); ctx.strokeStyle = e.needsOk ? C.purple : C.sep; ctx.lineWidth = focus ? 2 : 1.2;
+      ctx.beginPath(); if (ctx.roundRect) ctx.roundRect(box[0], box[1], box[2] - box[0], box[3] - box[1], 99); else ctx.rect(box[0], box[1], box[2] - box[0], box[3] - box[1]); ctx.stroke();
+      if (e.needsOk) { ctx.fillStyle = C.purple; ctx.beginPath(); ctx.arc(box[2] - 1, box[1] + 1, 4.5, 0, 6.2832); ctx.fill(); ctx.strokeStyle = C.bg2; ctx.lineWidth = 1.4; ctx.stroke(); }
+      addBox(box);
+      if (focus && e.needsOk) { const b = pill(`${e.bundle.counts.needOk} need OK`, mx, my - 18, C.bg2, C.purple, 9.5); addBox(b); }
+    }
+    // 2b. "+N more" chips on sessions that hold back finished subagents
+    chipHits = [];
+    for (const { v, sx, sy, rr, al } of vis) {
+      if (!v.more || !v.more.length) continue;
+      ctx.globalAlpha = al;
+      const key = `m:${v.key}`;
+      const b = pill(`+${v.more.length} more`, sx + rr + 26, sy + rr * 0.6, key === selectedKey || key === hoverKey ? C.accent : C.bg2, key === selectedKey || key === hoverKey ? C.bg : C.purple, 10);
+      chipHits.push({ key, box: b });
     }
     // 3. subagent labels: hover / selection, or zoomed in past a threshold
     for (const { v, sx, sy, rr, al } of vis) {
@@ -906,6 +929,7 @@ export function mount(container) {
   const local = (e) => { const r = canvas.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; };
   function hitTest(lx, ly) {
     const t = performance.now();
+    for (const c of chipHits) if (lx >= c.box[0] - 3 && lx <= c.box[2] + 3 && ly >= c.box[1] - 3 && ly <= c.box[3] + 3) return c.key;
     for (let i = drawOrder.length - 1; i >= 0; i--) {
       const v = drawOrder[i];
       if (!v.p) continue;
@@ -1029,13 +1053,20 @@ export function mount(container) {
   function paintTip(key) {
     const v = viewOf(key);
     if (!v) return;
-    if (v.type === 'link') {
-      const L = v.link;
-      setText(tipTitle, linkTitle(v));
-      setText(tipStatus, `${L.state}${v.needsOk ? ' · Needs your OK' : ''}`);
-      tipElapsed.removeAttribute('data-since'); setText(tipElapsed, `Created ${fmtAgo(L.createdAt)}`);
-      tipNd.__set(truncate(L.text || '', 90), false);
-      setText(tipMeta, L.reply ? `Reply: ${truncate(L.reply, 60)}` : '');
+    if (v.type === 'bundle') {
+      const c = v.bundle.counts;
+      setText(tipTitle, bundleTitle(v));
+      setText(tipStatus, plural(v.n, 'link'));
+      tipElapsed.removeAttribute('data-since'); setText(tipElapsed, countsText(c));
+      tipNd.__set(c.needOk ? `${c.needOk} need your OK` : '', false);
+      setText(tipMeta, v.bundle.items[0] ? truncate(v.bundle.items[0].link.text || '', 70) : '');
+      return;
+    }
+    if (v.type === 'more') {
+      setText(tipTitle, `${nodeTitle(v.node)}: ${plural(v.rows.length, 'more finished subagent')}`);
+      setText(tipStatus, 'Need your OK. Click to list them');
+      tipElapsed.removeAttribute('data-since'); setText(tipElapsed, '');
+      tipNd.__set('', false); setText(tipMeta, '');
       return;
     }
     const st = nodeStatus(v);
@@ -1076,7 +1107,6 @@ export function mount(container) {
       document.removeEventListener('visibilitychange', onVis);
       if (mq && mq.removeEventListener) mq.removeEventListener('change', dirtyColors);
       offPrefs(); offAct();
-      if (dialog) dialog.close();
       wrap.remove();
     },
   };

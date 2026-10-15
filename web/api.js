@@ -86,6 +86,12 @@ export const api = {
   ackLink: (id) => request('POST', `/v1/links/${enc(id)}/ack`),
   unackLink: (id) => request('POST', `/v1/links/${enc(id)}/unack`),
   ack: (body) => request('POST', '/v1/ack', body), // { agentIds?, sessionIds?, linkIds? } -> { acked, refused: [{ id, reason }] }
+  // project clean-up (404/405 on hubs that predate it: the UI hides the banner)
+  duplicates: () => request('GET', '/v1/projects/duplicates'), // { groups: [{ folder, projects: [{ id, ... }] }] }
+  archiveProject: (id) => request('POST', `/v1/projects/${enc(id)}/archive`),
+  unarchiveProject: (id) => request('POST', `/v1/projects/${enc(id)}/unarchive`),
+  archiveProjects: (ids) => request('POST', '/v1/projects/archive', { ids }), // -> { archived?: [...], refused?: [{ id, reason }] }
+  mergeProject: (id, target) => request('POST', `/v1/projects/${enc(id)}/merge-into/${enc(target)}`),
   setCoordinator: (projectId, on) => request('POST', `/v1/projects/${enc(projectId)}/coordinator`, { on: !!on }),
   // v0.4
   usage: (days = 7) => request('GET', `/v1/usage${q({ days })}`),

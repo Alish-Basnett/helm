@@ -1,9 +1,10 @@
 // views/inbox.js — questions inbox: what agents are asking or waiting on, plus a collapsed Answered list.
 import { h, reconcile, setText, setClass, setHidden, startTicker } from '../dom.js';
 import { icon } from '../icons.js';
-import { state, sel, lsGet, lsSet } from '../store.js';
+import { state, sel, lsGet, lsSet, showOld } from '../store.js';
+import { createOldToggle } from '../oldtoggle.js';
 import { dismissQuestion, decideGate } from '../actions.js';
-import { fmtAgo, cwdTail, truncate } from '../format.js';
+import { fmtAgo, cwdTail, truncate, sessionLabel } from '../format.js';
 import { emptyState } from '../ui.js';
 import { createNotesPanel } from '../notes.js';
 import { navigate, openTask } from '../router.js';
@@ -43,7 +44,9 @@ export function mount(container) {
   const sessCount = h('span', { class: 'panel-count mono' });
   const sessWrap = h('section', { class: 'q-section', 'aria-label': 'Sessions', hidden: true },
     h('h2', { class: 'section-title' }, icon('heartPulse', 14), 'Sessions', sessCount), sessList);
+  const oldToggle = createOldToggle('inbox');
   const root = h('div', { class: 'inbox' },
+    h('div', { class: 'desks-bar' }, oldToggle.el),
     sessWrap,
     choiceWrap,
     h('section', { class: 'q-section' }, h('h2', { class: 'section-title' }, icon('inbox', 14), 'Needs you', openCount), openList, clear),
@@ -137,7 +140,7 @@ export function mount(container) {
   function updateSessionRow(el, sess) {
     const r = el.__r;
     el.__s = sess;
-    const name = sess.title || cwdTail(sess.cwd) || sess.id;
+    const name = sessionLabel(sess);
     const chips = reasonChips(sess).filter((c) => c.level === 'critical');
     const why = (chips.length ? chips : reasonChips(sess)).map((c) => (c.advice ? `${c.text}: ${c.advice}` : c.text)).join(' · ');
     setText(r.text, `${truncate(name, 48)} is at critical health. ${why}`);
@@ -179,7 +182,7 @@ export function mount(container) {
     setText(r.label, info.label);
     setText(r.text, q.text || (q.kind === 'waiting' ? 'Waiting for input' : 'Question'));
     const s = state.sessions.get(q.sessionId);
-    const sessName = s ? (s.title || cwdTail(s.cwd) || s.id) : truncate(q.sessionId || 'unknown session', 16);
+    const sessName = s ? (sessionLabel(s)) : truncate(q.sessionId || 'unknown session', 16);
     const proj = s && state.ui.projectId === 'all' && state.projects.size > 1 ? ` · ${sel.projectName(s.projectId)}` : '';
     setText(r.sess, truncate(sessName, 44) + proj);
     setHidden(r.task, !q.taskId);
@@ -203,8 +206,10 @@ export function mount(container) {
   }
 
   function render() {
-    const open = sel.openQuestions();
-    const answered = sel.answeredQuestions();
+    const old = showOld('inbox');
+    const open = sel.openQuestions(true, old);
+    const answered = sel.answeredQuestions(true, old);
+    oldToggle.set(sel.openQuestions(true, true).length + sel.answeredQuestions(true, true).length - open.length - answered.length);
     const choices = sel.choiceTasks();
     const sessions = sel.sessionsNeedingYou();
     reconcile(sessList, sessions, (x) => x.id, makeSessionRow, updateSessionRow);

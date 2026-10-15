@@ -4,7 +4,7 @@ import { h, reconcile, setText, setClass, setHidden, setAttr, startTicker } from
 import { icon } from '../icons.js';
 import { state, sel } from '../store.js';
 import { api } from '../api.js';
-import { fmtTokens, fmtUsd, cwdTail, plural } from '../format.js';
+import { fmtTokens, fmtUsd, cwdTail, plural, sessionLabel } from '../format.js';
 import { modelBadge, updateModelBadge, emptyState } from '../ui.js';
 import { navigate } from '../router.js';
 import {
@@ -94,7 +94,7 @@ export function mount(container) {
     el.className = `hc lv-${lvl}${sess.status === 'idle' ? ' is-idle' : ''}`;
     el.toggleAttribute('data-busy', !!sess.busy);
     r.pdot.className = `pdot ${sess.status}${sess.busy ? ' busy' : ''}`;
-    setText(r.title, sess.title || cwdTail(sess.cwd) || sess.id);
+    setText(r.title, sessionLabel(sess));
     setText(r.sub, `${sel.projectName(sess.projectId)}${sess.cwd ? ' · ' + cwdTail(sess.cwd, 2) : ''}`);
     updateModelBadge(r.model, sess.model);
     r.pill.className = `hc-pill lv-${lvl}`;

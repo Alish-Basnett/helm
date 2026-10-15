@@ -2,7 +2,8 @@
 import { h, $, setText, setClass, setHidden, bus, startTicker } from './dom.js';
 import { userIsBusy } from './drafts.js';
 import { icon } from './icons.js';
-import { state, sel, subscribe, connect, setUI, lsGet, lsSet } from './store.js';
+import { state, sel, subscribe, connect, setUI, lsGet, lsSet, showOld, setShowOld } from './store.js';
+import { openAckAll } from './ackdialog.js';
 import { fmtTokens, fmtUsd, fmtUsdSmall, fmtClock, plural } from './format.js';
 import { toggleMeter } from './meter.js';
 import { openMenu, emptyState } from './ui.js';
@@ -130,7 +131,9 @@ function openProjectMenu() {
     { label: 'All projects', sub: plural(state.sessions.size, 'session'), icon: 'folder', active: state.ui.projectId === 'all', onSelect: () => setUI({ projectId: 'all' }) },
     ...(ps.length ? [{ divider: true }] : []),
     ...ps.map((p) => ({ label: p.name, sub: plural(countSessions(p.id), 'session'), icon: 'folder', active: state.ui.projectId === p.id, onSelect: () => setUI({ projectId: p.id }) })),
+    ...(showOld('projects') ? sel.archivedProjects().map((p) => ({ label: p.name, sub: 'archived', icon: 'archive', active: state.ui.projectId === p.id, onSelect: () => setUI({ projectId: p.id }) })) : []),
     { divider: true },
+    ...(sel.archivedProjects().length ? [{ label: showOld('projects') ? 'Hide old projects' : `Show old (${sel.archivedProjects().length})`, icon: 'archive', onSelect: () => setShowOld('projects', !showOld('projects')) }] : []),
     { label: 'Manage projects…', icon: 'plus', onSelect: () => navigate('projects') },
   ];
   openMenu(projSwitch, items, { minWidth: 248 });
@@ -165,8 +168,10 @@ const telemetry = h('div', { class: 'telemetry mono', 'aria-label': 'Telemetry' 
   helmBtn,
   healthBtn,
   h('span', { class: 'tele' }, tClock));
+const okN = h('strong', { class: 'mono' }, '0');
+const okPill = h('button', { class: 'ok-pill', type: 'button', hidden: true, onclick: () => openAckAll() }, okN, h('span', {}, 'need your OK'), h('span', { class: 'ok-pill-go' }, 'Acknowledge all…'));
 const newTaskBtn = h('button', { class: 'btn btn-primary', type: 'button', onclick: () => newTask() }, icon('plus', 16), h('span', { class: 'sb-label-narrow' }, 'New task'));
-topbar.append(h('div', { class: 'tb-left' }, titleEl, scopeEl), h('span', { class: 'spacer' }), telemetry, newTaskBtn);
+topbar.append(h('div', { class: 'tb-left' }, titleEl, scopeEl), h('span', { class: 'spacer' }), okPill, telemetry, newTaskBtn);
 
 function newTask() {
   if (route().view !== 'board') navigate('board');
@@ -194,6 +199,11 @@ function renderChrome() {
   badge('inbox', waiting, 'indigo', `${waiting} waiting for you`);
   const inReview = sel.reviewTasks().length;
   badge('review', inReview, 'accent', `${inReview} task${inReview === 1 ? '' : 's'} in review`);
+  // everything finished that waits for the owner's OK, hidden old things included; always in the header (the Office has its own button)
+  const pend = state.caps.ack ? (() => { const p = sel.pendingAck(); return p.agents.length + p.sessions.length + p.links.length; })() : 0;
+  setHidden(okPill, !pend || route().view === 'office');
+  setText(okN, String(pend));
+  okPill.setAttribute('aria-label', `${pend} need your OK. Acknowledge all`);
   // v0.14: session health. The header dot looks at every live session (not just the selected project).
   const hs = summarize(sel.sessions());
   const hText = summaryText(hs);
@@ -246,6 +256,7 @@ function applyRoute(r) {
     if (on) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
   }
   setText(titleEl, VIEW_META[r.view].label);
+  renderChrome();
   document.title = `${VIEW_META[r.view].label} · Helm`;
 }
 

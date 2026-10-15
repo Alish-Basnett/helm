@@ -1,6 +1,7 @@
 // SQLite access (node:sqlite) + schema. WAL, busy_timeout, prepared-statement cache.
 import fs from 'node:fs';
 import path from 'node:path';
+import { normaliseFolder } from './folder.mjs';
 
 // node:sqlite prints an ExperimentalWarning on import; keep the daemon log/TTY clean.
 const origEmit = process.emitWarning;
@@ -356,6 +357,22 @@ export class Db {
     if (!has('tasks', 'from_project_id')) this.raw.exec('ALTER TABLE tasks ADD COLUMN from_project_id TEXT');
     if (!has('notes', 'link_id')) this.raw.exec('ALTER TABLE notes ADD COLUMN link_id TEXT');
     this.raw.exec('CREATE INDEX IF NOT EXISTS notes_link ON notes(link_id)');
+    // v0.27: one project per folder. Existing projects take the folder of their first session (same rule as a replay: normaliseFolder, no disk access).
+    if (!has('projects', 'folder')) {
+      this.raw.exec('ALTER TABLE projects ADD COLUMN folder TEXT');
+      for (const p of this.raw.prepare('SELECT id FROM projects').all()) {
+        const s = this.raw.prepare(`SELECT id, cwd FROM sessions WHERE project_id = ? AND cwd != '' ORDER BY rowid LIMIT 1`).get(p.id);
+        // the cwd the session first reported (what a replay sees), not one a later session.started overwrote
+        let cwd = s ? s.cwd : '';
+        const first = s && this.raw.prepare(`SELECT data FROM events WHERE session_id = ? AND type = 'session.started' ORDER BY id LIMIT 1`).get(s.id);
+        try { const c = first && JSON.parse(first.data).cwd; if (typeof c === 'string' && c) cwd = c; } catch { /* keep the row's cwd */ }
+        const f = normaliseFolder(cwd);
+        if (f) this.raw.prepare('UPDATE projects SET folder = ? WHERE id = ?').run(f, p.id);
+      }
+    }
+    if (!has('sessions', 'app_title')) this.raw.exec('ALTER TABLE sessions ADD COLUMN app_title TEXT');
+    if (!has('sessions', 'app_session_id')) this.raw.exec('ALTER TABLE sessions ADD COLUMN app_session_id TEXT');
+    this.raw.exec('CREATE INDEX IF NOT EXISTS projects_folder ON projects(folder)');
     this.raw.exec('CREATE INDEX IF NOT EXISTS notes_link_queued ON notes(state, link_id, session_id)'); // deliverLinks' stranded-note query
   }
   prep(sql) {

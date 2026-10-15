@@ -5,13 +5,13 @@
 import { h, reconcile, setText, setHidden, setAttr, setClass, startTicker, bus } from '../dom.js';
 import { bindDraft, clearDraft } from '../drafts.js';
 import { icon } from '../icons.js';
-import { state, sel, subscribe, lsGet, lsSet } from '../store.js';
+import { state, sel, subscribe, lsGet, lsSet, showOld, setShowOld } from '../store.js';
 import { addNote, deleteNote, executeNotes, retryNote, canStart } from '../actions.js';
 import { createAttachTray, createAttachmentList, bindAttachInput, attsOf } from '../attachments.js';
 import { createReply, createWaitLine } from '../replies.js';
 import { setLinked } from '../tasklinks.js';
 import { createFloating, createBubble, loadFloat, saveFloat } from '../floating.js';
-import { cwdTail } from '../format.js';
+import { cwdTail, sessionLabel } from '../format.js';
 import { emptyState, modelBadge, updateModelBadge, toast } from '../ui.js';
 import { getPref, codeOn, onPrefs } from '../prefs.js';
 import { openContextMenu, closeContextMenu, isContextMenuOpen } from '../contextmenu.js';
@@ -249,8 +249,11 @@ export function createTalkSheet(dock) {
     if (talk) { talk.destroy(); talk = null; bodyEl.textContent = ''; }
   }
 
+  const talkList = () => sel.talkSessions(showOld('talk'));
+  const oldTalkCount = () => sel.talkSessions(true).length - sel.talkSessions(false).length;
+
   function pick(preferred) {
-    const list = sel.talkSessions();
+    const list = talkList();
     if (preferred && list.some((x) => x.id === preferred)) return preferred;
     if (sid && list.some((x) => x.id === sid)) return sid;
     const remembered = lsGet('helm.talk.session');
@@ -283,7 +286,7 @@ export function createTalkSheet(dock) {
     clearTimeout(hoverT);
     if (isContextMenuOpen() || switcher.disabled) return;
     const groups = new Map();
-    for (const x of sel.talkSessions()) { // already sorted by last used
+    for (const x of talkList()) { // already sorted by last used
       if (!groups.has(x.projectId)) groups.set(x.projectId, []);
       groups.get(x.projectId).push(x);
     }
@@ -291,10 +294,12 @@ export function createTalkSheet(dock) {
     for (const [pid, list] of groups) {
       items.push({ heading: sel.projectName(pid) });
       for (const x of list) items.push({
-        label: x.title || cwdTail(x.cwd) || x.id, checked: x.id === sid, icon: x.busy ? 'dot' : undefined,
+        label: sessionLabel(x), checked: x.id === sid, icon: x.busy ? 'dot' : undefined,
         onSelect: () => { if (x.id !== sid) choose(x.id, true); focusTalk(); },
       });
     }
+    const nOld = oldTalkCount();
+    if (nOld || showOld('talk')) items.push({ divider: true }, { label: showOld('talk') ? `Hide old (${nOld})` : `Show old (${nOld})`, onSelect: () => setShowOld('talk', !showOld('talk')) });
     const r = switcher.getBoundingClientRect();
     switcher.setAttribute('aria-expanded', 'true');
     openContextMenu({ x: r.left, y: r.bottom + 4, items, restoreFocus: switcher, restoreOnSelect: false, focusFirst: byKey, onClose: () => switcher.setAttribute('aria-expanded', 'false') });
@@ -306,9 +311,9 @@ export function createTalkSheet(dock) {
   switcher.addEventListener('keydown', (e) => { if (e.key === 'ArrowDown') { e.preventDefault(); openSwitcher(true); } });
 
   function syncPicker() {
-    const list = sel.talkSessions();
+    const list = talkList();
     const cur = sid && state.sessions.get(sid);
-    label.textContent = cur ? (cur.title || cwdTail(cur.cwd) || cur.id) : 'No live session';
+    label.textContent = cur ? (sessionLabel(cur)) : 'No live session';
     switcher.disabled = list.length === 0;
     const s = sid && state.sessions.get(sid);
     setHidden(model, !s);
@@ -431,7 +436,7 @@ export function createTalkSheet(dock) {
   const off = subscribe((changed) => {
     if (!isOpen) return;
     if (!(changed.has('session') || changed.has('project') || changed.has('ui') || changed.has('ready'))) return;
-    const live = sel.talkSessions();
+    const live = talkList();
     if (!sid || !live.some((x) => x.id === sid)) {
       const next = pick();
       if (next !== sid) { sid = next; syncPicker(); mountTalk(); return; }

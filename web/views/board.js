@@ -7,7 +7,8 @@ import { patchTask, createTask, quickActions, runQuickAction, startTask, canStar
 import { createStartStatus } from '../replies.js';
 import { fmtElapsed, fmtTokens, truncate, agentLabel, modelInfo, STATUS_META, MAIN_COLUMNS, LANES, plural } from '../format.js';
 import { avatar, updateAvatar, modelBadge, updateModelBadge, nowDoingLine, statusDot, toast, openMenu } from '../ui.js';
-import { openTask, navigate } from '../router.js';
+import { openTask, navigate, route } from '../router.js';
+import { createBoardFilter, applyFilter, filterFromQuery, filterToQuery, loadFilter, saveFilter } from '../boardfilter.js';
 import { openTemplatePopover } from '../templates.js';
 import { bindTaskMenu } from '../taskmenu.js';
 import {
@@ -56,9 +57,18 @@ export function mount(container) {
   const laneHint = h('span', { class: 'lane-hint', hidden: true },
     h('button', { class: 'lane-hint-go', type: 'button', onclick: () => setView({ group: 'project' }) }),
     h('button', { class: 'lane-hint-x', type: 'button', 'aria-label': 'Hide this hint', title: 'Hide this hint', onclick: () => { lsSet('helm.board.laneHint', '0'); render(); } }, icon('close', 12)));
+  const startFilter = filterFromQuery(route().query) || loadFilter();
+  const boardFilter = createBoardFilter({ initial: startFilter, onChange: (f) => {
+    saveFilter(f);
+    const q = {}; for (const [k, v] of route().query) q[k] = v;
+    Object.assign(q, filterToQuery(f));
+    navigate('board', route().args, q, { replace: true });
+    render();
+  } });
+  const filterRow = h('div', { class: 'board-filters' }, boardFilter.el);
   const bar = h('div', { class: 'board-bar' }, needsBtn, groupBtn, viewBtn, savedEl, h('span', { class: 'spacer' }), laneHint);
   const swimEl = h('div', { class: 'board-swim', hidden: true });
-  const root = h('div', { class: 'board' }, bar, banner, colsEl, lanesEl, swimEl);
+  const root = h('div', { class: 'board' }, bar, filterRow, banner, colsEl, lanesEl, swimEl);
   let viewPanel = null;
   container.appendChild(root);
 
@@ -784,7 +794,12 @@ export function mount(container) {
     if (dragId) { needsRender = true; return; }
     needsRender = false;
     renderAutoControls();
-    const tasks = sel.scopedTasks();
+    if (state.ready) {
+      const pr = boardFilter.prune();
+      if (pr.changed) { saveFilter(boardFilter.get()); const q = {}; for (const [k, v] of route().query) q[k] = v; Object.assign(q, filterToQuery(boardFilter.get())); navigate('board', route().args, q, { replace: true }); }
+    }
+    boardFilter.refresh();
+    const tasks = applyFilter(sel.scopedTasks(), boardFilter.get());
     const v = effectiveView();
     const ctx = viewCtx();
     const lanesMode = v.group !== 'status';
@@ -885,7 +900,7 @@ export function mount(container) {
   return {
     watch: ['task', 'agent', 'project', 'session', 'ui', 'ready', 'question', 'note', 'run', 'workflow'],
     update: render,
-    setRoute() {},
-    destroy() { offNew(); closeViewPanel(); document.removeEventListener('keydown', onYKey); root.remove(); },
+    setRoute(r) { const f = filterFromQuery(r.query); if (f && JSON.stringify(f) !== JSON.stringify(boardFilter.get())) { boardFilter.setFilter(f); saveFilter(f); render(); } },
+    destroy() { offNew(); boardFilter.destroy(); closeViewPanel(); document.removeEventListener('keydown', onYKey); root.remove(); },
   };
 }

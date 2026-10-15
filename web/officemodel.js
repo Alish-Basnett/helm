@@ -1,6 +1,8 @@
 // officemodel.js — pure model + force layout for the Office "flow" graph. No DOM, so it can be unit-tested.
 // buildModel() turns store rows into nodes and edges; Sim keeps their positions (springs, repulsion, gravity, cooling).
 
+import { retiredSessionIds } from './retire.js';
+
 /** Finished things without an acknowledge feature on the hub stay this long (a hub that cannot archive must not pile them up). */
 export const GRACE_MS = 15 * 60e3;
 export const NODE_R = { main: 34, session: 22, builder: 11.5, scout: 8.5, agent: 10, ghost: 15 };
@@ -29,23 +31,36 @@ function bestSession(list) {
     || (b.lastSeenAt || 0) - (a.lastSeenAt || 0) || String(a.id).localeCompare(String(b.id)))[0] || null;
 }
 
+/** Finished-but-unacknowledged subagents drawn per session; the rest sit behind a "+N more" chip. */
+export const FINISHED_CAP = 12;
+/** Edge thickness for a bundle of n links: log scale, capped. */
+export const bundleWidth = (n) => Math.min(6.5, 2 + Math.log2(Math.max(1, n)));
+
+const LINK_STATES = ['queued', 'delivered', 'answered'];
+
 /**
- * input: { projects, sessions, agents, links (arrays), caps: { ack }, now, showArchived, scope(projectId) -> bool }
- * Returns { nodes, edges, byKey, main, coordinator, pending: { agents, sessions, links }, archivedCount }.
+ * input: { projects (archived ones too), sessions, agents, links (arrays), caps: { ack }, now, showArchived, showOld, scope(projectId) -> bool }
+ * Returns { nodes, edges, byKey, main, coordinator, bundles, pending: { agents, sessions, links }, archivedCount, oldCount }.
+ * Links between the same two nodes are ONE edge (a bundle). `pending` also holds the finished things that are not drawn
+ * (old sessions, subagents behind a "+N more" chip, links without a drawable end) so "acknowledge all" misses nothing.
  */
-export function buildModel({ projects = [], sessions = [], agents = [], links = [], caps = {}, now = Date.now(), showArchived = false, scope = () => true }) {
+export function buildModel({ projects = [], sessions = [], agents = [], links = [], caps = {}, now = Date.now(), showArchived = false, showOld = false, scope = () => true }) {
   const coordinator = projects.find((p) => p.coordinator && !p.archived) || null;
   const nodes = [];
   const byKey = new Map();
   const edges = [];
   const pending = { agents: [], sessions: [], links: [] };
   let archivedCount = 0;
+  let oldCount = 0;
   const add = (n) => { nodes.push(n); byKey.set(n.key, n); return n; };
-  const pname = (id) => (projects.find((p) => p.id === id) || {}).name || '';
+  const pmap = new Map(projects.map((p) => [p.id, p]));
+  const pname = (id) => (pmap.get(id) || {}).name || '';
+  const retired = showOld ? new Set() : retiredSessionIds(sessions, projects);
 
   /* ----- sessions ----- */
   const sessCls = new Map();
   const kept = [];
+  const hiddenOld = new Set();
   const liveKids = new Set(agents.filter((a) => !isFinishedAgent(a)).map((a) => a.sessionId)); // a session with a running subagent never leaves the graph
   for (const s of sessions) {
     let cls = classify({ live: isLiveSession(s), ackedAt: s.acknowledgedAt, endedAt: s.lastSeenAt }, caps, now);
@@ -55,6 +70,12 @@ export function buildModel({ projects = [], sessions = [], agents = [], links = 
     sessCls.set(s.id, cls);
     if (cls === 'archived') archivedCount++;
     if (cls === 'hidden' || (cls === 'archived' && !showArchived && !liveKids.has(s.id))) continue;
+    if (retired.has(s.id) && !liveKids.has(s.id) && !(cls === 'archived' && showArchived)) { // old: not drawn, but still counted and still acknowledgeable
+      hiddenOld.add(s.id);
+      if (cls !== 'archived') oldCount++;
+      if (cls === 'finished') pending.sessions.push({ key: `s:${s.id}`, kind: 'session', id: s.id, projectId: s.projectId, row: s, cls, needsOk: true, hiddenOld: true });
+      continue;
+    }
     kept.push(s);
   }
   const mainRow = coordinator ? bestSession(kept.filter((s) => s.projectId === coordinator.id && sessCls.get(s.id) === 'live')) : null;
@@ -75,6 +96,7 @@ export function buildModel({ projects = [], sessions = [], agents = [], links = 
     if (cls === 'finished' && !blocked) pending.sessions.push(n);
     if (main) edges.push({ key: `st:${n.key}`, kind: 'struct', a: main.key, b: n.key });
   }
+  for (const n of sessionNode.values()) n.more = [];
 
   /* ----- agents (parents before children) ----- */
   const byId = new Map(agents.map((a) => [a.id, a]));
@@ -82,8 +104,27 @@ export function buildModel({ projects = [], sessions = [], agents = [], links = 
   const ordered = agents.filter((a) => sessionNode.has(a.sessionId)).map((a) => [a, depth(a)])
     .sort((x, y) => x[1] - y[1] || (x[0].startedAt || 0) - (y[0].startedAt || 0) || String(x[0].id).localeCompare(String(y[0].id)));
   for (const a of agents) {
+    if (sessionNode.has(a.sessionId) || !isFinishedAgent(a)) continue;
     const sc = sessCls.get(a.sessionId);
-    if (sc === 'archived' && !sessionNode.has(a.sessionId) && isFinishedAgent(a)) archivedCount++; // its session is archived and hidden
+    if (sc === undefined) continue; // out of scope
+    if (sc === 'archived') archivedCount++; // its session is archived and hidden
+    if (caps.ack && !a.acknowledgedAt && (hiddenOld.has(a.sessionId) || sc === 'archived')) {
+      pending.agents.push({ key: `a:${a.id}`, kind: 'agent', role: roleOf(a), id: a.id, sessionId: a.sessionId, projectId: (byProjectOf(a.sessionId)), row: a, cls: 'finished', needsOk: true, hiddenOld: true });
+    }
+  }
+  function byProjectOf(sessionId) { const s = sessions.find((x) => x.id === sessionId); return s ? s.projectId : null; }
+  // the newest FINISHED_CAP finished-unacknowledged subagents of a session are drawn; the rest wait behind a chip
+  const overflow = new Set();
+  const finishedBy = new Map();
+  for (const [a] of ordered) {
+    if (!caps.ack || !isFinishedAgent(a) || a.acknowledgedAt) continue;
+    if (!finishedBy.has(a.sessionId)) finishedBy.set(a.sessionId, []);
+    finishedBy.get(a.sessionId).push(a);
+  }
+  for (const list of finishedBy.values()) {
+    if (list.length <= FINISHED_CAP) continue;
+    list.sort((x, y) => (y.endedAt || y.lastActivityAt || y.startedAt || 0) - (x.endedAt || x.lastActivityAt || x.startedAt || 0) || String(y.id).localeCompare(String(x.id)));
+    for (const a of list.slice(FINISHED_CAP)) overflow.add(a.id);
   }
   for (const [a] of ordered) {
     const sn = sessionNode.get(a.sessionId);
@@ -92,6 +133,12 @@ export function buildModel({ projects = [], sessions = [], agents = [], links = 
     if (cls === 'archived') archivedCount++;
     if (cls === 'hidden' || (cls === 'archived' && !showArchived)) continue;
     const role = roleOf(a);
+    if (overflow.has(a.id)) {
+      const o = { key: `a:${a.id}`, kind: 'agent', role, id: a.id, sessionId: a.sessionId, projectId: sn.projectId, row: a, cls, needsOk: true, overflow: true };
+      sn.more.push(o);
+      pending.agents.push(o);
+      continue;
+    }
     const parent = a.parentId && a.parentId !== a.id && byKeyAgent(a.parentId) || sn;
     const n = add({ key: `a:${a.id}`, kind: 'agent', role, id: a.id, sessionId: a.sessionId, projectId: sn.projectId, row: a, cls, r: NODE_R[role], parentKey: parent.key, archived: cls === 'archived', needsOk: cls === 'finished' });
     if (cls === 'finished') pending.agents.push(n);
@@ -99,19 +146,21 @@ export function buildModel({ projects = [], sessions = [], agents = [], links = 
   }
   function byKeyAgent(id) { return byKey.get(`a:${id}`); }
 
-  /* ----- links ----- */
-  const ghost = (projectId) => {
-    if (!projectId || !(scope(projectId) || (coordinator && projectId === coordinator.id))) return null;
+  /* ----- links: every pair of nodes gets ONE edge, however many links run between them ----- */
+  const ghost = (projectId, allow) => {
+    const p = pmap.get(projectId);
+    if (!projectId || !p || !(scope(projectId) || (coordinator && projectId === coordinator.id))) return null;
+    if (!(coordinator && projectId === coordinator.id) && !(allow && !p.archived)) return null; // a "No live session" node only for a live project with something queued for it
     return byKey.get(`g:${projectId}`) || add({ key: `g:${projectId}`, kind: 'ghost', ghost: true, id: null, projectId, row: null, cls: 'live', r: NODE_R.ghost, archived: false, needsOk: false });
   };
-  const endpoint = (sessionId, projectId) => {
+  const endpoint = (sessionId, projectId, queued) => {
     if (sessionId && sessionNode.has(sessionId)) return sessionNode.get(sessionId);
     if (coordinator && projectId === coordinator.id && main) return main;
     const live = kept.filter((s) => s.projectId === projectId && sessionNode.has(s.id) && sessCls.get(s.id) === 'live');
     const best = bestSession(live) || bestSession(kept.filter((s) => s.projectId === projectId && sessionNode.has(s.id)));
-    return best ? sessionNode.get(best.id) : ghost(projectId);
+    return best ? sessionNode.get(best.id) : ghost(projectId, queued);
   };
-  const pairs = new Map();
+  const bundles = new Map();
   for (const L of links) {
     const cls = L.state === 'answered'
       ? classify({ live: false, ackedAt: L.acknowledgedAt, endedAt: L.answeredAt || L.createdAt }, caps, now)
@@ -120,18 +169,32 @@ export function buildModel({ projects = [], sessions = [], agents = [], links = 
     if (!inScope) continue;
     if (cls === 'archived') archivedCount++;
     if (cls === 'hidden' || (cls === 'archived' && !showArchived)) continue;
-    const from = endpoint(L.fromSessionId, L.fromProjectId);
-    const to = endpoint(L.toSessionId, L.toProjectId);
-    if (!from || !to || from === to) continue;
-    const pk = [from.key, to.key].sort().join('|');
-    const idx = pairs.get(pk) || 0;
-    pairs.set(pk, idx + 1);
-    const e = { key: `l:${L.id}`, kind: 'link', a: from.key, b: to.key, link: L, cls, archived: cls === 'archived', needsOk: cls === 'finished', off: 26 + 26 * idx };
-    edges.push(e);
-    if (cls === 'finished') pending.links.push(e);
+    const queued = L.state === 'queued';
+    const from = endpoint(L.fromSessionId, L.fromProjectId, false);
+    const to = endpoint(L.toSessionId, L.toProjectId, queued);
+    const drawn = !!(from && to && from !== to);
+    const pk = drawn ? [from.key, to.key].sort().join('|') : `u:${L.fromProjectId}>${L.toProjectId}`;
+    let B = bundles.get(pk);
+    if (!B) {
+      B = { key: `b:${pk}`, drawn, a: drawn ? from.key : null, b: drawn ? to.key : null, fromProjectId: L.fromProjectId, toProjectId: L.toProjectId, items: [], counts: { queued: 0, delivered: 0, answered: 0, needOk: 0, archived: 0 }, ab: 0, ba: 0 };
+      bundles.set(pk, B);
+    }
+    B.items.push({ link: L, cls, needsOk: cls === 'finished', archived: cls === 'archived' });
+    B.counts[L.state in B.counts ? L.state : 'delivered']++;
+    if (cls === 'finished') B.counts.needOk++;
+    if (cls === 'archived') B.counts.archived++;
+    if (drawn) { if (from.key === B.a) B.ab++; else B.ba++; }
+    if (cls === 'finished') pending.links.push({ key: `l:${L.id}`, link: L, bundleKey: B.key, cls, needsOk: true });
+  }
+  for (const B of bundles.values()) {
+    B.n = B.items.length;
+    B.items.sort((x, y) => (y.link.createdAt || 0) - (x.link.createdAt || 0) || String(y.link.id).localeCompare(String(x.link.id), undefined, { numeric: true }));
+    if (!B.drawn) continue;
+    const allArchived = B.counts.archived === B.n;
+    edges.push({ key: B.key, kind: 'link', a: B.a, b: B.b, bundle: B, n: B.n, cls: B.counts.needOk ? 'finished' : allArchived ? 'archived' : 'live', archived: allArchived, needsOk: B.counts.needOk > 0, off: 24, width: bundleWidth(B.n) });
   }
   for (const n of nodes) n.label = n.kind === 'agent' ? '' : pname(n.projectId);
-  return { nodes, edges, byKey, main, coordinator, pending, archivedCount };
+  return { nodes, edges, byKey, main, coordinator, bundles: Array.from(bundles.values()), pending, archivedCount, oldCount };
 }
 
 /* ---------- force layout ---------- */

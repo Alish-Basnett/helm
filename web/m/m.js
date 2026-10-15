@@ -127,7 +127,7 @@
     const list = liveSessions();
     sessionSel.textContent = '';
     list.forEach((s) => {
-      const o = el('option', '', (s.title || s.id) + ' · ' + (s.busy ? 'working' : s.status));
+      const o = el('option', '', (s.appTitle || s.title || s.id) + ' · ' + (s.busy ? 'working' : s.status));
       o.value = s.id;
       sessionSel.appendChild(o);
     });

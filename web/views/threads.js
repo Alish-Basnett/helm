@@ -5,9 +5,10 @@
 // (agent detail, tool timeline, scoped prompt) is unchanged and still drives the Dock via task chips.
 import { h, reconcile, setText, setClass, setHidden, setAttr, reducedMotion, startTicker, frameBatch, debounce } from '../dom.js';
 import { icon } from '../icons.js';
-import { state, sel, onActivity, ingestActivity, lsGet, lsSet } from '../store.js';
+import { state, sel, onActivity, ingestActivity, lsGet, lsSet, showOld } from '../store.js';
+import { createOldToggle } from '../oldtoggle.js';
 import { api } from '../api.js';
-import { fmtElapsed, fmtTokens, fmtUsd, fmtTime, fmtAgo, fmtDay, cwdTail, agentLabel, truncate, modelInfo } from '../format.js';
+import { fmtElapsed, fmtTokens, fmtUsd, fmtTime, fmtAgo, fmtDay, cwdTail, agentLabel, truncate, modelInfo, sessionLabel } from '../format.js';
 import { avatar, updateAvatar, modelBadge, updateModelBadge, nowDoingLine, emptyState } from '../ui.js';
 import { createTimeline } from '../timeline.js';
 import { HOUR, pad2, MIN_SPAN, MAX_SPAN, TICK_STEPS, fmtDur, fmtDurExact, fmtClockSec, tickStep, makeTicks, toScale, pctOf as axisPct, zoomedRange, paddedFit, paintTicks, attachPanZoom } from '../axis.js';
@@ -153,6 +154,7 @@ export function mount(container) {
 
   /* ---------- structure ---------- */
   const picker = h('select', { class: 'select', 'aria-label': 'Session', onchange: () => choose(picker.value) });
+  const oldToggle = createOldToggle('threads');
   const sessMeta = h('div', { class: 'threads-meta mono' });
 
   const segBtn = (label, value, group, title) => h('button', { class: 'th-seg-btn', type: 'button', 'data-v': value, 'aria-pressed': 'false', title: title || label, onclick: () => group(value) }, label);
@@ -177,7 +179,7 @@ export function mount(container) {
   const zoomSeg = h('div', { class: 'th-seg th-zoom', role: 'group', 'aria-label': 'Timeline zoom' },
     zoomBtn('\u2212', 'Zoom out (-)', () => zoomBy(1.6, 0.5)), zoomBtn('+', 'Zoom in (+)', () => zoomBy(1 / 1.6, 0.5)), fitBtn);
   const bar = h('div', { class: 'threads-bar' },
-    h('div', { class: 'th-bar-row' }, h('label', { class: 'field-label inline' }, icon('threads', 15), picker), sessMeta, h('span', { class: 'th-grow' }), zoomSpan, zoomSeg, viewSeg, densSeg),
+    h('div', { class: 'th-bar-row' }, h('label', { class: 'field-label inline' }, icon('threads', 15), picker), oldToggle.el, sessMeta, h('span', { class: 'th-grow' }), zoomSpan, zoomSeg, viewSeg, densSeg),
     h('div', { class: 'th-bar-row' }, chipRow, modelSel, searchWrap));
 
   const sizer = h('div', { class: 'th-sizer' });
@@ -234,7 +236,8 @@ export function mount(container) {
 
   /* ---------- selection / routing ---------- */
   function sessionList() {
-    const list = sel.scopedSessions();
+    const list = sel.scopedSessions(showOld('threads'));
+    oldToggle.set(sel.oldSessionCount());
     if (sid && !list.some((x) => x.id === sid) && state.sessions.has(sid)) list.push(state.sessions.get(sid));
     const order = { active: 0, idle: 1, ended: 2 };
     return list.sort((a, b) => (order[a.status] - order[b.status]) || (b.lastSeenAt - a.lastSeenAt));
@@ -662,12 +665,12 @@ export function mount(container) {
     el.className = `th-row th-lane st-${ses.status}${el.classList.contains('pinned') ? ' pinned' : ''}`;
     setClass(el, 'folded', !it.open);
     r.dot.className = `pdot ${ses.status}`;
-    setText(r.title, ses.title || cwdTail(ses.cwd) || ses.id);
+    setText(r.title, sessionLabel(ses));
     updateModelBadge(r.badge, ses.model);
     const live = it.lane.shown.filter(isLive).length;
     setText(r.meta, `${sel.projectName(ses.projectId)} · ${cwdTail(ses.cwd, 2)} · ${plural(it.lane.all, 'agent')}${live ? ` · ${live} live` : ''}`);
     el.setAttribute('aria-expanded', String(it.open));
-    el.setAttribute('aria-label', `Session ${ses.title || ses.id}, ${ses.status}`);
+    el.setAttribute('aria-label', `Session ${sessionLabel(ses)}, ${ses.status}`);
   }
 
   function updateLabel(el, r, it) {
@@ -999,7 +1002,7 @@ export function mount(container) {
         const ses = state.sessions.get(id);
         if (!ses) return;
         r.pulse.className = `pdot ${ses.status}${ses.busy ? ' busy' : ''}`;
-        setText(r.title, ses.title || cwdTail(ses.cwd) || ses.id);
+        setText(r.title, sessionLabel(ses));
         setText(r.cwd, ses.cwd || '');
         updateModelBadge(r.model, ses.model);
         setText(r.state, ses.busy ? 'Working' : ses.status === 'active' ? 'Active' : ses.status === 'idle' ? 'Idle' : 'Ended');
@@ -1130,13 +1133,13 @@ export function mount(container) {
     setHidden(main, none);
     if (none || !sid) { if (insp) { insp.destroy(); insp = null; inspector.textContent = ''; } return; }
     // picker: "All sessions" + each session
-    const sig = list.map((x) => `${x.id}|${x.title}|${x.status}`).join(';');
+    const sig = list.map((x) => `${x.id}|${sessionLabel(x)}|${x.status}`).join(';');
     if (picker.__sig !== sig) {
       picker.__sig = sig;
       picker.textContent = '';
       picker.appendChild(h('option', { value: 'all' }, `All sessions  ·  ${list.length}`));
       for (const x of list) {
-        picker.appendChild(h('option', { value: x.id }, `${x.title || cwdTail(x.cwd) || x.id}  ·  ${x.status}`));
+        picker.appendChild(h('option', { value: x.id }, `${sessionLabel(x)}  ·  ${x.status}`));
       }
     }
     const want = prefs.scopeAll ? 'all' : sid;

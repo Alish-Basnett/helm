@@ -66,6 +66,12 @@ export function startOfToday() {
   const d = new Date(); d.setHours(0, 0, 0, 0); return d.getTime();
 }
 
+/** The name of a session everywhere: the title shown in the Claude desktop app (live), else Helm's own title, else the folder. */
+export function sessionLabel(s) {
+  if (!s) return '';
+  return s.appTitle || s.title || cwdTail(s.cwd) || s.id;
+}
+
 export function cwdTail(cwd, n = 2) {
   if (!cwd) return '';
   const parts = String(cwd).split('/').filter(Boolean);

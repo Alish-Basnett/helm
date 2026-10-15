@@ -1,8 +1,10 @@
 // views/office.js — "the floor": each session is a desk, its subagents sit beside it.
 import { h, reconcile, setText, setClass, setHidden, startTicker } from '../dom.js';
 import { icon } from '../icons.js';
-import { state, sel, lsGet, lsSet } from '../store.js';
-import { fmtElapsed, fmtTokens, fmtUsd, cwdTail, agentLabel, truncate, plural } from '../format.js';
+import { state, sel, lsGet, lsSet, showOld } from '../store.js';
+import { createOldToggle } from '../oldtoggle.js';
+import { createCleanupBanner } from '../cleanup.js';
+import { fmtElapsed, fmtTokens, fmtUsd, cwdTail, agentLabel, truncate, plural, sessionLabel } from '../format.js';
 import { avatar, updateAvatar, modelBadge, updateModelBadge, nowDoingLine, emptyState } from '../ui.js';
 import { navigate, openTask } from '../router.js';
 import { api } from '../api.js';
@@ -105,7 +107,8 @@ function mountDesks(container) {
     iconName: 'office', title: 'No sessions yet',
     body: 'Start Claude Code with Helm installed — every session gets a desk here and its subagents sit beside it.',
   }));
-  const wrap = h('div', { class: 'desks' }, floor, empty);
+  const oldToggle = createOldToggle('desks');
+  const wrap = h('div', { class: 'desks' }, h('div', { class: 'desks-bar' }, oldToggle.el), floor, empty);
   container.appendChild(wrap);
 
   /* ---------- desk group ---------- */
@@ -146,7 +149,7 @@ function mountDesks(container) {
     r.ring.set(s);
     r.ringWrap.title = `${ctxText(s)}. Health: ${LEVEL_LABEL[lvl].toLowerCase()}${(s.health && s.health.reasons.length) ? ' (' + s.health.reasons.join('; ') + ')' : ''}`;
     r.pulse.className = `pdot ${s.status}${s.busy ? ' busy' : ''}`;
-    setText(r.title, s.title || cwdTail(s.cwd) || s.id);
+    setText(r.title, sessionLabel(s));
     setText(r.state, waiting ? WAIT_LABEL.toLowerCase() : s.busy ? 'working' : s.status);
     setText(r.cwd, cwdTail(s.cwd, 3));
     r.cwd.title = s.cwd || '';
@@ -235,7 +238,8 @@ function mountDesks(container) {
   }
 
   function render() {
-    const sessions = sel.scopedSessions();
+    const sessions = sel.scopedSessions(showOld('desks'));
+    oldToggle.set(sel.oldSessionCount());
     const byProject = new Map();
     for (const s of sessions) {
       if (!byProject.has(s.projectId)) byProject.set(s.projectId, []);
@@ -270,7 +274,8 @@ export function mount(container) {
     segBtn('Flow', 'flow', 'Flow: the main session, the others and their subagents as a live graph'),
     segBtn('Desks', 'desks', 'Desks: every session as a desk with its subagents beside it'));
   const bar = h('div', { class: 'office-bar' }, seg);
-  const wrap = h('div', { class: 'office', 'data-mode': mode }, bar, radar.el, host);
+  const cleanup = createCleanupBanner();
+  const wrap = h('div', { class: 'office', 'data-mode': mode }, cleanup.el, bar, radar.el, host);
   container.appendChild(wrap);
 
   function setMode(m) {
@@ -297,6 +302,6 @@ export function mount(container) {
       if (child && (!w || w.some((k) => changed.has(k)))) child.update(changed);
     },
     setRoute() {},
-    destroy() { if (child) child.destroy(); radar.destroy(); wrap.remove(); },
+    destroy() { if (child) child.destroy(); radar.destroy(); cleanup.destroy(); wrap.remove(); },
   };
 }

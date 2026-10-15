@@ -505,7 +505,7 @@ function indexDoc(p, id) {
   if (d.archived) { p.delDoc('doc', id); return; }
   p.setDoc('doc', id, d.title, docText(parse(d.blocks, [])), { at: d.updated_at });
 }
-const pushDoc = (p, id) => { const r = getDoc(p.db, id); if (r) p.emit('doc', 'upsert', toDoc(r, { blocks: false })); };
+export const pushDoc = (p, id) => { const r = getDoc(p.db, id); if (r) p.emit('doc', 'upsert', toDoc(r, { blocks: false })); };
 const pushComment = (p, id) => { const r = getComment(p.db, id); if (r) p.emit('doc_comment', 'upsert', toDocComment(r)); };
 
 /** After a text change: re-locate the anchors of live comments on the changed blocks; lost ones become orphaned, found ones recover. */
