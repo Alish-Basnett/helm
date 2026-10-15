@@ -6,6 +6,24 @@ All notable changes to Helm are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.28.1] - 2026-10-15
+
+### Changed
+
+- The coordinator session is no longer woken by every note and reply. `POST /v1/links` takes an optional boolean `ask` (anything else is 400). A spoke's note to the coordinator project without `ask: true` is filed in the dashboard only: the link is born `answered` with a fixed reply, `refId` null, and no session note is made. With `ask: true` it is delivered as before. Notes to other projects are unchanged.
+- Replies to a note the coordinator sent are stored on the link but injected back into the coordinator's inbox only when the coordinator sent that note with `ask: true` (`links.want_reply`, event field `wantReply`); a `Not delivered:` reply is always injected.
+- A filed (quiet) note keeps its full text (up to 2000 characters) in `links.text`; the dashboard's link panel shows it in full, scrolling when long.
+- The task tool's `note` action gains `ask`; the injected guidance tells spokes to use it only for cross-platform asks, blockers and decisions, and not to send FYIs or acknowledgements.
+
+## [0.28.0] - 2026-10-15
+
+### Added
+
+- Move a card to another project: `POST /v1/tasks/:id/move { projectId }` (event `hub.task.move`, rebuild-exact). The card keeps its id, notes, links and diffs; its session is cleared if it is not in the target project; a held Start follows it; children are not moved; an archived or unknown target is 409. Allowed from the dashboard and, over the socket, only for the coordinator session (the move leaves a task link). The task tool's `update` gains `moveTo` for the coordinator.
+- `GET /v1/tasks/:id/start-target` answers where a Start would go right now (project, session, or held), with the same routing as Start. The Start button reads `Start in <project> · <session>` (or `will wait for a session`) and asks for confirmation only when the Start will be held or goes to a project other than the one on screen.
+- Fixed: the task tool's `list` showed a spoke only the cards tied to its own session (`hooks/register.ts`, `GET /v1/tasks?sessionId=`), hiding every card the coordinator imported or created on its project. It now lists every non-archived card of the session's project, in board order.
+- Card sheet shows `Project: <name>` with `Move to…`; board cards show a project chip whenever the board mixes projects.
+
 ## [0.27.2] - 2026-10-15
 
 ### Changed

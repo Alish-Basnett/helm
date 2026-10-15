@@ -3,6 +3,8 @@ import { ciSummary, prChip } from '../git.js';
 import { h, reconcile, setText, setClass, setHidden, setAttr, bus, startTicker } from '../dom.js';
 import { icon } from '../icons.js';
 import { state, sel, lsGet, lsSet, setUI } from '../store.js';
+import { cachedStartTarget } from '../startdialogs.js';
+import { startTargetText } from '../startqueue.js';
 import { patchTask, createTask, quickActions, runQuickAction, startTask, canStart, startDrafts, setAutoStart, setAutoConcurrency, decideGate } from '../actions.js';
 import { createStartStatus } from '../replies.js';
 import { fmtElapsed, fmtTokens, truncate, agentLabel, modelInfo, STATUS_META, MAIN_COLUMNS, LANES, plural } from '../format.js';
@@ -35,6 +37,7 @@ export function mount(container) {
   let groupByRun = lsGet('helm.board.groupRun') === '1'; // v0.9: cards made by a workflow run sit under one header per run
   const collapsedRuns = new Set((() => { try { return JSON.parse(lsGet('helm.board.runsCollapsed') || '[]'); } catch { return []; } })());
   const cols = {}; // status -> {el, body, count, composer, ...}
+  let showChips = false; // v0.28: the board mixes projects, so cards wear a project chip
   let nextUpIds = new Set(); // v0.7: the top Up next card of every project that is on Auto
 
   startTicker();
@@ -343,7 +346,7 @@ export function mount(container) {
     setClass(el, 'pending', !!t.__pending);
     setText(r.title, t.title);
     setText(r.id, String(t.id).startsWith('tmp-') ? '…' : t.id);
-    const showProj = state.ui.projectId === 'all' && state.projects.size > 1 && view.group !== 'project';
+    const showProj = showChips;
     const flat = view.group === 'none';
     setHidden(r.stat, !flat);
     if (flat) { setText(r.stat, (STATUS_META[t.status] || {}).label || t.status); setAttr(r.stat, 'data-status', t.status); }
@@ -427,8 +430,12 @@ export function mount(container) {
     reconcile(r.actions, acts, (a) => a.key, (a) => {
       const isStart = a.key === 'start' || a.key === 'resume'; // Resume wears the Start button's layout (T-57)
       const b = h('button', { class: `qa qa-${a.key}${isStart ? ' qa-start' : ''}`, type: 'button', title: isStart ? `${a.label} (S)` : a.label, 'aria-label': `${a.label} ${t.id}`,
-        onclick: (e) => { e.stopPropagation(); if (isStart) startTask(el.__task.id); else runQuickAction(el.__task, b.__a); } },
+        onclick: (e) => { e.stopPropagation(); if (isStart) startTask(el.__task.id, { scopeProjectId: boardScope() }); else runQuickAction(el.__task, b.__a); } },
       icon(a.icon, isStart ? 13 : 15), isStart ? h('span', { class: 'qa-label' }, a.label) : null, isStart ? h('span', { class: 'qa-badge', hidden: true }) : null);
+      if (isStart) { // v0.28: say where this Start would go, looked up when the owner points at the button
+        const where = () => paintStartTitle(b, el.__task);
+        b.addEventListener('pointerenter', where); b.addEventListener('focus', where);
+      }
       return b;
     }, (b, a) => {
       b.__a = a;
@@ -442,12 +449,26 @@ export function mount(container) {
     });
   }
 
+  /** The board's current project: a single project picked in the board filter, else the project scope. */
+  function boardScope() {
+    const v = effectiveView();
+    return v.projects.length === 1 ? v.projects[0] : state.ui.projectId;
+  }
+  /** "Start in <project> · <session>" as the button's tooltip, once the hub has said where it goes. */
+  function paintStartTitle(b, t) {
+    const verb = b.__a ? b.__a.label : 'Start';
+    const tg = cachedStartTarget(t, () => { if (b.isConnected && b.__a) paintStartTitle(b, state.tasks.get(t.id) || t); });
+    if (!tg) return;
+    const k = startDrafts(t.id).length;
+    b.title = `${startTargetText(verb, tg)} (S)${k ? ` — sends ${k} draft note${k === 1 ? '' : 's'} with it` : ''}`;
+  }
+
   function onCardKey(e, el) {
     const t = el.__task;
     if (e.target !== el) return;
     if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openTask(t.id); return; }
     if ((e.key === 's' || e.key === 'S') && !e.altKey && !e.metaKey && !e.ctrlKey) {
-      if (canStart(t)) { e.preventDefault(); startTask(t.id); }
+      if (canStart(t)) { e.preventDefault(); startTask(t.id, { scopeProjectId: boardScope() }); }
       return;
     }
     if (!e.altKey) return;
@@ -819,6 +840,7 @@ export function mount(container) {
     paintViewBar();
     // a nudge, not a switch: several projects on one board and still plain columns
     const nProj = projectCount(base);
+    showChips = nProj > 1 && v.group !== 'project'; // v0.28: a project chip on every card while the board mixes projects
     const hint = !lanesMode && state.ui.projectId === 'all' && nProj > 1 && lsGet('helm.board.laneHint') !== '0';
     setHidden(laneHint, !hint);
     if (hint) setText(laneHint.firstChild, `${nProj} projects here · group by project`);

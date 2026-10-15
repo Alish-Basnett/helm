@@ -71,12 +71,24 @@ function fakeHub(sessionId: string, opts: HubOpts = {}) {
       return json({ link: { id: 'L-1', toProjectId: 'P-9', state: state.noteState } }, 201)
     }
     if (method === 'POST' && path === `/v1/sessions/${sessionId}/coordinator`) return json({ project: { id: 'P-1', name: 'proj', coordinator: body.on } })
-    if (method === 'GET' && path.startsWith('/v1/tasks?projectId=')) return json({ tasks: tasks.filter(t => t.projectId === decodeURIComponent(path.split('=')[1]!)) })
+    if (method === 'GET' && path.startsWith('/v1/tasks?projectId=')) {
+      const q = new URLSearchParams(path.split('?')[1])
+      const st = q.get('status')?.split(',')
+      return json({ tasks: tasks.filter(t => t.projectId === q.get('projectId') && (!st || st.includes(t.status))) })
+    }
     if (method === 'GET' && path.startsWith('/v1/tasks?')) return json({ tasks })
     if (method === 'POST' && path === '/v1/tasks') {
       const task = { id: 'T-42', status: body.status, title: body.title, projectId: body.projectId }
       tasks.push(task)
       return json({ task })
+    }
+    const move = path.match(/^\/v1\/tasks\/(T-\d+)\/move$/)
+    if (method === 'POST' && move) {
+      const t = tasks.find(x => x.id === move[1])
+      if (!t) return json({ error: 'not found' }, 404)
+      if (!opts.project?.coordinator) return json({ error: 'Only the coordinator session can move a card to another project.' }, 403)
+      t.projectId = body.projectId
+      return json({ task: t })
     }
     const patch = path.match(/^\/v1\/tasks\/(T-\d+)$/)
     if (method === 'PATCH' && patch) {
@@ -602,10 +614,25 @@ describe('mcp__helm__task tool', () => {
   })
 
   test('list returns one line per task, or a placeholder', async ($, on) => {
-    const w = await boot($, on, { tasks: [{ id: 'T-1', title: 'First', status: 'review' }] })
+    const w = await boot($, on, { tasks: [{ id: 'T-1', title: 'First', status: 'review', projectId: 'P-1' }] })
     const r: any = await $.tool.call({ tool: 'mcp__helm__task', action: 'list', tool_use_id: 'tu-list' } as any)
     expect(r.result).toBe('T-1 [review] First')
     w.hub.calls.length = 0
+  })
+
+  test('list with no project arg shows the whole own project: cards of any creator or none, not archived, in board order', async ($, on) => {
+    const w = await boot($, on, { projects: [{ id: 'P-1', name: 'proj' }], tasks: [
+      { id: 'T-1', title: 'Imported by the coordinator', status: 'backlog', projectId: 'P-1', sessionId: null },
+      { id: 'T-2', title: 'Done one', status: 'done', projectId: 'P-1', sessionId: 'someone-else' },
+      { id: 'T-3', title: 'Mine', status: 'next', projectId: 'P-1', sessionId: 'mine' },
+      { id: 'T-4', title: 'Archived', status: 'archived', projectId: 'P-1' },
+      { id: 'T-5', title: 'Other board', status: 'next', projectId: 'P-2' },
+    ] })
+    const r: any = await $.tool.call({ tool: 'mcp__helm__task', action: 'list', tool_use_id: 'tu-list2' } as any)
+    expect(r.result).toBe('T-1 [backlog] Imported by the coordinator\nT-3 [next] Mine\nT-2 [done] Done one')
+    expect(w.hub.calls.some(c => c.path.startsWith('/v1/tasks?projectId=P-1&'))).toBe(true)
+    const named: any = await $.tool.call({ tool: 'mcp__helm__task', action: 'list', project: 'P-1', tool_use_id: 'tu-list3' } as any)
+    expect(named.result).toBe(r.result) // naming its own project is the same list, not a narrower one
   })
 
   test('the task tool itself is not reported as tool.called', async ($, on) => {
@@ -2164,7 +2191,25 @@ describe('v0.26 coordinator and cross-project task tool', () => {
     expect(w.hub.calls.find(c => c.method === 'PATCH' && c.path === '/v1/tasks/T-7')!.body).toEqual({ status: 'review' })
     const l: any = await call($, { action: 'list', project: 'beta' })
     expect(l.result).toContain('T-7 [review] beta card')
-    expect(w.hub.calls.some(c => c.path === '/v1/tasks?projectId=P-2')).toBe(true)
+    expect(w.hub.calls.some(c => c.path.startsWith('/v1/tasks?projectId=P-2&'))).toBe(true)
+  })
+
+  test('moveTo: the coordinator moves a card (alone, or with other fields); a spoke is refused before the hub is called', async ($, on) => {
+    const w = await boot($, on, { projects, project: { id: 'P-1', name: 'proj', coordinator: true }, tasks: [{ id: 'T-7', title: 'beta card', status: 'next', projectId: 'P-2' }] })
+    const m: any = await call($, { action: 'update', id: 'T-7', moveTo: 'gamma' })
+    expect(m.result).toBe('T-7 moved to gamma')
+    expect(w.hub.calls.find(c => c.method === 'POST' && c.path === '/v1/tasks/T-7/move')!.body).toEqual({ projectId: 'P-3' })
+    expect(w.hub.calls.filter(c => c.method === 'PATCH')).toHaveLength(0)
+    const both: any = await call($, { action: 'update', id: 'T-7', moveTo: 'P-2', status: 'review', project: 'gamma' })
+    expect(both.result).toBe('T-7 → review')
+    expect(w.hub.tasks[0].projectId).toBe('P-2')
+  })
+
+  test('moveTo from a spoke is denied and nothing is sent', async ($, on) => {
+    const w = await boot($, on, { projects: [{ id: 'P-1', name: 'proj' }, ...projects], tasks: [{ id: 'T-7', title: 'own card', status: 'next', projectId: 'P-1' }] })
+    const r: any = await call($, { action: 'update', id: 'T-7', moveTo: 'beta' })
+    expect(r.deny).toBe('Only the coordinator session can move a card to another project.')
+    expect(w.hub.calls.filter(c => /\/move$/.test(c.path))).toHaveLength(0)
   })
 
   test('work on another project\'s card is refused for a spoke and tags nothing', async ($, on) => {
@@ -2229,6 +2274,17 @@ describe('v0.26 note action', () => {
     w.hub.state.noteState = 'queued'
     const q: any = await call($, { to: 'coord', text: 'again' })
     expect(q.result).toContain('waits for the first one that starts')
+  })
+
+  test('forwards ask only when it is true', async ($, on) => {
+    const w = await boot($, on)
+    await call($, { to: 'coord', text: 'blocked on the shared table', ask: true })
+    expect(w.hub.calls.filter(c => c.path === '/v1/links').at(-1)!.body).toEqual({ kind: 'note', to: 'coord', text: 'blocked on the shared table', ask: true })
+    await call($, { to: 'coord', text: 'fyi', ask: false })
+    expect(w.hub.calls.filter(c => c.path === '/v1/links').at(-1)!.body).toEqual({ kind: 'note', to: 'coord', text: 'fyi' })
+    w.hub.state.noteState = 'answered'
+    const filed: any = await call($, { to: 'coord', text: 'fyi' })
+    expect(filed.result).toContain('filed in the dashboard')
   })
 
   test('validates to and text, caps the length, redacts, and passes a hub refusal on as written', async ($, on) => {

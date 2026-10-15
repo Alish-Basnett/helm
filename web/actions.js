@@ -3,7 +3,8 @@ import { api } from './api.js';
 import { state, upsert, remove, sel } from './store.js';
 import { toast, toastError } from './ui.js';
 import { splitAckBody } from './retire.js';
-import { isHeldStart, waitingText } from './startqueue.js';
+import { isHeldStart, waitingText, needsStartConfirm } from './startqueue.js';
+import { confirmStart } from './startdialogs.js';
 
 let tmpCounter = 0;
 const tmpId = (p) => `tmp-${p}-${Date.now().toString(36)}${++tmpCounter}`;
@@ -332,9 +333,17 @@ export function startErrorMessage(e) {
 }
 
 /** Ask the task's live session to delegate it. Optimistic: card shows "Starting…" until the start note settles. */
-export async function startTask(id) {
+const confirming = new Set();
+export async function startTask(id, { scopeProjectId = state.ui.projectId } = {}) {
   const before = state.tasks.get(id);
-  if (!before || !canStart(before)) return null;
+  if (!before || !canStart(before) || confirming.has(id)) return null;
+  // v0.28: ask only when the Start will be held or goes to a project other than the one on screen
+  confirming.add(id);
+  try {
+    const tg = await api.startTarget(id).catch(() => null); // no answer: start as before, the hub decides anyway
+    if (needsStartConfirm(tg, scopeProjectId) && !(await confirmStart(tg, isInterrupted(before) ? 'Resume' : 'Start'))) return null;
+  } finally { confirming.delete(id); }
+  if (!canStart(state.tasks.get(id))) return null; // it changed while the question was open
   const optimistic = { ...before, status: 'next', startNoteId: tmpId('N') };
   upsert('task', optimistic);
   const folded = startDrafts(id); // the hub marks these ran (via start) in the same transaction
@@ -350,6 +359,21 @@ export async function startTask(id) {
     if (state.tasks.get(id) === optimistic) upsert('task', before);
     folded.forEach((n) => upsert('note', n));
     toast(startErrorMessage(e), { kind: 'error' });
+    return null;
+  }
+}
+
+/** v0.28: move a card to another project (the hub keeps id, notes and links; a held Start goes with it). */
+export async function moveTask(id, projectId) {
+  const before = state.tasks.get(id);
+  if (!before || before.projectId === projectId) return null;
+  try {
+    const res = await api.moveTask(id, projectId);
+    if (res && res.task) upsert('task', res.task);
+    toast(`Moved ${id} to ${sel.projectName(projectId)}`, { kind: 'success' });
+    return res;
+  } catch (e) {
+    toastError(e, 'Could not move the card');
     return null;
   }
 }

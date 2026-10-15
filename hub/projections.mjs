@@ -699,6 +699,7 @@ export class Projector {
       case 'hub.session.join': return this.hSessionJoin(ev);
       case 'hub.task.create': return this.hTaskCreate(ev);
       case 'hub.task.update': return this.hTaskUpdate(ev);
+      case 'hub.task.move': return this.hTaskMove(ev);
       case 'hub.attachment.create': return this.hAttachmentCreate(ev);
       case 'hub.note.create': return this.hNoteCreate(ev);
       case 'hub.note.update': return this.hNoteUpdate(ev);
@@ -1533,6 +1534,15 @@ export class Projector {
   hLinkCreate(ev) {
     const d = ev.data, at = ev.at, id = this.nextId('L');
     const note = d.kind === 'note';
+    if (note && d.quiet) { // filed for the dashboard: no session note, born answered
+      this.db.run(
+        `INSERT INTO links(id, kind, from_session_id, from_project_id, to_project_id, to_session_id, ref_id, text, state, reply, created_at, delivered_at, answered_at, acknowledged_at)
+         VALUES (?, 'note', ?, ?, ?, NULL, NULL, ?, 'answered', ?, ?, ?, ?, NULL)`,
+        id, str(d.fromSessionId), str(d.fromProjectId), str(d.toProjectId), cut(plainLine(d.text), 2000), // the full message: no note row holds it
+        'Filed for the dashboard: not sent to the coordinator session (no ask).', at, at, at);
+      this.pushLink(id);
+      return toLink(this.getLink(id));
+    }
     const to = note ? d.toSessionId || null : null;
     const ref = note ? this.insertLinkNote(id, this.sessionLabel(d.fromSessionId), str(d.text), to, at) : str(d.refId) || null;
     this.db.run(
@@ -1540,6 +1550,7 @@ export class Projector {
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, NULL)`,
       id, d.kind, str(d.fromSessionId), str(d.fromProjectId), str(d.toProjectId), to, ref, cut(plainLine(d.text), 200),
       note ? (to ? 'delivered' : 'queued') : 'answered', at, note && !to ? null : at, note ? null : at);
+    if (note && d.wantReply) this.upd('links', id, { want_reply: 1 });
     this.pushLink(id);
     return toLink(this.getLink(id));
   }
@@ -1565,6 +1576,8 @@ export class Projector {
     this.upd('links', l.id, { reply: cut(text, 500), ...(l.state !== 'answered' ? { state: 'answered', answered_at: at } : {}) });
     this.pushLink(l.id);
     if (!first) return;
+    // the coordinator is told of a reply only when it asked (ask:true), or when delivery failed; the dashboard shows the rest
+    if (this.getProject(l.from_project_id)?.coordinator && !l.want_reply && !failed(text)) return;
     const from = this.getSession(l.from_session_id);
     const sid = from && from.status !== 'ended' ? from.id : this.pickLive(l.from_project_id) || l.from_session_id;
     this.insertLinkNote(l.id, this.sessionLabel(n.session_id), `Reply to your note ${l.id} (\u201c${cut(l.text, 80)}\u201d): ${cut(text, 500)}`, sid, at);
@@ -1668,6 +1681,26 @@ export class Projector {
       return out;
     });
     this.db.run('UPDATE tasks SET choices = ?, updated_at = ? WHERE id = ?', JSON.stringify(list), ev.at, id);
+    this.pushTask(id);
+    return toTask(this.getTask(id));
+  }
+  /**
+   * hub.task.move { id, from, to }: the card goes to another project (id, notes, links, diffs kept; children and dependsOn untouched).
+   * It lands at the end of its column; a session of another project is dropped; a held Start follows it.
+   */
+  hTaskMove(ev) {
+    const { id, to } = ev.data;
+    const t = this.getTask(id);
+    if (!t) throw new Error('task not found');
+    if (!this.getProject(to)) throw new Error('project not found');
+    const s = t.session_id ? this.getSession(t.session_id) : null;
+    this.db.run('UPDATE tasks SET project_id = ?, ord = ?, session_id = ?, updated_at = MAX(updated_at, ?) WHERE id = ?',
+      to, this.endOrder(to, t.status), s && s.project_id === to ? t.session_id : null, ev.at, id);
+    if (t.start_note_id) {
+      this.db.run(`UPDATE notes SET target_id = ? WHERE id = ? AND target_kind = 'project' AND state = 'queued'`, to, t.start_note_id);
+      this.pushNote(t.start_note_id);
+    }
+    this.indexTask(this.getTask(id));
     this.pushTask(id);
     return toTask(this.getTask(id));
   }

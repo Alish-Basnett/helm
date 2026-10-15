@@ -950,3 +950,10 @@ html.float-gesture, html.float-gesture * { user-select: none !important; -webkit
 .prestart-confirm-q { font-size: 12px; color: var(--label-2); }
 .prestart-del-yes { color: var(--red); }
 .prestart-note .note-edit { min-height: 40px; }
+
+/* v0.28: where a Start goes, and moving a card */
+.sheet-start .start-label { max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sheet-project { display: flex; align-items: center; gap: 8px; }
+.sheet-project-name { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sheet-project .btn { margin-left: auto; }
+.md-card select.select { width: 100%; }

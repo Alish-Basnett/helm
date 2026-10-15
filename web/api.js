@@ -43,6 +43,8 @@ export const api = {
   join: (sessionId, projectId) => request('POST', `/v1/sessions/${enc(sessionId)}/join`, { projectId }),
   createTask: (body) => request('POST', '/v1/tasks', body),
   startTask: (id) => request('POST', `/v1/tasks/${enc(id)}/start`),
+  startTarget: (id) => request('GET', `/v1/tasks/${enc(id)}/start-target`),
+  moveTask: (id, projectId) => request('POST', `/v1/tasks/${enc(id)}/move`, { projectId }),
   cancelStart: (id) => request('POST', `/v1/tasks/${enc(id)}/start/cancel`),
   resumeTask: (id) => request('POST', `/v1/tasks/${enc(id)}/resume`),
   applyChoices: (id, picked, start, extra = {}) => request('POST', `/v1/tasks/${enc(id)}/choices/apply`, { picked, start: !!start, ...extra }),

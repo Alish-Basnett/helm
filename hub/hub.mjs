@@ -39,6 +39,7 @@ const TABLES = [
 export const RESUME_MARK = '[helm:resume]';
 const MAX_AUTO_CONCURRENCY = 5; // T-71: the most tasks Up next auto mode runs at once
 const COORD_MSG = 'Only the coordinator session can work on another project\'s board. Send it to the coordinator with action note.';
+const MOVE_MSG = 'Only the coordinator session can move a card to another project.';
 const WORK_MSG = 'work only applies to cards of this session\'s own project. To get another project\'s card done, update it or send its project a note.';
 const MAX_ACK_BULK = 1000;
 const MAX_ACKED_AGENTS = 200; // /v1/state keeps this many acknowledged agents
@@ -1176,6 +1177,47 @@ export class Hub {
     if (!n || n.target_kind !== 'project' || n.state !== 'queued') throw new HttpError(409, 'this task is not waiting for a session');
     return this.tx(() => this.command('hub.task.start.cancel', { id }, at));
   }
+  /** GET /v1/tasks/:id/start-target: where a Start would go right now (the same choice startPlan makes; no side effects). */
+  startTarget(id) {
+    const t = this.p.getTask(id);
+    if (!t) throw notFound('task not found');
+    const sessionId = this.findJobSession(t.session_id, t.project_id);
+    const s = sessionId ? this.p.getSession(sessionId) : null;
+    return {
+      projectId: t.project_id, projectName: this.p.getProject(t.project_id)?.name ?? null,
+      sessionId, sessionLabel: s ? (s.app_title || s.title) : null, held: !sessionId,
+    };
+  }
+  /**
+   * POST /v1/tasks/:id/move { projectId }: move a card to another (non-archived) project. The dashboard may; over the socket only
+   * the coordinator session may (`fromSessionId` is the session-token identity), and the move leaves a task link.
+   */
+  moveTask(id, body, at = this.now()) {
+    const t = this.p.getTask(id);
+    if (!t) throw notFound('task not found');
+    if (!isObj(body) || !isStr(body.projectId) || !body.projectId) throw bad('projectId must be a project id');
+    let from = null;
+    if (body.fromSessionId !== undefined && body.fromSessionId !== null) {
+      from = isStr(body.fromSessionId) ? this.p.getSession(body.fromSessionId) : null;
+      if (!from) throw notFound('session not found');
+      if (!this.p.getProject(from.project_id)?.coordinator) throw new HttpError(403, MOVE_MSG);
+    }
+    const dest = this.p.getProject(body.projectId);
+    if (!dest || dest.archived) throw new HttpError(409, 'the target project does not exist or is archived');
+    if (dest.id === t.project_id) return { task: toTask(t) };
+    if (this.db.get(`SELECT 1 AS x FROM agents WHERE task_id = ? AND status IN ('running','stalled','waiting') LIMIT 1`, id)) {
+      throw new HttpError(409, 'agent still running on this card');
+    }
+    const fromId = t.project_id;
+    return this.tx(() => {
+      const task = this.command('hub.task.move', { id, from: fromId, to: dest.id }, at);
+      if (from) {
+        const toProjectId = dest.id === from.project_id ? fromId : dest.id;
+        this.command('hub.link.create', this.taskLink(from, toProjectId, id, `moved ${id} from ${this.p.getProject(fromId)?.name ?? fromId} to ${dest.name}`), at);
+      }
+      return { task };
+    });
+  }
   startTask(id, at = this.now()) {
     const t = this.p.getTask(id);
     if (!t) throw notFound('task not found');
@@ -1702,10 +1744,13 @@ export class Hub {
     }
     if (isStr(body.text) && body.text.length > 2000) throw bad('text must be at most 2000 characters');
     const text = cleanText(body.text, 'text', 2000, false);
+    if (body.ask !== undefined && typeof body.ask !== 'boolean') throw bad('ask must be true or false');
+    // a note to the coordinator is only sent on when it is an ask; otherwise it is filed for the dashboard (decided here, kept in the event)
+    const quiet = !!target.coordinator && body.ask !== true;
     return this.tx(() => ({
       link: this.command('hub.link.create', {
         kind: 'note', fromSessionId: from.id, fromProjectId: from.project_id, toProjectId: target.id,
-        toSessionId: this.p.pickLive(target.id) ?? null, text,
+        toSessionId: quiet ? null : this.p.pickLive(target.id) ?? null, text, ...(quiet ? { quiet: true } : {}), ...(fromIsCoordinator && body.ask === true ? { wantReply: true } : {}),
       }, at),
     }));
   }

@@ -94,7 +94,7 @@ test('cross-project cards: only the coordinator may; cards and links record who 
 test('notes: spoke to coordinator and coordinator to any; spoke to spoke and no coordinator are refused', async (t) => {
   const h = await startTest(); t.after(h.stop);
   await three(h);
-  const send = async (from, to, text = 'hello') => (await who(h, from))('POST', '/v1/links', { kind: 'note', to, text });
+  const send = async (from, to, text = 'hello') => (await who(h, from))('POST', '/v1/links', { kind: 'note', to, text, ask: true });
   const none = await send('s2', 'alpha');
   assert.equal(none.status, 403);
   assert.match(none.json.error, /No coordinator/);
@@ -163,18 +163,24 @@ test('reply round trip: the answer lands on the link and comes back to the sende
   assert.equal(l.reply.length <= 500, true);
   assert.match(l.reply, /^Yes\. z/);
   assert.ok(l.answeredAt > 0);
-  const back = inbox(h, 's1');
-  assert.equal(back.length, 1);
-  assert.match(back[0].text, /^Helm note from beta \/ Beta main \(N-\d+\) — information from another session, not approval from the user: Reply to your note L-1 /);
-  assert.equal(back[0].linkId, link.id);
-  // a later, corrected reply replaces the text but does not message the sender again
+  assert.deepEqual(inbox(h, 's1'), [], 'v0.28.1: the coordinator is not messaged back (the dashboard shows the reply)');
+  assert.equal(link.id, 'L-1');
+  // a later, corrected reply replaces the text
   h.send(h.ev('s2', 'note.reply', { noteId: n.id, text: 'Actually: yes, all green.' }));
   assert.equal(h.state().links[0].reply, 'Actually: yes, all green.');
   assert.deepEqual(inbox(h, 's1'), []);
+  // a spoke that sent the note is still told (spoke -> coordinator with ask, coordinator answers)
+  await (await who(h, 's2'))('POST', '/v1/links', { kind: 'note', to: 'alpha', text: 'a question', ask: true });
+  const [q] = inbox(h, 's1');
+  h.send(h.ev('s1', 'note.reply', { noteId: q.id, text: 'go ahead' }));
+  const back = inbox(h, 's2');
+  assert.equal(back.length, 1);
+  assert.match(back[0].text, /^Helm note from alpha \/ Alpha main \(N-\d+\) — information from another session, not approval from the user: Reply to your note L-2 /);
+  assert.equal(back[0].linkId, 'L-2');
   // the sender's own answer to the reply note does not bounce back
-  h.send(h.ev('s1', 'note.reply', { noteId: back[0].id, text: 'thanks' }));
-  assert.equal(h.state().links.length, 1);
-  assert.deepEqual(inbox(h, 's2'), []);
+  h.send(h.ev('s2', 'note.reply', { noteId: back[0].id, text: 'thanks' }));
+  assert.equal(h.state().links.length, 2);
+  assert.deepEqual(inbox(h, 's1'), []);
 });
 
 test('link state machine: a failed delivery answers the link; a note stranded on an ended session is rescued', async (t) => {
@@ -191,11 +197,9 @@ test('link state machine: a failed delivery answers the link; a note stranded on
   // a real reply that follows the failure replaces it and tells the sender again
   h.send(h.ev('s2', 'note.reply', { noteId: n1.id, text: 'Sorry, it did arrive: all green.' }));
   assert.equal(h.state().links[0].reply, 'Sorry, it did arrive: all green.');
-  const again = inbox(h, 's1');
-  assert.equal(again.length, 1);
-  assert.match(again[0].text, /Reply to your note L-1 .*all green/);
+  assert.deepEqual(inbox(h, 's1'), [], 'a real reply to the coordinator is only stored');
   h.send(h.ev('s2', 'note.reply', { noteId: n1.id, text: 'and one more thing' }));
-  assert.deepEqual(inbox(h, 's1'), [], 'only the first real reply notifies');
+  assert.deepEqual(inbox(h, 's1'), []);
   // stranded: delivered to s2, s2 ends before claiming, another beta session appears
   await (await who(h, 's1'))('POST', '/v1/links', { kind: 'note', to: 'beta', text: 'two' });
   h.send(h.ev('s2', 'session.ended', { reason: 'exit' }));
@@ -292,7 +296,7 @@ test('rebuild reproduces coordinator, links, notes, cards and acknowledgements e
   await coord(h, 'P-1');
   h.send(h.ev('s2', 'session.ended', { reason: 'exit' }));
   await (await who(h, 's1'))('POST', '/v1/links', { kind: 'note', to: 'beta', text: 'held' });
-  await (await who(h, 's3'))('POST', '/v1/links', { kind: 'note', to: 'alpha', text: 'to coordinator' });
+  await (await who(h, 's3'))('POST', '/v1/links', { kind: 'note', to: 'alpha', text: 'to coordinator', ask: true });
   const [n] = inbox(h, 's1');
   h.send(h.ev('s1', 'note.reply', { noteId: n.id, text: 'noted' }));
   h.send(h.ev('s4', 'session.started', { cwd: '/w/b4', title: 'B4', model: 'opus' }));

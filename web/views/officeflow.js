@@ -415,7 +415,7 @@ export function mount(container) {
             chip(LINK_STATE_LABEL[L.state] || L.state, L.state === 'answered' ? 'green' : L.state === 'queued' ? 'orange' : 'accent'),
             it.needsOk ? chip('Needs OK', 'purple') : null, it.archived ? chip('Archived', 'gray') : null,
             h('span', { class: 'of-bl-t mono' }, fmtAgo(L.createdAt))),
-          h('div', { class: 'of-bl-text', title: L.text || '' }, truncate(L.text || '—', 140)),
+          h('div', { class: 'of-bl-text', title: L.text || '' }, L.text || '—'),
           L.reply ? h('div', { class: 'of-bl-reply' }, `Reply: ${truncate(L.reply, 100)}`) : null,
           ackBtn || task ? h('div', { class: 'of-actions' }, task, ackBtn) : null);
       }));
