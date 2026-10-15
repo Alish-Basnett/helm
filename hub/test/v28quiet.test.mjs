@@ -61,7 +61,7 @@ test('notes between non-coordinator senders and targets behave as before', async
   const h = await startTest(); t.after(h.stop);
   await three(h);
   assert.equal((await note(h, 's2', 'gamma', 'x', { ask: true })).status, 403, 'spoke to spoke is still refused');
-  const c = await note(h, 's1', 'gamma', 'ping', { ask: true });
+  const c = await note(h, 's1', 'gamma', 'ping');
   assert.equal(c.json.link.state, 'delivered', 'ask is ignored for a non-coordinator target');
   const [n] = inbox(h, 's3');
   h.send(h.ev('s3', 'note.reply', { noteId: n.id, text: 'pong' }));
@@ -109,4 +109,53 @@ test('ask must be a boolean', async (t) => {
     assert.equal(r.status, 400, JSON.stringify(ask));
   }
   assert.equal(h.state().links.length, 0);
+});
+
+test('a filed note keeps its full text; a delivered link text stays cut at 200', async (t) => {
+  const h = await startTest(); t.after(h.stop);
+  await three(h);
+  const long = 'word '.repeat(380).trim();
+  const q = await note(h, 's2', 'alpha', long);
+  assert.equal(q.json.link.text, long);
+  assert.equal(h.state().links[0].text.length, long.length);
+  const d = await note(h, 's2', 'alpha', long, { ask: true });
+  assert.equal(d.json.link.text.length, 200);
+});
+
+test('a coordinator note with ask:true gets its reply injected; without ask it does not', async (t) => {
+  const h = await startTest(); t.after(h.stop);
+  await three(h);
+  const a = await note(h, 's1', 'beta', 'do you have the answer?', { ask: true });
+  assert.equal(a.json.link.state, 'delivered');
+  const [n] = inbox(h, 's2');
+  h.send(h.ev('s2', 'note.reply', { noteId: n.id, text: 'yes, 42' }));
+  const back = inbox(h, 's1');
+  assert.equal(back.length, 1);
+  assert.match(back[0].text, /Reply to your note L-1 .*yes, 42/);
+  await note(h, 's1', 'gamma', 'fyi only');
+  const [m] = inbox(h, 's3');
+  h.send(h.ev('s3', 'note.reply', { noteId: m.id, text: 'ok' }));
+  assert.deepEqual(inbox(h, 's1'), []);
+  assert.equal(h.state().links[1].reply, 'ok');
+  // a spoke's ask:true does not set wantReply (the coordinator never replies-to-itself path)
+  assert.equal((await note(h, 's2', 'alpha', 'q', { ask: true })).status, 201);
+});
+
+test('rebuild reproduces want_reply and the full filed text exactly', async (t) => {
+  const h = await startTest(); t.after(h.stop);
+  await three(h);
+  await note(h, 's1', 'beta', 'wanted', { ask: true });
+  await note(h, 's1', 'gamma', 'not wanted');
+  await note(h, 's2', 'alpha', 'long '.repeat(300));
+  for (const [sid, id] of [['s2', 's2'], ['s3', 's3']]) {
+    const [n] = inbox(h, sid);
+    h.send(h.ev(sid, 'note.reply', { noteId: n.id, text: 'r' }));
+  }
+  const before = h.hub.dump();
+  const stateBefore = h.state();
+  assert.deepEqual(before.links.map((l) => l.want_reply ?? null), [1, null, null]);
+  h.hub.rebuild();
+  assert.deepEqual(h.hub.dump(), before);
+  assert.deepEqual({ ...h.state(), seq: 0 }, { ...stateBefore, seq: 0 });
+  assert.equal(inbox(h, 's1').length, 1, 'only the wanted reply was injected');
 });

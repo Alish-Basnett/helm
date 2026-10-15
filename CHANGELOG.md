@@ -11,7 +11,8 @@ All notable changes to Helm are recorded here. The format follows
 ### Changed
 
 - The coordinator session is no longer woken by every note and reply. `POST /v1/links` takes an optional boolean `ask` (anything else is 400). A spoke's note to the coordinator project without `ask: true` is filed in the dashboard only: the link is born `answered` with a fixed reply, `refId` null, and no session note is made. With `ask: true` it is delivered as before. Notes to other projects are unchanged.
-- Replies to a note the coordinator sent are stored on the link but no longer injected back into the coordinator's inbox (a `Not delivered:` reply still is).
+- Replies to a note the coordinator sent are stored on the link but injected back into the coordinator's inbox only when the coordinator sent that note with `ask: true` (`links.want_reply`, event field `wantReply`); a `Not delivered:` reply is always injected.
+- A filed (quiet) note keeps its full text (up to 2000 characters) in `links.text`; the dashboard's link panel shows it in full, scrolling when long.
 - The task tool's `note` action gains `ask`; the injected guidance tells spokes to use it only for cross-platform asks, blockers and decisions, and not to send FYIs or acknowledgements.
 
 ## [0.28.0] - 2026-10-15

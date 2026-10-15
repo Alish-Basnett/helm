@@ -370,6 +370,7 @@ export class Db {
         if (f) this.raw.prepare('UPDATE projects SET folder = ? WHERE id = ?').run(f, p.id);
       }
     }
+    if (!has('links', 'want_reply')) this.raw.exec('ALTER TABLE links ADD COLUMN want_reply INTEGER'); // v0.28.1: the coordinator asked for the answer back
     if (!has('sessions', 'app_title')) this.raw.exec('ALTER TABLE sessions ADD COLUMN app_title TEXT');
     if (!has('sessions', 'app_session_id')) this.raw.exec('ALTER TABLE sessions ADD COLUMN app_session_id TEXT');
     this.raw.exec('CREATE INDEX IF NOT EXISTS projects_folder ON projects(folder)');

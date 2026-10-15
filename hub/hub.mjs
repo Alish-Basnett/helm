@@ -1750,7 +1750,7 @@ export class Hub {
     return this.tx(() => ({
       link: this.command('hub.link.create', {
         kind: 'note', fromSessionId: from.id, fromProjectId: from.project_id, toProjectId: target.id,
-        toSessionId: quiet ? null : this.p.pickLive(target.id) ?? null, text, ...(quiet ? { quiet: true } : {}),
+        toSessionId: quiet ? null : this.p.pickLive(target.id) ?? null, text, ...(quiet ? { quiet: true } : {}), ...(fromIsCoordinator && body.ask === true ? { wantReply: true } : {}),
       }, at),
     }));
   }

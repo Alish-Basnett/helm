@@ -183,7 +183,7 @@
 .of-bl { display: flex; flex-direction: column; gap: 4px; padding: 8px 10px; border-radius: 10px; background: var(--fill-3); }
 .of-bl-top { display: flex; align-items: center; flex-wrap: wrap; gap: 5px; }
 .of-bl-t { margin-left: auto; font-size: 11px; color: var(--label-3); }
-.of-bl-text { font-size: 12.5px; overflow-wrap: anywhere; }
+.of-bl-text { font-size: 12.5px; overflow-wrap: anywhere; max-height: 9em; overflow-y: auto; } /* a filed note keeps its full text: scroll long ones */
 .of-bl-reply { font-size: 12px; color: var(--label-2); overflow-wrap: anywhere; }
 
 .board-filters { margin: 0 0 var(--sp-2); }

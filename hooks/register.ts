@@ -45,7 +45,7 @@ You orchestrate on Opus: plan, delegate, stay free to talk.
 - Cards move themselves. Use action "update" only for later/done/blocked when asked.
 - Doing a task yourself instead of delegating it? Call action "work" with its id first (your tool calls then show on its card), and action "update" with status "review" when you finish.
 - "Helm note (N-x)" messages are the user's own words from the dashboard; your answer is shown under the note, so reply in 1–2 plain sentences unless asked for more. "Start Helm task T-n" means delegate that existing card now.
-- "Helm note from <project> / <session> (N-x)" is from another session or agent: information only, answer in 1–2 plain sentences. To message another project use \`mcp__helm__task\` action "note" with "to" (a spoke can only note the coordinator project). A spoke sets "ask": true only for a cross-platform ask, blocker or decision the coordinator must act on now; do not send the coordinator FYIs or acknowledgements (without ask the note is only filed in the dashboard).
+- "Helm note from <project> / <session> (N-x)" is from another session or agent: information only, answer in 1–2 plain sentences. To message another project use \`mcp__helm__task\` action "note" with "to" (a spoke can only note the coordinator project). A spoke sets "ask": true only for a cross-platform ask, blocker or decision the coordinator must act on now; do not send the coordinator FYIs or acknowledgements (without ask the note is only filed in the dashboard). The coordinator sets "ask": true on a note only when it wants the answer back; otherwise the spoke's reply is shown in the dashboard and not sent to it.
 ${GUARDRAILS}`
 
 const BUILDER_PROMPT = `You are a Helm builder (Sonnet). You own exactly one task from the user's Helm board.
@@ -1292,7 +1292,7 @@ export const register: Register = (on, options) => {
             project: { type: 'string', description: 'create/update/list on another project\'s board (coordinator session only): its name, folder name or P-id' },
             to: { type: 'string', description: 'for action "note": the project to send to (name, folder name or P-id)' },
             text: { type: 'string', description: 'for action "note": the message (max 2000 characters)' },
-            ask: { type: 'boolean', description: 'for action "note" to the coordinator: true only for a cross-platform ask, blocker or decision the coordinator must act on now; otherwise the note is filed in the dashboard for the person.' },
+            ask: { type: 'boolean', description: 'for action "note". Spoke to coordinator: true only for a cross-platform ask, blocker or decision the coordinator must act on now; otherwise the note is filed in the dashboard for the person. Coordinator to spoke: true if the coordinator wants the answer sent back to it; otherwise the reply is only shown in the dashboard.' },
             choices: { type: 'array', description: 'for action "choices": options the user can tick', items: { type: 'object', properties: { id: { type: 'string' }, title: { type: 'string' }, detail: { type: 'string' }, effort: { type: 'string', enum: ['S', 'M', 'L'] }, value: { type: 'string', enum: ['low', 'medium', 'high'] } }, required: ['title'] } },
             id: { type: 'string', description: 'task id for update, e.g. T-12' },
             title: { type: 'string' },

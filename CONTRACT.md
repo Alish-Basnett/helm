@@ -1161,5 +1161,6 @@ Cards imported by owner could land in the wrong project, and a Start's destinati
 
 - **`ask`.** `POST /v1/links { kind: 'note', to, text, ask? }`: `ask` is an optional boolean (anything else is 400 `ask must be true or false`). The hub decides `quiet = target is the coordinator project && ask !== true` and records `quiet: true` in `hub.link.create` (replay never re-decides). Notes to non-coordinator projects ignore `ask`.
 - **Quiet note.** No session note is created. The link is `kind: 'note'`, `refId: null`, `state: 'answered'`, `toSessionId: null`, `reply: 'Filed for the dashboard: not sent to the coordinator session (no ask).'`, `deliveredAt = answeredAt = createdAt`. `deliverLinks` ignores it (it is not `queued`).
-- **Replies to the coordinator.** When the link's sender project is the coordinator, `note.reply` still stores `reply` on the link but no "Reply to your note" note is sent back. A reply starting `Not delivered:` is still sent.
+- **Replies to the coordinator.** When the link's sender project is the coordinator, `note.reply` stores `reply` on the link and sends a "Reply to your note" note back only if the coordinator sent the note with `ask: true` (`hub.link.create` carries `wantReply: true`; column `links.want_reply INTEGER`, additive). A reply starting `Not delivered:` is always sent.
+- **Filed text.** For a quiet link `links.text` is the whole message (`plainLine`, up to 2000 characters); other links keep the 200-character cut.
 - **Mod.** The task tool's `note` action takes `ask` (boolean) and forwards it only when `true`.
