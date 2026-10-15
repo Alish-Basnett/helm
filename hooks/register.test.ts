@@ -2276,6 +2276,17 @@ describe('v0.26 note action', () => {
     expect(q.result).toContain('waits for the first one that starts')
   })
 
+  test('forwards ask only when it is true', async ($, on) => {
+    const w = await boot($, on)
+    await call($, { to: 'coord', text: 'blocked on the shared table', ask: true })
+    expect(w.hub.calls.filter(c => c.path === '/v1/links').at(-1)!.body).toEqual({ kind: 'note', to: 'coord', text: 'blocked on the shared table', ask: true })
+    await call($, { to: 'coord', text: 'fyi', ask: false })
+    expect(w.hub.calls.filter(c => c.path === '/v1/links').at(-1)!.body).toEqual({ kind: 'note', to: 'coord', text: 'fyi' })
+    w.hub.state.noteState = 'answered'
+    const filed: any = await call($, { to: 'coord', text: 'fyi' })
+    expect(filed.result).toContain('filed in the dashboard')
+  })
+
   test('validates to and text, caps the length, redacts, and passes a hub refusal on as written', async ($, on) => {
     const w = await boot($, on)
     expect(((await call($, { text: 'x' })) as any).deny).toContain('needs "to"')

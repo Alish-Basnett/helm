@@ -1744,10 +1744,13 @@ export class Hub {
     }
     if (isStr(body.text) && body.text.length > 2000) throw bad('text must be at most 2000 characters');
     const text = cleanText(body.text, 'text', 2000, false);
+    if (body.ask !== undefined && typeof body.ask !== 'boolean') throw bad('ask must be true or false');
+    // a note to the coordinator is only sent on when it is an ask; otherwise it is filed for the dashboard (decided here, kept in the event)
+    const quiet = !!target.coordinator && body.ask !== true;
     return this.tx(() => ({
       link: this.command('hub.link.create', {
         kind: 'note', fromSessionId: from.id, fromProjectId: from.project_id, toProjectId: target.id,
-        toSessionId: this.p.pickLive(target.id) ?? null, text,
+        toSessionId: quiet ? null : this.p.pickLive(target.id) ?? null, text, ...(quiet ? { quiet: true } : {}),
       }, at),
     }));
   }

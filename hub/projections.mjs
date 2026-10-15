@@ -1534,6 +1534,15 @@ export class Projector {
   hLinkCreate(ev) {
     const d = ev.data, at = ev.at, id = this.nextId('L');
     const note = d.kind === 'note';
+    if (note && d.quiet) { // filed for the dashboard: no session note, born answered
+      this.db.run(
+        `INSERT INTO links(id, kind, from_session_id, from_project_id, to_project_id, to_session_id, ref_id, text, state, reply, created_at, delivered_at, answered_at, acknowledged_at)
+         VALUES (?, 'note', ?, ?, ?, NULL, NULL, ?, 'answered', ?, ?, ?, ?, NULL)`,
+        id, str(d.fromSessionId), str(d.fromProjectId), str(d.toProjectId), cut(plainLine(d.text), 200),
+        'Filed for the dashboard: not sent to the coordinator session (no ask).', at, at, at);
+      this.pushLink(id);
+      return toLink(this.getLink(id));
+    }
     const to = note ? d.toSessionId || null : null;
     const ref = note ? this.insertLinkNote(id, this.sessionLabel(d.fromSessionId), str(d.text), to, at) : str(d.refId) || null;
     this.db.run(
@@ -1566,6 +1575,8 @@ export class Projector {
     this.upd('links', l.id, { reply: cut(text, 500), ...(l.state !== 'answered' ? { state: 'answered', answered_at: at } : {}) });
     this.pushLink(l.id);
     if (!first) return;
+    // the coordinator is not told about replies to its notes (the dashboard shows them), except a failed delivery
+    if (this.getProject(l.from_project_id)?.coordinator && !failed(text)) return;
     const from = this.getSession(l.from_session_id);
     const sid = from && from.status !== 'ended' ? from.id : this.pickLive(l.from_project_id) || l.from_session_id;
     this.insertLinkNote(l.id, this.sessionLabel(n.session_id), `Reply to your note ${l.id} (\u201c${cut(l.text, 80)}\u201d): ${cut(text, 500)}`, sid, at);
