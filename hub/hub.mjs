@@ -1729,7 +1729,7 @@ export class Hub {
       // Start / Resume notes held for a project with no live session. The choice (session, and whether it is a task note)
       // is made here, once, and recorded in the event: replay never re-decides.
       const starts = this.db.all(
-        `SELECT n.id, n.text, n.target_id AS project_id, t.id AS task_id FROM notes n JOIN tasks t ON t.start_note_id = n.id
+        `SELECT n.id, n.text, t.project_id, t.id AS task_id FROM notes n JOIN tasks t ON t.start_note_id = n.id
           WHERE n.target_kind = 'project' AND n.state = 'queued' ORDER BY n.rowid`);
       for (const n of starts) {
         const sessionId = this.findJobSession(null, n.project_id);
