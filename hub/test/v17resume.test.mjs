@@ -5,7 +5,7 @@ import { startTest } from './helpers.mjs';
 
 async function setup(h, extra = {}) {
   h.send(h.ev('s1', 'session.started', { cwd: '/w/p', title: 'Main', model: 'm' }));
-  const pid = (await h.api('POST', '/v1/projects', { name: 'P' })).json.project.id;
+  const pid = h.state().projects[0].id; // the session's own project: a Start never leaves it
   const task = (await h.api('POST', '/v1/tasks', { projectId: pid, title: 'Stopped one', description: 'The brief', status: 'in_progress', ...extra })).json.task;
   return { pid, task };
 }

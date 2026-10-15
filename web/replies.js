@@ -6,7 +6,8 @@ import { state, sel } from './store.js';
 import { setMarkdown } from './markdown.js';
 import { taskLinker } from './tasklinks.js';
 import { modelInfo, fmtAgo } from './format.js';
-import { startTask } from './actions.js';
+import { startTask, cancelStart } from './actions.js';
+import { isHeldStart, waitingText } from './startqueue.js';
 
 export const REPLY_WAIT_MS = 15 * 60 * 1000;
 export const COLLAPSE_LINES = 8;
@@ -151,6 +152,7 @@ export function startInfo(task) {
   const id = String(task.startNoteId);
   const note = state.notes.get(id) || null;
   if (!note) return id.startsWith('tmp-') ? { phase: 'starting', note: null } : null;
+  if (isHeldStart(note)) return { phase: 'waiting', note, text: waitingText(sel.projectName(task.projectId)) };
   if (note.state === 'queued' || note.state === 'sending' || note.state === 'draft') return { phase: 'starting', note };
   if (note.state === 'failed') return { phase: 'failed', note, error: note.error || '' };
   return { phase: 'sent', note };
@@ -164,7 +166,8 @@ export function createStartStatus({ full = false } = {}) {
   let taskId = null;
   const text = h('span', { class: 'ss-text' });
   const retry = h('button', { class: 'link-btn ss-retry', type: 'button', hidden: true, onclick: (e) => { e.stopPropagation(); if (taskId) startTask(taskId); } }, 'Retry');
-  const line = h('div', { class: 'ss-line' }, h('span', { class: 'ss-icon' }), text, retry);
+  const cancel = h('button', { class: 'link-btn ss-retry', type: 'button', hidden: true, onclick: (e) => { e.stopPropagation(); if (taskId) cancelStart(taskId); } }, 'Cancel');
+  const line = h('div', { class: 'ss-line' }, h('span', { class: 'ss-icon' }), text, retry, cancel);
   const reply = full ? createReply() : null;
   const compact = full ? null : h('div', { class: 'ss-reply', hidden: true });
   const wait = createWaitLine();
@@ -176,10 +179,11 @@ export function createStartStatus({ full = false } = {}) {
     if (!info) return;
     el.className = `start-status ss-${info.phase}`;
     const ic = line.firstChild;
-    const want = info.phase === 'sent' ? 'checkCircle' : info.phase === 'failed' ? 'warning' : 'play';
+    const want = info.phase === 'sent' ? 'checkCircle' : info.phase === 'failed' ? 'warning' : info.phase === 'waiting' ? 'clock' : 'play';
     if (ic.__k !== want) { ic.__k = want; ic.textContent = ''; ic.append(icon(want, 13)); }
-    setText(text, info.phase === 'starting' ? 'Starting…' : info.phase === 'sent' ? 'Sent to session' : `Couldn’t send${info.error ? `: ${info.error}` : ''}`);
+    setText(text, info.phase === 'waiting' ? info.text : info.phase === 'starting' ? 'Starting…' : info.phase === 'sent' ? 'Sent to session' : `Couldn’t send${info.error ? `: ${info.error}` : ''}`);
     setHidden(retry, info.phase !== 'failed');
+    setHidden(cancel, info.phase !== 'waiting');
     const n = info.note;
     if (reply) reply.update(info.phase === 'sent' ? n : null);
     else {

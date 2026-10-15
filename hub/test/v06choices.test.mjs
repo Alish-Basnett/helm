@@ -78,16 +78,15 @@ test('apply with start queues a start note per task and moves them to next', asy
   assert.ok(r.json.tasks.every((x) => x.startNoteId));
 });
 
-test('a 409 on start is captured in errors; the task is still created and the batch succeeds', async (t) => {
+test('a 409 on start is captured in errors; with no live session the start is held, not an error', async (t) => {
   const h = await startTest(); t.after(h.stop);
   const { t: pt } = await setup(h, { live: false }); // no live session anywhere
   const r = await h.api('POST', `/v1/tasks/${pt.id}/choices/apply`, { picked: ['a', 'b'], start: true });
   assert.equal(r.status, 200);
   assert.equal(r.json.tasks.length, 2);
-  assert.equal(r.json.errors.length, 2);
-  assert.equal(r.json.errors[0].status, 409);
-  assert.equal(r.json.errors[0].choiceId, 'a');
-  assert.deepEqual(r.json.tasks.map((x) => x.status), ['backlog', 'backlog']);
+  assert.equal(r.json.errors.length, 0);
+  assert.deepEqual(r.json.tasks.map((x) => x.status), ['next', 'next']);
+  assert.deepEqual(h.state().notes.map((n) => [n.target.kind, n.state]), [['project', 'queued'], ['project', 'queued']]);
   assert.equal(r.json.choices.filter((c) => c.state === 'picked').length, 2);
 });
 

@@ -66,15 +66,16 @@ test('start: queued session note with the exact text, task -> next, startNoteId,
     assert.equal((await h.api('POST', '/v1/tasks/T-1/start')).status, code, st);
   }
   assert.equal((await h.api('POST', '/v1/tasks/T-99/start')).status, 404);
-  // no live session -> 409 and nothing changes
+  // no live session -> the Start is held for the project (see v0.27.1 tests), not refused
   await h.api('PATCH', '/v1/tasks/T-1', { status: 'backlog' });
   const before = h.state().notes.length;
   h.send(h.ev('s1', 'session.ended', { reason: 'x' }));
   const none = await h.api('POST', '/v1/tasks/T-1/start');
-  assert.equal(none.status, 409);
-  assert.equal(none.json.error, 'no live session');
-  assert.equal(h.state().notes.length, before);
-  assert.equal(task(h, 'T-1').status, 'backlog');
+  assert.equal(none.status, 200);
+  assert.equal(none.json.note.state, 'queued');
+  assert.equal(none.json.note.sessionId, '');
+  assert.equal(h.state().notes.length, before + 1);
+  assert.equal(task(h, 'T-1').status, 'next');
   void p;
 });
 
@@ -90,7 +91,7 @@ test('start picks the session by the job rule: task session, else project newest
   assert.equal((await h.api('POST', `/v1/tasks/${t1.id}/start`)).json.note.sessionId, 'b');
 });
 
-test('create with start: one call creates + starts; still creates when there is no live session', async (t) => {
+test('create with start: one call creates + starts; queues the start when there is no live session', async (t) => {
   const h = await startTest(); t.after(h.stop);
   await world(h);
   const pid = h.state().sessions[0].projectId;
@@ -114,10 +115,11 @@ test('create with start: one call creates + starts; still creates when there is 
   const notes = h.state().notes.length;
   const none = await h.api('POST', '/v1/tasks', { projectId: pid, title: 'Orphan', start: true });
   assert.equal(none.status, 201);
-  assert.equal(none.json.error, 'no live session');
-  assert.equal(none.json.note, undefined);
-  assert.equal(none.json.task.status, 'backlog');
-  assert.equal(h.state().notes.length, notes);
+  assert.equal(none.json.error, undefined);
+  assert.equal(none.json.note.state, 'queued');
+  assert.deepEqual(none.json.note.target, { kind: 'project', id: pid });
+  assert.equal(none.json.task.status, 'next');
+  assert.equal(h.state().notes.length, notes + 1);
   assert.ok(task(h, none.json.task.id));
 });
 

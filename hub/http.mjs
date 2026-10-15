@@ -176,6 +176,7 @@ route('POST', '/v1/tasks/:id/push', async ({ hub, params, json }) => hub.pushBra
 route('POST', '/v1/tasks/:id/pr', async ({ hub, params, json }) => hub.linkPr(params.id, await json()));
 route('POST', '/v1/tasks/:id/ci/refresh', ({ hub, params }) => hub.refreshCi(params.id));
 route('POST', '/v1/tasks/:id/start', ({ hub, params }) => hub.startTask(params.id));
+route('POST', '/v1/tasks/:id/start/cancel', ({ hub, params }) => hub.cancelStart(params.id));
 route('POST', '/v1/tasks/:id/resume', ({ hub, params }) => hub.resumeTask(params.id));
 route('POST', '/v1/tasks/:id/choices/apply', async ({ hub, params, json }) => hub.applyChoices(params.id, await json()));
 route('POST', '/v1/tasks/:id/choices/reset', ({ hub, params }) => hub.resetChoices(params.id));

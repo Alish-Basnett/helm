@@ -3,6 +3,7 @@ import { api } from './api.js';
 import { state, upsert, remove, sel } from './store.js';
 import { toast, toastError } from './ui.js';
 import { splitAckBody } from './retire.js';
+import { isHeldStart, waitingText } from './startqueue.js';
 
 let tmpCounter = 0;
 const tmpId = (p) => `tmp-${p}-${Date.now().toString(36)}${++tmpCounter}`;
@@ -343,11 +344,25 @@ export async function startTask(id) {
     const res = await (isInterrupted(before) ? api.resumeTask(id) : api.startTask(id));
     if (res && res.note) upsert('note', res.note);
     if (res && res.task) upsert('task', res.task);
+    if (res && isHeldStart(res.note)) toast(waitingText(sel.projectName(before.projectId)), { kind: 'success', action: { label: 'Cancel', onClick: () => cancelStart(id) } });
     return res;
   } catch (e) {
     if (state.tasks.get(id) === optimistic) upsert('task', before);
     folded.forEach((n) => upsert('note', n));
     toast(startErrorMessage(e), { kind: 'error' });
+    return null;
+  }
+}
+
+/** Drop a Start that is still waiting for a session: the card goes back to the backlog. */
+export async function cancelStart(id) {
+  try {
+    const res = await api.cancelStart(id);
+    if (res && res.note) upsert('note', res.note);
+    if (res && res.task) upsert('task', res.task);
+    return res;
+  } catch (e) {
+    toastError(e, 'Could not cancel the start');
     return null;
   }
 }
@@ -363,7 +378,10 @@ export async function applyChoices(taskId, picked, start, extra = {}) {
     if (parent && res.choices) upsert('task', { ...parent, choices: res.choices });
     const n = (res.tasks || []).length;
     const errs = res.errors || [];
-    if (errs.length) {
+    const held = (res.tasks || []).filter((x) => isHeldStart(state.notes.get(String(x.startNoteId)))).length;
+    if (start && held && !errs.length) {
+      toast(`Created ${n} task${n === 1 ? '' : 's'}; ${waitingText(sel.projectName(parent && parent.projectId)).toLowerCase()}`, { kind: 'success' });
+    } else if (errs.length) {
       toast(`Created ${n} task${n === 1 ? '' : 's'}; ${errs.length} not started: ${startErrorMessage({ status: errs[0].status, message: errs[0].error })}`, { kind: 'error' });
     } else {
       toast(start ? `Created and started ${n} task${n === 1 ? '' : 's'}` : `Created ${n} task${n === 1 ? '' : 's'}`, { kind: 'success' });

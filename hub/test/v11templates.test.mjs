@@ -110,30 +110,27 @@ test('use: vars fill title and description, missing vars fall back to the name, 
   assert.equal((await h.api('POST', '/v1/templates/TT-99/use', { projectId: pid })).status, 404);
 });
 
-test('use with start: a queued start note carries the rendered brief; no live session is a 409 that creates nothing', async (t) => {
+test('use with start: a queued start note carries the rendered brief; no live session holds the start for the project', async (t) => {
   const { h, pid } = await setup({ session: false }); t.after(h.stop);
   const tpl = (await h.api('POST', '/v1/templates', {
     name: 'Tests', title: 'Add tests for {{module}}', description: 'Cover it', agent: 'scout', checks: ['npm test passes'],
   })).json.template;
-  const tasksBefore = h.state().tasks.length;
   const no = await h.api('POST', `/v1/templates/${tpl.id}/use`, { projectId: pid, vars: { module: 'db' }, start: true });
-  assert.equal(no.status, 409);
-  assert.deepEqual(no.json, { error: 'no live session' });
-  assert.equal(h.state().tasks.length, tasksBefore, 'nothing created');
-  assert.equal(h.state().templates[0].usage, 0, 'usage unchanged');
-  assert.equal(h.state().notes.length, 0);
-  // the counter was rolled back too: the next task is still T-1
+  assert.equal(no.status, 201, no.text);
+  assert.equal(no.json.task.status, 'next');
+  assert.deepEqual(no.json.note.target, { kind: 'project', id: pid }, 'held for the project');
+  assert.equal(no.json.template.usage, 1);
   h.send(h.ev('s1', 'session.started', { cwd: '/w/proj', title: 'Main', model: 'm' }));
   const pid2 = h.state().projects.find((p) => p.name === 'proj').id;
   const ok = await h.api('POST', `/v1/templates/${tpl.id}/use`, { projectId: pid2, vars: { module: 'db' }, start: true });
   assert.equal(ok.status, 201, ok.text);
-  assert.equal(ok.json.task.id, 'T-1');
+  assert.equal(ok.json.task.id, 'T-2');
   assert.equal(ok.json.task.status, 'next');
   assert.equal(ok.json.note.state, 'queued');
   assert.equal(ok.json.task.startNoteId, ok.json.note.id);
-  assert.match(ok.json.note.text, /Start Helm task T-1 “Add tests for db”/);
+  assert.match(ok.json.note.text, /Start Helm task T-2 “Add tests for db”/);
   assert.match(ok.json.note.text, /Cover it\n\nChecks:\n- npm test passes\n\nPreferred agent: helm:scout/);
-  assert.equal(ok.json.template.usage, 1);
+  assert.equal(ok.json.template.usage, 2);
 });
 
 test('scope: GET ?projectId= returns global plus that project; a project template cannot be used elsewhere', async (t) => {

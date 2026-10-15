@@ -6,6 +6,13 @@ All notable changes to Helm are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.27.1] - 2026-10-15
+
+### Fixed
+
+- A Start (or Resume, create-with-start, template use, Choices start) could land in another project's session. With no live session in the task's project the job picker fell back to "any active session": on 15 Oct, Start on a Trips card (T-66, no `session_id`) right after an app restart was delivered to the Client session. The picker now never leaves the task's project (a task `session_id` from another project is ignored too).
+- With no live session in the project the Start is no longer refused (409): it is held as a `queued` note targeted at the project and handed to the first session that starts or joins it (`hub.task.start.deliver`, decided at delivery and recorded, so rebuilds are exact). The card shows "Queued - waiting for a <project> session" with a Cancel (`POST /v1/tasks/:id/start/cancel`, `hub.task.start.cancel`). A newer Start supersedes a held one; auto-start never holds. Between live sessions of a project an idle one is preferred over a busy one.
+
 ## [0.27.0] - 2026-10-15
 
 ### Added
