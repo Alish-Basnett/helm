@@ -215,3 +215,22 @@ test('a card with a running, stalled or waiting agent cannot be moved (409); a f
   assert.equal((await mv(h, c.id, gamma)).status, 200);
   rebuildSame(h);
 });
+
+// The mod's `task list` (no `project`, or its own) asks for exactly this: the whole project, archived left out.
+test('GET /v1/tasks?projectId=&status=: a spoke list sees coordinator-created, session-less and moved-in cards, never archived ones', async (t) => {
+  const h = await startTest(); t.after(h.stop);
+  const { beta, gamma } = await world(h);
+  const S = await who(h, 'sA');
+  const made = (await S('POST', '/v1/tasks', { projectId: beta, title: 'coordinator made it' })).json.task;
+  assert.equal(made.sessionId, null, 'session_id is NULL, as with imported cards');
+  const own = await mk(h, beta, { sessionId: 'sB', title: 'spoke made it' });
+  const moved = await mk(h, gamma, { title: 'moved in' });
+  await mv(h, moved.id, beta);
+  const gone = await mk(h, beta, { title: 'archived one' });
+  await h.api('PATCH', `/v1/tasks/${gone.id}`, { status: 'archived' });
+  const elsewhere = await mk(h, gamma, { title: 'other board' });
+  const statuses = 'backlog,next,in_progress,review,done,later,blocked';
+  const ids = (await h.get(`/v1/tasks?projectId=${beta}&status=${statuses}`)).json.tasks.map((x) => x.id);
+  assert.deepEqual(ids.sort(), [made.id, own.id, moved.id].sort());
+  assert.ok(!ids.includes(gone.id) && !ids.includes(elsewhere.id));
+});

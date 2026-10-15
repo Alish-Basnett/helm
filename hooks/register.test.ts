@@ -71,7 +71,11 @@ function fakeHub(sessionId: string, opts: HubOpts = {}) {
       return json({ link: { id: 'L-1', toProjectId: 'P-9', state: state.noteState } }, 201)
     }
     if (method === 'POST' && path === `/v1/sessions/${sessionId}/coordinator`) return json({ project: { id: 'P-1', name: 'proj', coordinator: body.on } })
-    if (method === 'GET' && path.startsWith('/v1/tasks?projectId=')) return json({ tasks: tasks.filter(t => t.projectId === decodeURIComponent(path.split('=')[1]!)) })
+    if (method === 'GET' && path.startsWith('/v1/tasks?projectId=')) {
+      const q = new URLSearchParams(path.split('?')[1])
+      const st = q.get('status')?.split(',')
+      return json({ tasks: tasks.filter(t => t.projectId === q.get('projectId') && (!st || st.includes(t.status))) })
+    }
     if (method === 'GET' && path.startsWith('/v1/tasks?')) return json({ tasks })
     if (method === 'POST' && path === '/v1/tasks') {
       const task = { id: 'T-42', status: body.status, title: body.title, projectId: body.projectId }
@@ -610,10 +614,25 @@ describe('mcp__helm__task tool', () => {
   })
 
   test('list returns one line per task, or a placeholder', async ($, on) => {
-    const w = await boot($, on, { tasks: [{ id: 'T-1', title: 'First', status: 'review' }] })
+    const w = await boot($, on, { tasks: [{ id: 'T-1', title: 'First', status: 'review', projectId: 'P-1' }] })
     const r: any = await $.tool.call({ tool: 'mcp__helm__task', action: 'list', tool_use_id: 'tu-list' } as any)
     expect(r.result).toBe('T-1 [review] First')
     w.hub.calls.length = 0
+  })
+
+  test('list with no project arg shows the whole own project: cards of any creator or none, not archived, in board order', async ($, on) => {
+    const w = await boot($, on, { projects: [{ id: 'P-1', name: 'proj' }], tasks: [
+      { id: 'T-1', title: 'Imported by the coordinator', status: 'backlog', projectId: 'P-1', sessionId: null },
+      { id: 'T-2', title: 'Done one', status: 'done', projectId: 'P-1', sessionId: 'someone-else' },
+      { id: 'T-3', title: 'Mine', status: 'next', projectId: 'P-1', sessionId: 'mine' },
+      { id: 'T-4', title: 'Archived', status: 'archived', projectId: 'P-1' },
+      { id: 'T-5', title: 'Other board', status: 'next', projectId: 'P-2' },
+    ] })
+    const r: any = await $.tool.call({ tool: 'mcp__helm__task', action: 'list', tool_use_id: 'tu-list2' } as any)
+    expect(r.result).toBe('T-1 [backlog] Imported by the coordinator\nT-3 [next] Mine\nT-2 [done] Done one')
+    expect(w.hub.calls.some(c => c.path.startsWith('/v1/tasks?projectId=P-1&'))).toBe(true)
+    const named: any = await $.tool.call({ tool: 'mcp__helm__task', action: 'list', project: 'P-1', tool_use_id: 'tu-list3' } as any)
+    expect(named.result).toBe(r.result) // naming its own project is the same list, not a narrower one
   })
 
   test('the task tool itself is not reported as tool.called', async ($, on) => {
@@ -2172,7 +2191,7 @@ describe('v0.26 coordinator and cross-project task tool', () => {
     expect(w.hub.calls.find(c => c.method === 'PATCH' && c.path === '/v1/tasks/T-7')!.body).toEqual({ status: 'review' })
     const l: any = await call($, { action: 'list', project: 'beta' })
     expect(l.result).toContain('T-7 [review] beta card')
-    expect(w.hub.calls.some(c => c.path === '/v1/tasks?projectId=P-2')).toBe(true)
+    expect(w.hub.calls.some(c => c.path.startsWith('/v1/tasks?projectId=P-2&'))).toBe(true)
   })
 
   test('moveTo: the coordinator moves a card (alone, or with other fields); a spoke is refused before the hub is called', async ($, on) => {

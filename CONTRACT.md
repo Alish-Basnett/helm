@@ -134,7 +134,7 @@ A note still `sending` 10 min (`HELM_SENDING_MS`) after the mod claimed it (`sen
   `queued` notes to `sending` and returns them (oldest first).
 - `GET /v1/sessions/:id/agents` → `{ agents: Agent[] }` (reconciler compares against `$.agent.list()`).
 - `GET /v1/sessions/:id/project` → `{ project: Project }`.
-- `GET /v1/tasks?sessionId=&status=` → `{ tasks: Task[] }` (for the mod's `helm_task` tool).
+- `GET /v1/tasks?sessionId=&projectId=&status=` → `{ tasks: Task[] }` (`status` is a comma list). The mod's task tool `list` uses `projectId` (v0.28), never `sessionId`.
 
 ## Web / commands
 
@@ -1155,3 +1155,4 @@ Cards imported by owner could land in the wrong project, and a Start's destinati
 - **Mod.** `mcp__helm__task` action `update` takes `moveTo` (project name, folder name or P-id): coordinator session only (the mod refuses spokes before calling the hub; the hub enforces it too). With no other field the call only moves.
 - **Start target** `GET /v1/tasks/:id/start-target` -> `{ projectId, projectName, sessionId: string | null, sessionLabel: string | null, held: boolean }`. It uses the same `findJobSession` choice as Start / Resume (the card's own live session of its project, else the project's newest live session, idle before busy), `sessionLabel` = `appTitle || title`, `held` = no session (the Start would wait). No side effects, whatever the card's status.
 - **Web.** The Start button (card tooltip, card sheet label and tooltip) reads `Start in <project> · <session>` or `Start in <project> · will wait for a session`. Clicking Start asks first only when the Start will be held, or its project differs from the project the board shows (the scope, or a single project picked in the board filter); otherwise it starts directly. The card sheet shows `Project: <name>` with `Move to…` (non-archived projects, coordinator first, then by name; confirm in the dialog). Board cards wear a project chip whenever the visible cards span more than one project (not in the by-project grouping).
+- **`list` is project-wide (v0.28).** The task tool's `list` returns every non-archived card of the session's own project, whoever created it and whether or not it has a `session_id` (imported and coordinator-made cards have none), in board order (Backlog, Up next, In progress, Review, Done, Later, Blocked, then the hub's order within a column). Naming its own project is the same list; another project is the coordinator's only, as before. Before 0.28 the own-project list asked the hub for `sessionId=<this session>` and so showed only cards this session created or worked. There is no per-session view any more.

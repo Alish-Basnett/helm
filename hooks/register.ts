@@ -19,6 +19,7 @@ const MODEL_BY_TYPE: Record<string, string> = {
   'helm:builder': 'sonnet',
   'helm:scout': 'haiku',
 }
+const LIST_STATUSES = ['backlog', 'next', 'in_progress', 'review', 'done', 'later', 'blocked'] // the board's order; archived is left out
 const MOVE_MSG = 'Only the coordinator session can move a card to another project.'
 const COORD_MSG = 'Only the coordinator session can work on another project\'s board. Send it to the coordinator with action note.'
 const NOTE_MAX = 2000
@@ -1462,11 +1463,13 @@ export const register: Register = (on, options) => {
         return { result: `${task.id} → ${task.status}` }
       }
       if (a.action !== undefined && a.action !== 'list') return { deny: `Unknown Helm task action “${clip(a.action, 30)}”.` }
-      const { target, cross, own } = a.project ? await targetProject($, a.project) : { target: null, cross: false, own: null }
+      const { target, cross, own } = await targetProject($, a.project)
       if (cross && !own.coordinator) return { deny: COORD_MSG }
-      const { tasks } = await hub($, 'GET', cross ? `/v1/tasks?projectId=${encodeURIComponent(target!.id)}` : `/v1/tasks?sessionId=${encodeURIComponent(sessionId)}`)
+      // The whole board of the project (any creator, session_id or none), not archived, in board order: columns, then the hub's order.
+      const { tasks } = await hub($, 'GET', `/v1/tasks?projectId=${encodeURIComponent(target.id)}&status=${LIST_STATUSES.join(',')}`)
       const rows = (tasks as any[]).map(t => ({ id: t.id, title: t.title, status: t.status }))
-      return { result: rows.map(t => `${t.id} [${t.status}] ${t.title}`).join('\n') || (cross ? `No tasks in ${target!.name}.` : 'No tasks yet.') }
+        .map((t, i) => ({ t, i })).sort((x, y) => LIST_STATUSES.indexOf(x.t.status) - LIST_STATUSES.indexOf(y.t.status) || x.i - y.i).map(x => x.t)
+      return { result: rows.map(t => `${t.id} [${t.status}] ${t.title}`).join('\n') || (cross ? `No tasks in ${target.name}.` : 'No tasks yet.') }
     } catch (err) {
       const said = hubSaid(err)
       return { deny: said ?? `Helm hub unavailable: ${clip(String(err), 200)}` }

@@ -12,6 +12,7 @@ All notable changes to Helm are recorded here. The format follows
 
 - Move a card to another project: `POST /v1/tasks/:id/move { projectId }` (event `hub.task.move`, rebuild-exact). The card keeps its id, notes, links and diffs; its session is cleared if it is not in the target project; a held Start follows it; children are not moved; an archived or unknown target is 409. Allowed from the dashboard and, over the socket, only for the coordinator session (the move leaves a task link). The task tool's `update` gains `moveTo` for the coordinator.
 - `GET /v1/tasks/:id/start-target` answers where a Start would go right now (project, session, or held), with the same routing as Start. The Start button reads `Start in <project> · <session>` (or `will wait for a session`) and asks for confirmation only when the Start will be held or goes to a project other than the one on screen.
+- Fixed: the task tool's `list` showed a spoke only the cards tied to its own session (`hooks/register.ts`, `GET /v1/tasks?sessionId=`), hiding every card the coordinator imported or created on its project. It now lists every non-archived card of the session's project, in board order.
 - Card sheet shows `Project: <name>` with `Move to…`; board cards show a project chip whenever the board mixes projects.
 
 ## [0.27.2] - 2026-10-15
