@@ -3,7 +3,9 @@ import { h, setText, setAttr, setClass, setHidden, reconcile, startTicker } from
 import { icon } from '../icons.js';
 import { state, sel, subscribe, upsert, ingestActivity, setUI } from '../store.js';
 import { api } from '../api.js';
-import { patchTask, quickActions, runQuickAction, startTask, canStart, startDrafts, startLabel, isInterrupted } from '../actions.js';
+import { cachedStartTarget, openMoveDialog } from '../startdialogs.js';
+import { startTargetText } from '../startqueue.js';
+import { patchTask, moveTask, quickActions, runQuickAction, startTask, canStart, startDrafts, startLabel, isInterrupted } from '../actions.js';
 import { createPreStart } from '../prestart.js';
 import { createStartStatus } from '../replies.js';
 import { fmtTokens, fmtElapsed, fmtAgo, STATUS_META, ALL_STATUSES, agentLabel, truncate, cwdTail } from '../format.js';
@@ -67,6 +69,10 @@ export function createSheet(dock) {
     });
     c.blocked = h('div', { class: 'banner banner-red', role: 'status', hidden: true }, icon('blocked', 16), h('span', {}));
     c.startBtn = h('button', { class: 'btn btn-primary btn-sm sheet-start', type: 'button', hidden: true, title: 'Start this task in a live session', onclick: () => startTask(id) }, icon('play', 13), h('span', { class: 'start-label' }, 'Start'));
+    c.projName = h('span', { class: 'sheet-project-name' });
+    c.moveBtn = h('button', { class: 'btn btn-quiet btn-sm', type: 'button', title: 'Move this card to another project',
+      onclick: () => { const t = state.tasks.get(id); if (t) openMoveDialog(t, (pid) => moveTask(id, pid)); } }, 'Move to…');
+    c.projRow = h('section', { class: 'sheet-section sheet-project' }, h('span', { class: 'field-label' }, 'Project'), c.projName, c.moveBtn);
     c.prestart = createPreStart({ taskId: id });
     c.startStatus = createStartStatus({ full: true });
     // status control
@@ -129,7 +135,7 @@ export function createSheet(dock) {
       h('div', { class: 'sheet-head-top' }, c.id, c.pill, h('span', { class: 'spacer' }), c.startBtn, c.tplBtn, c.chatBtn, c.min, c.close),
       c.title);
     const body = h('div', { class: 'sheet-body' },
-      c.choices.el, c.blocked, c.startStatus.el, c.prestart.el,
+      c.choices.el, c.blocked, c.startStatus.el, c.prestart.el, c.projRow,
       h('section', { class: 'sheet-section status-row' }, h('label', { class: 'field-label' }, 'Status', c.select), c.quick),
       c.agentWrap, c.conflictsWrap, c.descWrap, c.recapWrap, c.files.el, c.git.el, c.depsWrap, c.tlWrap);
     sheet.append(head, body);
@@ -210,14 +216,17 @@ export function createSheet(dock) {
     setHidden(c.startBtn, !canStart(t));
     const nDrafts = startDrafts(t.id).length;
     const resuming = isInterrupted(t);
-    setText(c.startBtn.querySelector('.start-label'), startLabel(nDrafts, t));
+    const tg = canStart(t) ? cachedStartTarget(t, () => update()) : null; // v0.28: where this Start would go, as the hub routes it right now
+    setText(c.startBtn.querySelector('.start-label'), tg ? `${startTargetText(startLabel(0, t), tg)}${nDrafts ? ` +${nDrafts} note${nDrafts === 1 ? '' : 's'}` : ''}` : startLabel(nDrafts, t));
     if (c.startBtn.dataset.mode !== (resuming ? 'resume' : 'start')) {
       c.startBtn.dataset.mode = resuming ? 'resume' : 'start';
       const ni = icon(resuming ? 'replay' : 'play', 13);
       c.startBtn.replaceChild(ni, c.startBtn.firstChild);
     }
     const verb = resuming ? 'Resume' : 'Start';
-    c.startBtn.title = nDrafts ? `${verb} this task and send its ${nDrafts} draft note${nDrafts === 1 ? '' : 's'} with it`
+    setText(c.projName, sel.projectName(t.projectId));
+    setHidden(c.moveBtn, sel.projects().filter((p) => p.id !== t.projectId).length === 0);
+    c.startBtn.title = tg ? `${startTargetText(verb, tg)}${nDrafts ? `, with its ${nDrafts} draft note${nDrafts === 1 ? '' : 's'}` : ''}` : nDrafts ? `${verb} this task and send its ${nDrafts} draft note${nDrafts === 1 ? '' : 's'} with it`
       : resuming ? 'Its agent was stopped mid-task: resume it in a live session' : 'Start this task in a live session';
     c.startStatus.update(t);
 

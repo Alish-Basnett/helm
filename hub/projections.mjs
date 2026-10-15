@@ -699,6 +699,7 @@ export class Projector {
       case 'hub.session.join': return this.hSessionJoin(ev);
       case 'hub.task.create': return this.hTaskCreate(ev);
       case 'hub.task.update': return this.hTaskUpdate(ev);
+      case 'hub.task.move': return this.hTaskMove(ev);
       case 'hub.attachment.create': return this.hAttachmentCreate(ev);
       case 'hub.note.create': return this.hNoteCreate(ev);
       case 'hub.note.update': return this.hNoteUpdate(ev);
@@ -1668,6 +1669,26 @@ export class Projector {
       return out;
     });
     this.db.run('UPDATE tasks SET choices = ?, updated_at = ? WHERE id = ?', JSON.stringify(list), ev.at, id);
+    this.pushTask(id);
+    return toTask(this.getTask(id));
+  }
+  /**
+   * hub.task.move { id, from, to }: the card goes to another project (id, notes, links, diffs kept; children and dependsOn untouched).
+   * It lands at the end of its column; a session of another project is dropped; a held Start follows it.
+   */
+  hTaskMove(ev) {
+    const { id, to } = ev.data;
+    const t = this.getTask(id);
+    if (!t) throw new Error('task not found');
+    if (!this.getProject(to)) throw new Error('project not found');
+    const s = t.session_id ? this.getSession(t.session_id) : null;
+    this.db.run('UPDATE tasks SET project_id = ?, ord = ?, session_id = ?, updated_at = MAX(updated_at, ?) WHERE id = ?',
+      to, this.endOrder(to, t.status), s && s.project_id === to ? t.session_id : null, ev.at, id);
+    if (t.start_note_id) {
+      this.db.run(`UPDATE notes SET target_id = ? WHERE id = ? AND target_kind = 'project' AND state = 'queued'`, to, t.start_note_id);
+      this.pushNote(t.start_note_id);
+    }
+    this.indexTask(this.getTask(id));
     this.pushTask(id);
     return toTask(this.getTask(id));
   }

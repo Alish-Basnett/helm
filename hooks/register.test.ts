@@ -78,6 +78,14 @@ function fakeHub(sessionId: string, opts: HubOpts = {}) {
       tasks.push(task)
       return json({ task })
     }
+    const move = path.match(/^\/v1\/tasks\/(T-\d+)\/move$/)
+    if (method === 'POST' && move) {
+      const t = tasks.find(x => x.id === move[1])
+      if (!t) return json({ error: 'not found' }, 404)
+      if (!opts.project?.coordinator) return json({ error: 'Only the coordinator session can move a card to another project.' }, 403)
+      t.projectId = body.projectId
+      return json({ task: t })
+    }
     const patch = path.match(/^\/v1\/tasks\/(T-\d+)$/)
     if (method === 'PATCH' && patch) {
       const t = tasks.find(x => x.id === patch[1])
@@ -2165,6 +2173,24 @@ describe('v0.26 coordinator and cross-project task tool', () => {
     const l: any = await call($, { action: 'list', project: 'beta' })
     expect(l.result).toContain('T-7 [review] beta card')
     expect(w.hub.calls.some(c => c.path === '/v1/tasks?projectId=P-2')).toBe(true)
+  })
+
+  test('moveTo: the coordinator moves a card (alone, or with other fields); a spoke is refused before the hub is called', async ($, on) => {
+    const w = await boot($, on, { projects, project: { id: 'P-1', name: 'proj', coordinator: true }, tasks: [{ id: 'T-7', title: 'beta card', status: 'next', projectId: 'P-2' }] })
+    const m: any = await call($, { action: 'update', id: 'T-7', moveTo: 'gamma' })
+    expect(m.result).toBe('T-7 moved to gamma')
+    expect(w.hub.calls.find(c => c.method === 'POST' && c.path === '/v1/tasks/T-7/move')!.body).toEqual({ projectId: 'P-3' })
+    expect(w.hub.calls.filter(c => c.method === 'PATCH')).toHaveLength(0)
+    const both: any = await call($, { action: 'update', id: 'T-7', moveTo: 'P-2', status: 'review', project: 'gamma' })
+    expect(both.result).toBe('T-7 → review')
+    expect(w.hub.tasks[0].projectId).toBe('P-2')
+  })
+
+  test('moveTo from a spoke is denied and nothing is sent', async ($, on) => {
+    const w = await boot($, on, { projects: [{ id: 'P-1', name: 'proj' }, ...projects], tasks: [{ id: 'T-7', title: 'own card', status: 'next', projectId: 'P-1' }] })
+    const r: any = await call($, { action: 'update', id: 'T-7', moveTo: 'beta' })
+    expect(r.deny).toBe('Only the coordinator session can move a card to another project.')
+    expect(w.hub.calls.filter(c => /\/move$/.test(c.path))).toHaveLength(0)
   })
 
   test('work on another project\'s card is refused for a spoke and tags nothing', async ($, on) => {

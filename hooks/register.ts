@@ -19,6 +19,7 @@ const MODEL_BY_TYPE: Record<string, string> = {
   'helm:builder': 'sonnet',
   'helm:scout': 'haiku',
 }
+const MOVE_MSG = 'Only the coordinator session can move a card to another project.'
 const COORD_MSG = 'Only the coordinator session can work on another project\'s board. Send it to the coordinator with action note.'
 const NOTE_MAX = 2000
 const HUB_API = /helmd?\.sock|(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?\/v1\//i
@@ -453,7 +454,7 @@ async function hub($: any, method: string, path: string, body?: unknown, timeout
 function hubSaid(err: unknown): string | null {
   // Only refusals the caller can act on: a 403, or a project / note that could not be resolved. Anything else stays "hub unavailable".
   const m = String(err).match(/^Error: hub \w+ (\S+) → (4\d\d) .*?"error":"((?:[^"\\]|\\.)*)/)
-  return m && (m[2] === '403' || /^\/v1\/(projects\/resolve|links)/.test(m[1]!)) ? m[3]!.replace(/\\"/g, '"') : null
+  return m && (m[2] === '403' || /^\/v1\/(projects\/resolve|links|tasks\/[^/]+\/move)/.test(m[1]!)) ? m[3]!.replace(/\\"/g, '"') : null
 }
 
 /** This session's project, and the project a task call names (its own when `ref` is empty). `cross` = another project's board. */
@@ -1296,6 +1297,7 @@ export const register: Register = (on, options) => {
             description: { type: 'string' },
             status: { type: 'string', enum: ['backlog', 'next', 'in_progress', 'review', 'done', 'later', 'blocked'] },
             dependsOn: { type: 'array', items: { type: 'string' } },
+            moveTo: { type: 'string', description: 'for action "update" (coordinator session only): move the card to this project (name, folder name or P-id)' },
           },
           required: ['action'],
         },
@@ -1448,6 +1450,12 @@ export const register: Register = (on, options) => {
         if (a.project) {
           const { own, cross } = await targetProject($, a.project)
           if (cross && !own.coordinator) return { deny: COORD_MSG }
+        }
+        if (a.moveTo) {
+          const { own, target } = await targetProject($, a.moveTo)
+          if (!own.coordinator) return { deny: MOVE_MSG }
+          await hub($, 'POST', `/v1/tasks/${encodeURIComponent(String(a.id))}/move`, { projectId: target.id })
+          if (!Object.keys(patch).length) return { result: `${a.id} moved to ${target.name}` }
         }
         const { task } = await hub($, 'PATCH', `/v1/tasks/${encodeURIComponent(String(a.id))}`, patch)
         if (mainTaskId === task.id && task.status !== 'in_progress') await setMainTask($, null)
