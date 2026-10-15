@@ -6,6 +6,20 @@ All notable changes to Helm are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.27.0] - 2026-10-15
+
+### Added
+
+- One project per folder. `projects.folder` (additive; `Project.folder`) is the session's resolved folder (symlinks resolved, no trailing slash, a git worktree or `.claude/worktrees/<name>` mapped to its main repo). A `session.started` joins the newest non-archived project with that folder (several: the coordinator, else the newest with a live session, else the newest) and creates one only when there is none. The hub decides at ingest and records `folder` and `joinProjectId` in the event, so replay never touches the disk or re-decides; events from before 0.27 still create a project each. Existing projects get their folder from their first session (one-time migration, and the same rule on replay).
+- Project archive, web only (dashboard cookie, 403 over the socket): `POST /v1/projects/:id/archive`, `/unarchive`, bulk `POST /v1/projects/archive { ids }` -> `{ archived, refused }`. The coordinator project and a project with a live session are refused (409). Nothing inside is deleted.
+- `POST /v1/projects/:id/merge-into/:target` (web only): moves the source's cards (ids kept), sessions, links and docs into the target and archives the source (`hub.project.archive`, `hub.project.unarchive`, `hub.project.merge`; replays exactly).
+- `GET /v1/projects/duplicates`: non-archived projects that share a folder, with live/ended session and card counts, for a clean-up prompt.
+- App session titles: `Session.appTitle` and `appSessionId` from the desktop app's `claude-code-sessions/**/local_*.json` (read only; `HELM_APP_SESSIONS_DIR`; watcher plus 60 s rescan; event `hub.session.title`).
+- `GET /v1/projects/duplicates` adds `recommendedKeep`; a new session in a folder with duplicates joins coordinator > most open cards > live session > newest.
+- Review fixes: a hand-made folder-less project with the folder's name is joined and adopts the folder; merge gives a folder-less target the source's folder, answers and acknowledges the links it turns into self-links, and is a no-op when repeated; legacy project folders are resolved at boot (`hub.project.folder`); joining an archived project is 409; app-title scans are cached and collapse duplicate files per session; `resolveFolder` needs an absolute path; the workflow tick skips archived projects.
+- `PATCH /v1/projects/:id { archived }` is human only and refuses the coordinator and live-session projects like `/archive`.
+- Bulk `POST /v1/ack` is tested at the 1000-id cap (one transaction).
+
 ## [0.26.0] - 2026-10-15
 
 ### Added

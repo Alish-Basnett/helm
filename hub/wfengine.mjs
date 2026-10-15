@@ -453,7 +453,7 @@ export class WfEngine {
   tick(now = this.now()) {
     if (this.ticking || this.hub.closed || this.hub.replaying) return;
     const drafts = this.pendingDrafts();
-    const live = this.db.all(`SELECT id FROM runs WHERE status IN ('running','waiting','paused') ORDER BY rowid`);
+    const live = this.db.all(`SELECT id FROM runs WHERE status IN ('running','waiting','paused') AND project_id NOT IN (SELECT id FROM projects WHERE archived = 1) ORDER BY rowid`);
     if (!live.length && !drafts.length) return;
     this.ticking = true;
     try {

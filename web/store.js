@@ -2,6 +2,8 @@
 import { api } from './api.js';
 import { frameBatch } from './dom.js';
 import { startOfToday } from './format.js';
+import { retiredSessionIds, oldProjectIds } from './retire.js';
+import { buildModel } from './officemodel.js';
 
 export function lsGet(key, fallback = null) {
   try { const v = localStorage.getItem(key); return v == null ? fallback : v; } catch { return fallback; }
@@ -18,6 +20,13 @@ const KEYS = {
   concept: 'concepts', // v0.13: keyed by slug (normalizeRow mirrors it into `id`)
   link: 'links', // Office flow: session-to-session notes and tasks (a hub without them sends no `links`)
 };
+
+/** "Show old (N)" toggles: one flag per picker, remembered in localStorage. */
+const oldOn = new Map();
+export function showOld(name) {
+  if (!oldOn.has(name)) oldOn.set(name, lsGet(`helm.old.${name}`) === '1');
+  return oldOn.get(name);
+}
 
 export const state = {
   projects: new Map(),
@@ -173,6 +182,12 @@ export function ingestActivity(rows, live = false) {
   if (added) mark('activity');
 }
 
+export function setShowOld(name, on) {
+  oldOn.set(name, !!on);
+  lsSet(`helm.old.${name}`, on ? '1' : '0');
+  mark('ui');
+}
+
 export function setUI(patch) {
   Object.assign(state.ui, patch);
   if ('projectId' in patch) lsSet('helm.project', patch.projectId);
@@ -231,11 +246,38 @@ export const sel = {
   projectName: (id) => (state.projects.get(id) || {}).name || '—',
   inScope(row) { return state.ui.projectId === 'all' || row.projectId === state.ui.projectId; },
   scopeProject() { return state.ui.projectId === 'all' ? null : state.projects.get(state.ui.projectId) || null; },
-  sessions() {
-    return Array.from(state.sessions.values());
+  /* ----- old stuff: ONE definition, used by every view and picker ----- */
+  /** Ids of retired sessions: ended AND (acknowledged, or in an archived project, or in a project with a newer non-archived sibling for the same folder). */
+  retiredIds() {
+    return memoize('retired', ['session', 'project'], () => retiredSessionIds(Array.from(state.sessions.values()), Array.from(state.projects.values())));
   },
-  scopedSessions() {
-    return sel.sessions().filter(sel.inScope);
+  oldProjectIds() {
+    return memoize('oldProjects', ['project'], () => oldProjectIds(Array.from(state.projects.values())));
+  },
+  isRetired(s) { return !!s && sel.retiredIds().has(s.id); },
+  /** Old = retired (retire.js): only an ended session is ever old; an active or idle one always shows. */
+  isOld(s) { return !!s && sel.retiredIds().has(s.id); },
+  /** Every session, retired ones included (telemetry, lookups). */
+  allSessions() { return Array.from(state.sessions.values()); },
+  /** Sessions without the old ones, unless `old` (a picker's "Show old" toggle). */
+  sessions(old = false) {
+    return old ? sel.allSessions() : sel.allSessions().filter((s) => !sel.isOld(s));
+  },
+  scopedSessions(old = false) {
+    return sel.sessions(old).filter(sel.inScope);
+  },
+  /** How many in-scope sessions "Show old" would add. */
+  oldSessionCount() {
+    return sel.allSessions().filter((s) => sel.isOld(s) && sel.inScope(s)).length;
+  },
+  /** Projects that are archived (the project pickers' "Show old"). */
+  archivedProjects() { return Array.from(state.projects.values()).filter((p) => p.archived).sort(byCreated); },
+  /** Everything that is finished and waits for the owner's OK, in every project, hidden old things included. */
+  pendingAck() {
+    return memoize('pendingAck', ['session', 'agent', 'link', 'project'], () => buildModel({
+      projects: Array.from(state.projects.values()), sessions: Array.from(state.sessions.values()), agents: Array.from(state.agents.values()),
+      links: Array.from(state.links.values()), caps: state.caps, now: Date.now(),
+    }).pending);
   },
   agentsOfSession(sid) {
     const idx = memoize('agentsBySession', ['agent'], () => {
@@ -296,16 +338,17 @@ export const sel = {
 
   /* ----- v0.2: questions inbox ----- */
   questionProject(q) { const s = state.sessions.get(q.sessionId); return s ? s.projectId : null; },
+  questionIsOld(q) { return sel.isRetired(state.sessions.get(q.sessionId)); },
   questionInScope(q) { return state.ui.projectId === 'all' || sel.questionProject(q) === state.ui.projectId; },
   /** Open questions, newest first. */
-  openQuestions(scoped = true) {
+  openQuestions(scoped = true, old = false) {
     return Array.from(state.questions.values())
-      .filter((q) => q.state === 'open' && (!scoped || sel.questionInScope(q)))
+      .filter((q) => q.state === 'open' && (!scoped || sel.questionInScope(q)) && (old || !sel.questionIsOld(q)))
       .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
   },
-  answeredQuestions(scoped = true) {
+  answeredQuestions(scoped = true, old = false) {
     return Array.from(state.questions.values())
-      .filter((q) => q.state === 'answered' && (!scoped || sel.questionInScope(q)))
+      .filter((q) => q.state === 'answered' && (!scoped || sel.questionInScope(q)) && (old || !sel.questionIsOld(q)))
       .sort((a, b) => (b.answeredAt || b.createdAt || 0) - (a.answeredAt || a.createdAt || 0));
   },
   openQuestionForAgent(agentId) {
@@ -432,12 +475,12 @@ export const sel = {
   },
   /* ----- v0.3: Talk ----- */
   /** Sessions you can talk to: active and idle, in the current project scope, most recently seen first. */
-  talkSessions() {
-    return sel.scopedSessions().filter((x) => x.status === 'active' || x.status === 'idle')
+  talkSessions(old = false) {
+    return sel.scopedSessions(old).filter((x) => x.status === 'active' || x.status === 'idle')
       .sort((a, b) => (b.lastSeenAt || 0) - (a.lastSeenAt || 0));
   },
   telemetry() {
-    const sessions = sel.sessions();
+    const sessions = sel.allSessions(); // spend counts old sessions too
     const today = startOfToday();
     let active = 0, tokens = 0, agents = 0, cost = 0;
     for (const s of sessions) {

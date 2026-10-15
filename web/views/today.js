@@ -7,7 +7,7 @@ import { h, reconcile, setText, setClass, setHidden, startTicker } from '../dom.
 import { icon } from '../icons.js';
 import { state, sel, ingestActivity } from '../store.js';
 import { api } from '../api.js';
-import { fmtUsd, fmtUsdSmall, fmtTokens, cwdTail, agentLabel, truncate, modelInfo, plural } from '../format.js';
+import { fmtUsd, fmtUsdSmall, fmtTokens, cwdTail, agentLabel, truncate, modelInfo, plural, sessionLabel } from '../format.js';
 import { updateModelBadge, emptyState } from '../ui.js';
 import { openTask, navigate, setArgs, route } from '../router.js';
 import { bindTaskMenu } from '../taskmenu.js';
@@ -298,7 +298,7 @@ export function mount(container, initialRoute) {
       setClass(el, 'folded', !it.open);
       el.setAttribute('aria-expanded', String(it.open));
       r.dot.className = `pdot ${s.status}`;
-      setText(r.title, s.title || cwdTail(s.cwd) || s.id);
+      setText(r.title, sessionLabel(s));
       updateModelBadge(r.badge, s.model);
       const cost = Number(s.costUsd) || 0;
       const costTxt = day.isToday ? (cost ? `${fmtUsd(cost)} today` : '') : (cost ? `${fmtUsd(cost)} session total` : '');

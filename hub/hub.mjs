@@ -6,8 +6,9 @@ import { Db } from './db.mjs';
 import {
   Projector, HUB_SESSION, TASK_STATUSES, JOB_TIMEOUT_ERROR, JOB_UNCLAIMED_ERROR, cut, computeConflicts,
   localDate, usageSummary, usageBreakdown, usageToday, toAttachment, MAX_NOTE_ATTACHMENTS,
-  toProject, toSession, SESSION_SQL, computeHealth, HEALTH, costToday, toAgent, toTask, toNote, toActivity, toQuestion, toJob, toDigest, toLink,
+  UNASSIGNED, toProject, toSession, SESSION_SQL, computeHealth, HEALTH, costToday, toAgent, toTask, toNote, toActivity, toQuestion, toJob, toDigest, toLink,
 } from './projections.mjs';
+import { resolveFolder } from './folder.mjs';
 import { computeDiff, diffStat, deriveFiles, repoHead, within } from './diff.mjs';
 import { search as ftsSearch, learn as ftsLearn } from './search.mjs';
 import { WfEngine } from './wfengine.mjs';
@@ -176,6 +177,21 @@ export class Hub {
     return !t || t.project_id === s.project_id || !!this.p.getProject(s.project_id)?.coordinator;
   }
 
+  /**
+   * v0.27: a session.started that needs a project (new session, or a stub still in Unassigned) is recorded with the folder it
+   * resolved to and the project it joins (`joinProjectId`, null = create one). The mod's own values for both are discarded.
+   * Replay reads them back, so it never touches the disk or re-decides; events from before v0.27 have neither and create a project.
+   */
+  startDecision(ev) {
+    const { folder: _f, joinProjectId: _j, adoptFolder: _a, ...data } = ev.data;
+    const s = this.p.getSession(ev.sessionId), p = s && this.p.getProject(s.project_id);
+    if (typeof data.cwd !== 'string' || (s && !(!s.cwd && p && p.name === UNASSIGNED))) return data;
+    const folder = resolveFolder(data.cwd) ?? '';
+    if (!folder) return { ...data, folder };
+    const to = this.p.joinTarget(folder, data.cwd.split(/[\\/]+/).filter(Boolean).pop() ?? '');
+    return { ...data, folder, joinProjectId: to?.id ?? null, ...(to && !to.folder ? { adoptFolder: folder } : {}) };
+  }
+
   ingest(events, opts) {
     if (!Array.isArray(events)) throw bad('events must be an array');
     const now = this.now();
@@ -205,6 +221,7 @@ export class Hub {
           maxSeen.set(ev.sessionId,
             this.db.get('SELECT COALESCE(MAX(seq), -1) AS m FROM events WHERE session_id = ?', ev.sessionId).m);
         }
+        if (ev.type === 'session.started') ev.data = this.startDecision(ev);
         const r = this.db.run('INSERT OR IGNORE INTO events(session_id, seq, type, at, data) VALUES (?, ?, ?, ?, ?)',
           ev.sessionId, ev.seq, ev.type, ev.at, JSON.stringify(ev.data));
         if (r.changes === 0) { duplicates++; continue; }
@@ -1054,6 +1071,10 @@ export class Hub {
     if (body?.name !== undefined) data.name = cleanName(body.name);
     if (body?.archived !== undefined) {
       if (typeof body.archived !== 'boolean') throw bad('archived must be a boolean');
+      if (body.archived && !this.p.getProject(id).archived) {
+        const why = this.archiveBlock(id);
+        if (why) throw new HttpError(409, `cannot archive: ${why}`);
+      }
       data.archived = body.archived;
     }
     if (body?.autoStart !== undefined) {
@@ -1072,6 +1093,7 @@ export class Hub {
   joinSession(sessionId, body, at = this.now()) {
     if (!this.p.getSession(sessionId)) throw notFound('session not found');
     if (!isStr(body?.projectId) || !this.p.getProject(body.projectId)) throw notFound('project not found');
+    if (this.p.getProject(body.projectId).archived) throw new HttpError(409, 'cannot join an archived project');
     return this.tx(() => ({ session: this.command('hub.session.join', { sessionId, projectId: body.projectId }, at) }));
   }
   createTask(body, at = this.now()) {
@@ -1535,6 +1557,107 @@ export class Hub {
     if (!this.p.getProject(projectId)) throw notFound('project not found');
     if (typeof on !== 'boolean') throw bad('on must be a boolean');
     return this.tx(() => ({ project: this.command('hub.project.coordinator', { projectId, on }, at) }));
+  }
+  /** The reason a project cannot be archived or merged away, or null. Throws 404 when it does not exist. */
+  archiveBlock(id) {
+    const p = this.p.getProject(id);
+    if (!p) throw notFound('project not found');
+    if (p.coordinator) return 'the coordinator project cannot be archived';
+    const n = this.db.get(`SELECT COUNT(*) AS n FROM sessions WHERE project_id = ? AND status IN ('active','idle')`, id).n;
+    return n ? `${n} live session${n === 1 ? '' : 's'}` : null;
+  }
+  /** Human-only. Hide a project (nothing in it is deleted). 409 for the coordinator project or one with a live session. */
+  archiveProject(id, at = this.now()) {
+    if (this.p.getProject(id)?.archived) return { project: toProject(this.p.getProject(id)) };
+    const why = this.archiveBlock(id);
+    if (why) throw new HttpError(409, `cannot archive: ${why}`);
+    if (!this.p.getProject(id).archived) this.tx(() => this.command('hub.project.archive', { id }, at));
+    return { project: toProject(this.p.getProject(id)) };
+  }
+  unarchiveProject(id, at = this.now()) {
+    if (!this.p.getProject(id)) throw notFound('project not found');
+    if (this.p.getProject(id).archived) this.tx(() => this.command('hub.project.unarchive', { id }, at));
+    return { project: toProject(this.p.getProject(id)) };
+  }
+  /** POST /v1/projects/archive { ids }: archive what can be; the rest is listed in `refused` and never fails the batch. */
+  archiveProjects(body, at = this.now()) {
+    if (!isObj(body) || !Array.isArray(body.ids) || body.ids.some((x) => !isStr(x))) throw bad('body must be { ids: string[] }');
+    if (body.ids.length > MAX_ACK_BULK) throw bad(`at most ${MAX_ACK_BULK} ids per request`);
+    const archived = [], refused = [];
+    this.tx(() => {
+      for (const id of [...new Set(body.ids)]) {
+        let why;
+        try { why = this.p.getProject(id)?.archived ? null : this.archiveBlock(id); } catch (e) { if (e instanceof HttpError) why = e.message; else throw e; }
+        if (why) { refused.push({ id, reason: why }); continue; }
+        if (!this.p.getProject(id).archived) this.command('hub.project.archive', { id }, at);
+        archived.push(id);
+      }
+    });
+    return { archived, refused };
+  }
+  /** Human-only. Fold a project into another: its cards (ids kept), sessions, links and docs move, then it is archived. */
+  mergeProject(sourceId, targetId, at = this.now()) {
+    const src = this.p.getProject(sourceId), t = this.p.getProject(targetId);
+    if (!src) throw notFound('project not found');
+    if (!t) throw notFound('target project not found');
+    if (sourceId === targetId) throw bad('a project cannot be merged into itself');
+    const has = (table, ...cols) => this.db.get(`SELECT 1 AS x FROM ${table} WHERE ${cols.map((c) => `${c} = ?`).join(' OR ')} LIMIT 1`, ...cols.map(() => sourceId));
+    // merging again once everything has moved is a no-op (no event)
+    if (src.archived && !has('tasks', 'project_id') && !has('sessions', 'project_id') && !has('links', 'from_project_id', 'to_project_id') && !has('docs', 'project_id')) {
+      return { source: toProject(src), target: toProject(t), tasks: 0 };
+    }
+    const why = this.archiveBlock(sourceId);
+    if (why) throw new HttpError(409, `cannot merge: ${why}`);
+    if (t.archived) throw new HttpError(409, 'cannot merge: the target project is archived');
+    return this.tx(() => this.command('hub.project.merge', { sourceId, targetId }, at));
+  }
+  /** GET /v1/projects/duplicates: groups of non-archived projects that share a folder, with what each holds. */
+  duplicateProjects() {
+    const groups = new Map();
+    for (const p of this.db.all('SELECT * FROM projects WHERE archived = 0 AND folder IS NOT NULL ORDER BY rowid')) {
+      groups.set(p.folder, [...(groups.get(p.folder) ?? []), p]);
+    }
+    const count = (sql, id) => this.db.get(sql, id).n;
+    return {
+      groups: [...groups].filter(([, ps]) => ps.length > 1).map(([folder, ps]) => ({
+        folder,
+        suggestedTarget: this.p.joinTarget(folder).id,
+        recommendedKeep: this.p.joinTarget(folder).id,
+        projects: ps.map((p) => ({
+          ...toProject(p),
+          liveSessions: count(`SELECT COUNT(*) AS n FROM sessions WHERE project_id = ? AND status IN ('active','idle')`, p.id),
+          endedSessions: count(`SELECT COUNT(*) AS n FROM sessions WHERE project_id = ? AND status = 'ended'`, p.id),
+          tasks: count('SELECT COUNT(*) AS n FROM tasks WHERE project_id = ?', p.id),
+          openTasks: count(`SELECT COUNT(*) AS n FROM tasks WHERE project_id = ? AND status NOT IN ('done','archived')`, p.id),
+        })),
+      })),
+    };
+  }
+  /**
+   * At boot (never in a replay): a project whose stored folder is only the string-normalised cwd of its first session gets the
+   * resolved one (symlinks, worktrees) as a hub.project.folder event, so older projects match new sessions. Returns the ids changed.
+   */
+  refreshFolders(at = this.now()) {
+    if (this.replaying || this.closed) return [];
+    const out = [];
+    this.tx(() => {
+      for (const p of this.db.all('SELECT id, folder FROM projects WHERE folder IS NOT NULL ORDER BY rowid')) {
+        const s = this.db.get(`SELECT id, cwd FROM sessions WHERE project_id = ? AND cwd != '' ORDER BY rowid LIMIT 1`, p.id);
+        const first = s && this.db.get(`SELECT data FROM events WHERE session_id = ? AND type = 'session.started' ORDER BY id LIMIT 1`, s.id);
+        let cwd = s ? s.cwd : '';
+        try { const c = first && JSON.parse(first.data).cwd; if (typeof c === 'string' && c) cwd = c; } catch { /* keep the row's cwd */ }
+        const f = cwd && resolveFolder(cwd);
+        if (f && f !== p.folder) { this.command('hub.project.folder', { id: p.id, folder: f }, at); out.push(p.id); }
+      }
+    });
+    return out;
+  }
+  /** The desktop app's title for a known session. Records an event only when the title or app session id changed. Returns true when it did. */
+  setAppTitle(sessionId, title, appSessionId, at = this.now()) {
+    const s = this.p.getSession(sessionId);
+    if (!s || (s.app_title === title && (s.app_session_id ?? null) === (appSessionId ?? null))) return false;
+    this.tx(() => this.command('hub.session.title', { sessionId, title, appSessionId: appSessionId ?? null }, at));
+    return true;
   }
   /** Mod-only (the /helm coordinator command): the same, for the project of the session that typed it. */
   setSessionCoordinator(sessionId, on, at = this.now()) {

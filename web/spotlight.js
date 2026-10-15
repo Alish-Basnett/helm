@@ -7,7 +7,7 @@ import { setPref, codeOn } from './prefs.js';
 import { setStatus, startTask, canStart, setAutoStart, autoTarget } from './actions.js';
 import { navigate, openTask, route, setDiff } from './router.js';
 import { diffEntry, ensureDiff, onDiff, taskHasFiles } from './diffs.js';
-import { fmtAgo, truncate, STATUS_META } from './format.js';
+import { fmtAgo, truncate, STATUS_META, sessionLabel } from './format.js';
 import { templatesFor, openUseDialog, openTemplateEditor, agentLabel } from './templates.js';
 
 const KIND = {
@@ -247,7 +247,7 @@ export function createSpotlight(root) {
         for (const r of groups.get(k) || []) {
           items.push({
             ...r, kind: k, group: k,
-            title: r.title || r.id,
+            title: k === 'session' && state.sessions.get(r.sessionId || r.id) ? sessionLabel(state.sessions.get(r.sessionId || r.id)) : r.title || r.id,
             snippet: r.snippet || '',
             sub: [r.taskId && r.kind !== 'task' ? r.taskId : r.id, r.projectId ? sel.projectName(r.projectId) : ''].filter(Boolean).join(' · '),
             meta: r.at ? fmtAgo(r.at) : '',

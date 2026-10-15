@@ -6,6 +6,7 @@ import { createLogger } from './log.mjs';
 import { Hub } from './hub.mjs';
 import { createHandler } from './http.mjs';
 import { createRemote } from './remote.mjs';
+import { AppTitles } from './apptitles.mjs';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -138,6 +139,11 @@ export async function startHub(opts = {}) {
     gitTimer.unref?.();
   }
 
+  try { const f = hub.refreshFolders(); if (f.length) log.info(`folders resolved for ${f.join(', ')}`); } catch (e) { log.error('folder refresh failed', e); }
+  const appTitles = cfg.appSessionsDir ? new AppTitles({ dir: cfg.appSessionsDir, hub, log, debounceMs: cfg.appTitleDebounceMs, rescanMs: cfg.appTitleRescanMs }) : null;
+  if (appTitles) hub.appTitles = appTitles;
+  appTitles?.start();
+
   log.info(`helmd ready pid=${process.pid} tcp=${cfg.tcp ? `${cfg.host}:${boot.port}` : 'off'} sock=${cfg.unix ? cfg.sockFile : 'off'} db=${cfg.dbFile}`);
 
   let closed = false;
@@ -146,6 +152,7 @@ export async function startHub(opts = {}) {
     closed = true;
     if (timer) clearInterval(timer);
     if (gitTimer) clearInterval(gitTimer);
+    appTitles?.stop();
     for (const c of sseClients) { try { c.res.end(); } catch { /* ignore */ } }
     await remote.close();
     await Promise.all(servers.map((s) => new Promise((r) => {

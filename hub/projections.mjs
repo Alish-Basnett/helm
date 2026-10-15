@@ -6,9 +6,10 @@
 //   * decisions that depend on "now" (sweeps, command validation) are made BEFORE the event is
 //     recorded and are carried in the event data
 import path from 'node:path';
+import { normaliseFolder } from './folder.mjs';
 import { applyWf, bookRunUsage } from './workflows.mjs';
 import { applyTemplate } from './templates.mjs';
-import { applyDoc } from './docs.mjs';
+import { applyDoc, pushDoc } from './docs.mjs';
 import { applyConcept, conceptsOnRecap, storeSummary } from './concepts.mjs';
 import { recapFromJson } from './recap.mjs';
 
@@ -23,7 +24,7 @@ const REPORT_MAX = 16000; // T-76: longest final report kept per agent
 export const CONFLICT_WINDOW_MS = 10 * 60_000; // a finished agent's file touch still counts for this long
 const LIVE = ['running', 'stalled', 'waiting'];
 const TOOL_EDIT_CAP = 50; // files per tool.called
-const UNASSIGNED = 'Unassigned';
+export const UNASSIGNED = 'Unassigned';
 const TAG_RE = /\[helm:(T-\d+)\]/i;
 
 const GIT_REV_RE = /^[0-9a-f]{7,64}$/i;
@@ -44,7 +45,7 @@ const baseName = (p) => {
 };
 
 // ---------------------------------------------------------------- row mappers
-export const toProject = (r) => ({ id: r.id, name: r.name, createdAt: r.created_at, archived: !!r.archived, autoStart: !!r.auto_start, autoConcurrency: r.auto_concurrency || 1, coordinator: !!r.coordinator });
+export const toProject = (r) => ({ id: r.id, name: r.name, createdAt: r.created_at, archived: !!r.archived, autoStart: !!r.auto_start, autoConcurrency: r.auto_concurrency || 1, coordinator: !!r.coordinator, folder: r.folder ?? null });
 export const toSession = (r) => ({
   id: r.id, projectId: r.project_id, cwd: r.cwd, title: r.title, model: r.model,
   startedAt: r.started_at, lastSeenAt: r.last_seen_at, status: r.status, busy: !!r.busy,
@@ -56,6 +57,8 @@ export const toSession = (r) => ({
   health: { level: r.health_level || 'ok', reasons: parse(r.health_reasons, []) },
   // v0.26: derived from the session's project; acknowledged-to-archive time
   coordinator: !!r.coordinator, acknowledgedAt: r.acknowledged_at ?? null,
+  // v0.27: the desktop app's title for this session, and its own session id (local_…)
+  appTitle: r.app_title ?? null, appSessionId: r.app_session_id ?? null,
 });
 /** SELECT for a session row plus its live agent counts (what toSession needs). Append a WHERE / ORDER BY. */
 export const SESSION_SQL = `SELECT s.*, (SELECT p.coordinator FROM projects p WHERE p.id = s.project_id) AS coordinator,
@@ -387,22 +390,63 @@ export class Projector {
   }
 
   // ------------------------------------------------------------------- projects
-  createProject(name, at, auto) {
+  createProject(name, at, auto, folder = null) {
     const id = this.nextId('P');
-    this.db.run('INSERT INTO projects(id, name, created_at, archived, auto) VALUES (?, ?, ?, 0, ?)',
-      id, cut(name, 200), at, auto ? 1 : 0);
+    this.db.run('INSERT INTO projects(id, name, created_at, archived, auto, folder) VALUES (?, ?, ?, 0, ?, ?)',
+      id, cut(name, 200), at, auto ? 1 : 0, folder || null);
     this.setDoc('project', id, cut(name, 200), '', { at });
     this.pushProject(id);
     return this.getProject(id);
   }
-  autoProjectFor(cwd, at) {
-    const base = baseName(cwd);
+  /**
+   * v0.27: the project a session starting in `folder` joins, and the one to keep when a folder has duplicates. Newest non-archived
+   * projects are candidates; the coordinator wins, else the one with the most open cards, then one with a live session, then the newest.
+   */
+  joinTarget(folder, tail = '') {
+    if (!folder) return undefined;
+    const c = this.db.all('SELECT * FROM projects WHERE folder = ? AND archived = 0 ORDER BY rowid DESC', folder);
+    if (!c.length && tail) { // none for the folder: a non-archived project made by hand with the folder's name and no folder yet
+      return this.db.get('SELECT * FROM projects WHERE folder IS NULL AND archived = 0 AND name = ? COLLATE NOCASE ORDER BY rowid DESC LIMIT 1', tail);
+    }
+    if (c.length < 2) return c[0];
+    const open = (p) => this.db.get(`SELECT COUNT(*) AS n FROM tasks WHERE project_id = ? AND status NOT IN ('done','archived')`, p.id).n;
+    const live = (p) => (this.db.get(`SELECT 1 AS x FROM sessions WHERE project_id = ? AND status IN ('active','idle') LIMIT 1`, p.id) ? 1 : 0);
+    const key = (p) => [p.coordinator ? 1 : 0, open(p), live(p)];
+    const better = (a, b) => { for (let i = 0; i < 3; i++) if (a[i] !== b[i]) return a[i] > b[i]; return false; }; // ties keep the newer (first)
+    let best = c[0], bk = key(best);
+    for (const p of c.slice(1)) { const k = key(p); if (better(k, bk)) { best = p; bk = k; } }
+    return best;
+  }
+  /** A project that has no folder yet takes the folder of the first session that joins it. */
+  adoptFolder(projectId, cwd) {
+    const f = normaliseFolder(cwd);
+    if (f && this.db.get('SELECT 1 AS x FROM projects WHERE id = ? AND folder IS NULL', projectId)) {
+      this.db.run('UPDATE projects SET folder = ? WHERE id = ?', f, projectId);
+      this.pushProject(projectId);
+    }
+  }
+  /**
+   * The project for a session.started. Events recorded by v0.27+ carry the hub's decision (`joinProjectId`, null = create) and the
+   * resolved `folder`; older events have neither and always create, so a replay keeps every old project and id.
+   */
+  autoProjectFor(cwd, at, d = {}) {
+    if ('joinProjectId' in d) {
+      const j = d.joinProjectId && this.getProject(d.joinProjectId);
+      if (j && typeof d.adoptFolder === 'string' && !j.folder) { // a hand-made project with this name takes the folder
+        this.db.run('UPDATE projects SET folder = ? WHERE id = ?', d.adoptFolder, j.id);
+        this.pushProject(j.id);
+        return this.getProject(j.id);
+      }
+      if (j) return j;
+    }
+    const folder = typeof d.folder === 'string' ? d.folder : normaliseFolder(cwd);
+    const base = baseName(typeof d.folder === 'string' ? folder : cwd);
     if (!base) {
       const ex = this.db.get('SELECT * FROM projects WHERE name = ? AND archived = 0 ORDER BY rowid LIMIT 1', UNASSIGNED);
       if (ex) return ex;
       return this.createProject(UNASSIGNED, at, true);
     }
-    return this.createProject(base, at, true);
+    return this.createProject(base, at, true, folder);
   }
   ensureSession(sid, at) {
     let s = this.getSession(sid);
@@ -644,6 +688,10 @@ export class Projector {
       case 'hub.project.create': return this.hProjectCreate(ev);
       case 'hub.project.update': return this.hProjectUpdate(ev);
       case 'hub.project.coordinator': return this.hProjectCoordinator(ev);
+      case 'hub.project.archive': case 'hub.project.unarchive': return this.hProjectArchive(ev);
+      case 'hub.project.merge': return this.hProjectMerge(ev);
+      case 'hub.project.folder': return this.hProjectFolder(ev);
+      case 'hub.session.title': return this.hSessionTitle(ev);
       case 'hub.link.create': return this.hLinkCreate(ev);
       case 'hub.link.deliver': return this.hLinkDeliver(ev);
       case 'hub.ack': case 'hub.unack': return this.hAck(ev);
@@ -689,7 +737,7 @@ export class Projector {
     const base = baseName(cwd);
     let s = this.getSession(sid);
     if (!s) {
-      const p = this.autoProjectFor(cwd, at);
+      const p = this.autoProjectFor(cwd, at, d);
       const title = str(d.title) || base || `Session ${sid.slice(0, 8)}`;
       this.db.run(
         `INSERT INTO sessions(id, project_id, cwd, title, model, started_at, last_seen_at, status, busy, now_doing, tokens)
@@ -698,7 +746,7 @@ export class Projector {
       // A stub (made when events arrived before session.started, e.g. after a hub restart)
       // moves into its real project the moment it reports a folder.
       const p = this.getProject(s.project_id);
-      if (cwd && !s.cwd && p && p.name === UNASSIGNED) this.moveSession(sid, this.autoProjectFor(cwd, at).id, at);
+      if (cwd && !s.cwd && p && p.name === UNASSIGNED) this.moveSession(sid, this.autoProjectFor(cwd, at, d).id, at);
       s = this.getSession(sid);
       const f = { status: 'active', busy: 0, last_seen_at: Math.max(s.last_seen_at, at) };
       if (cwd) f.cwd = cwd;
@@ -1385,6 +1433,61 @@ export class Projector {
     }
     return toProject(this.getProject(p.id));
   }
+  /** hub.project.folder { id, folder }: the hub's resolved (symlinks, worktrees) folder for a project that only had the string-normalised one. */
+  hProjectFolder(ev) {
+    const p = this.getProject(ev.data.id);
+    if (!p) throw new Error('project not found');
+    this.upd('projects', p.id, { folder: str(ev.data.folder) || null });
+    this.pushProject(p.id);
+  }
+  /** hub.session.title { sessionId, title, appSessionId }: the desktop app's title for a session. */
+  hSessionTitle(ev) {
+    const { sessionId, title, appSessionId } = ev.data;
+    if (!this.getSession(sessionId)) throw new Error('session not found');
+    this.upd('sessions', sessionId, { app_title: cut(str(title), 200), app_session_id: appSessionId ? cut(str(appSessionId), 200) : null });
+    this.pushSession(sessionId);
+  }
+  /** hub.project.archive / hub.project.unarchive { id }: hide a project from the pickers (or bring it back). Nothing inside it is touched. */
+  hProjectArchive(ev) {
+    const p = this.getProject(ev.data.id);
+    if (!p) throw new Error('project not found');
+    this.upd('projects', p.id, { archived: ev.type === 'hub.project.archive' ? 1 : 0 });
+    this.pushProject(p.id);
+    return toProject(this.getProject(p.id));
+  }
+  /**
+   * hub.project.merge { sourceId, targetId }: move the source's tasks (ids kept, after the target's own cards in each column), sessions,
+   * links and docs into the target, then archive the source. Notes follow their task or session.
+   */
+  hProjectMerge(ev) {
+    const { sourceId, targetId } = ev.data;
+    if (!this.getProject(sourceId) || !this.getProject(targetId)) throw new Error('project not found');
+    this.db.run('UPDATE projects SET folder = COALESCE(folder, (SELECT folder FROM projects WHERE id = ?)) WHERE id = ?', sourceId, targetId);
+    const tasks = this.db.all('SELECT id, status FROM tasks WHERE project_id = ? ORDER BY ord, rowid', sourceId);
+    for (const t of tasks) {
+      this.db.run('UPDATE tasks SET project_id = ?, ord = ?, updated_at = MAX(updated_at, ?) WHERE id = ?',
+        targetId, this.endOrder(targetId, t.status), ev.at, t.id);
+    }
+    const sessions = this.db.all('SELECT id FROM sessions WHERE project_id = ? ORDER BY rowid', sourceId);
+    this.db.run('UPDATE sessions SET project_id = ? WHERE project_id = ?', targetId, sourceId);
+    const links = this.db.all('SELECT id FROM links WHERE from_project_id = ? OR to_project_id = ? ORDER BY rowid', sourceId, sourceId);
+    this.db.run('UPDATE links SET from_project_id = ? WHERE from_project_id = ?', targetId, sourceId);
+    this.db.run('UPDATE links SET to_project_id = ? WHERE to_project_id = ?', targetId, sourceId);
+    // a link between the two projects now goes from a project to itself: nothing to wait for, so it is answered and acknowledged
+    this.db.run(`UPDATE links SET state = 'answered', answered_at = COALESCE(answered_at, ?), acknowledged_at = COALESCE(acknowledged_at, ?)
+                  WHERE from_project_id = ? AND to_project_id = ? AND (state != 'answered' OR acknowledged_at IS NULL)`, ev.at, ev.at, targetId, targetId);
+    this.db.run('UPDATE tasks SET from_project_id = ? WHERE from_project_id = ?', targetId, sourceId);
+    const docs = this.db.all('SELECT id FROM docs WHERE project_id = ? ORDER BY rowid', sourceId);
+    this.db.run('UPDATE docs SET project_id = ? WHERE project_id = ?', targetId, sourceId);
+    this.upd('projects', sourceId, { archived: 1 });
+    for (const t of tasks) this.pushTask(t.id);
+    for (const x of sessions) this.pushSession(x.id);
+    for (const l of links) this.pushLink(l.id);
+    for (const d of docs) pushDoc(this, d.id);
+    this.pushProject(sourceId);
+    this.pushProject(targetId);
+    return { source: toProject(this.getProject(sourceId)), target: toProject(this.getProject(targetId)), tasks: tasks.length };
+  }
   /** "<project> / <session title>" of a session, for the prefix of a cross-session note. */
   sessionLabel(sessionId) {
     const s = this.getSession(sessionId), p = s ? this.getProject(s.project_id) : null;
@@ -1468,6 +1571,7 @@ export class Projector {
     const ev = { at };
     if (old !== projectId) {
       this.upd('sessions', sessionId, { project_id: projectId });
+      this.adoptFolder(projectId, s.cwd);
       const moved = this.db.all('SELECT id FROM tasks WHERE session_id = ? AND project_id != ?', sessionId, projectId);
       this.db.run('UPDATE tasks SET project_id = ?, updated_at = MAX(updated_at, ?) WHERE session_id = ? AND project_id != ?',
         projectId, ev.at, sessionId, projectId);

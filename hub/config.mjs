@@ -53,5 +53,10 @@ export function loadConfig(o = {}, env = process.env) {
     unix: o.unix ?? true,
     singleton: o.singleton ?? true,
     sweep: o.sweep ?? true, // run the periodic sweep timer
+    appTitleDebounceMs: int(o.appTitleDebounceMs ?? env.HELM_APP_TITLE_DEBOUNCE_MS, 500),
+    appTitleRescanMs: int(o.appTitleRescanMs ?? env.HELM_APP_TITLE_RESCAN_MS, 60_000),
+    // v0.27: where the desktop app keeps its session files (read only). Off unless given, or on macOS with the sweep running; a missing directory is fine.
+    appSessionsDir: o.appSessionsDir ?? env.HELM_APP_SESSIONS_DIR
+      ?? ((o.sweep ?? true) && process.platform === 'darwin' ? path.join(os.homedir(), 'Library', 'Application Support', 'Claude', 'claude-code-sessions') : null),
   };
 }

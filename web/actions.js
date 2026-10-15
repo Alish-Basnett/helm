@@ -2,6 +2,7 @@
 import { api } from './api.js';
 import { state, upsert, remove, sel } from './store.js';
 import { toast, toastError } from './ui.js';
+import { splitAckBody } from './retire.js';
 
 let tmpCounter = 0;
 const tmpId = (p) => `tmp-${p}-${Date.now().toString(36)}${++tmpCounter}`;
@@ -146,6 +147,41 @@ export function autoTarget() {
   if (s) return s;
   const ps = sel.projects();
   return ps.length === 1 ? ps[0] : null;
+}
+
+const ACK_ENTITY = { agentIds: ['agent', 'agents'], sessionIds: ['session', 'sessions'], linkIds: ['link', 'links'] };
+const ackReason = (e) => (e && (e.status === 404 || e.status === 405) ? 'Update the hub to acknowledge' : (e && e.data && e.data.reason) || (e && e.message) || 'Could not acknowledge');
+
+/**
+ * Acknowledge many things at once: POST /v1/ack in chunks of at most 500 ids. Only ids the hub accepted are patched locally.
+ * Returns { acked: n, refused: [{id, reason}] }; a failed chunk refuses its ids with the error and stops the rest.
+ */
+export async function ackBulk(body, onProgress) {
+  const parts = splitAckBody(body);
+  const refused = [];
+  let acked = 0;
+  for (let i = 0; i < parts.length; i++) {
+    const part = parts[i];
+    try {
+      const res = await api.ack(part);
+      const bad = new Map(((res && res.refused) || []).map((x) => [x.id, x.reason]));
+      const now = Date.now();
+      for (const k of Object.keys(ACK_ENTITY)) {
+        for (const id of part[k] || []) {
+          if (bad.has(id)) { refused.push({ id, reason: bad.get(id) || 'refused' }); continue; }
+          const row = state[ACK_ENTITY[k][1]].get(id);
+          if (row) upsert(ACK_ENTITY[k][0], { ...row, acknowledgedAt: now });
+          acked++;
+        }
+      }
+    } catch (e) {
+      const reason = ackReason(e);
+      for (let j = i; j < parts.length; j++) for (const k of Object.keys(ACK_ENTITY)) for (const id of parts[j][k] || []) refused.push({ id, reason });
+      break;
+    }
+    if (onProgress) onProgress(i + 1, parts.length);
+  }
+  return { acked, refused };
 }
 
 export async function archiveProject(id, archived = true) {
