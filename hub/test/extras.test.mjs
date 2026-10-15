@@ -248,6 +248,7 @@ test('explain: needs a live session (409), then queues a job whose input the hub
   assert.equal((await h.api('POST', '/v1/tasks/T-99/explain')).status, 404);
 
   h.send(h.ev('s1', 'session.started', { cwd: '/w/p', title: 'S', model: 'm' }, now));
+  await h.api('POST', '/v1/sessions/s1/join', { projectId: 'P-1' }); // a job never runs in another project's session
   h.send(h.ev('s1', 'agent.spawned', { toolUseId: 'tu', taskId: tk.id, subagentType: 'b', model: 'sonnet', description: 'work', prompt: '' }, now));
   h.send(h.ev('s1', 'agent.bound', { toolUseId: 'tu', agentId: 'ag' }, now));
   for (let i = 1; i <= 45; i++) h.send(h.ev('s1', 'tool.called', { agentId: 'ag', toolUseId: `t${i}`, tool: 'Read', summary: `Read file${i}.ts` }, now + i));
@@ -321,7 +322,7 @@ test('GET /v1/sessions/:id/jobs claims queued jobs atomically; job.result comple
   h.send(h.ev('s1', 'job.result', { jobId: 'J-404', ok: true, text: 'x' }, now + 5000)); // unknown job: ignored, not fatal
 });
 
-test('job session choice: task session, else project newest live, else any active; never an ended session', async (t) => {
+test('job session choice: task session, else project newest live; never an ended session or another project', async (t) => {
   const h = await startTest(); t.after(h.stop);
   const now = Date.now();
   h.send(h.ev('sA', 'session.started', { cwd: '/w/alpha', title: 'A', model: 'm' }, now));       // P-1
@@ -340,10 +341,11 @@ test('job session choice: task session, else project newest live, else any activ
   assert.equal(h.state().sessions.find((s) => s.id === 'sB').status, 'idle');
   assert.equal(await pick('sA'), 'sB', 'an idle session still counts');
   h.send(h.ev('sB', 'session.ended', { reason: 'x' }, now + 4 * MIN));
-  // project P-1 has no live session left: any *active* session (sC is idle, so wake it)
+  // project P-1 has no live session left: another project's session (idle, or woken up) is never used
   assert.equal(await pick('sA'), 409, 'only an idle foreign session exists: not eligible');
   h.send(h.ev('sC', 'session.heartbeat', {}, now + 5 * MIN));
-  assert.equal(await pick('sA'), 'sC', 'fallback: any active session');
+  assert.equal(await pick('sA'), 409, 'an active session of another project is not a fallback either');
+  assert.equal(await pick('sC'), 409, "a task whose session_id is another project's session ignores it");
   h.send(h.ev('sC', 'session.ended', { reason: 'x' }, now + 6 * MIN));
   assert.equal(await pick(null), 409);
 });

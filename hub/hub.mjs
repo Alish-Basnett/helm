@@ -634,9 +634,10 @@ export class Hub {
     for (const top of candidates) {
       let plan;
       try { plan = this.startPlan(top); } catch (e) {
-        if (e instanceof HttpError) return null;  // no live session: retry when one appears
+        if (e instanceof HttpError) return null;  // not startable now: retry later
         throw e;
       }
+      if (!plan.sessionId) return null;               // auto-start never queues: it waits for a live session and re-plans
       return { taskId: top.id, sessionId: plan.sessionId, text: plan.text, noteIds: plan.noteIds,
         reason: limit === 1 ? 'nothing in progress' : `free slot (${busy + 1} of ${limit})` };
     }
@@ -780,8 +781,9 @@ export class Hub {
       notes = q(
         `SELECT * FROM notes WHERE (target_kind = 'task' AND target_id IN (SELECT id FROM tasks WHERE project_id = ?))
            OR session_id IN (SELECT id FROM sessions WHERE project_id = ?)
-           OR (target_kind = 'session' AND target_id IN (SELECT id FROM sessions WHERE project_id = ?)) ORDER BY rowid`,
-        projectId, projectId, projectId);
+           OR (target_kind = 'session' AND target_id IN (SELECT id FROM sessions WHERE project_id = ?))
+           OR (target_kind = 'project' AND target_id = ?) ORDER BY rowid`,
+        projectId, projectId, projectId, projectId);
       const qScope = `session_id IN (SELECT id FROM sessions WHERE project_id = ?)`;
       questions = q(qSql(qScope), projectId, projectId);
       jobs = q(jSql(`(project_id = ? OR kind = 'concept_summary')`), projectId, projectId); // concept pages are global
@@ -1032,7 +1034,7 @@ export class Hub {
   archiveTemplate(id, at = this.now()) { return this.updateTemplate(id, { archived: true }, at); }
   /**
    * Make a task from a template: `{{var}}` filled from `vars`, Checks / Preferred agent lines appended. With `start` the task
-   * is started by the same rule as /start; if that is refused (409) nothing is created and the usage count does not move.
+   * is started by the same rule as /start (queued for the project when it has no live session); if that is refused (409) nothing is created and the usage count does not move.
    */
   useTemplate(id, body, at = this.now()) {
     const tpl = getTemplate(this.db, id);
@@ -1051,7 +1053,7 @@ export class Hub {
       const task = this.command('hub.task.create', { projectId, title, description, status: 'backlog', dependsOn: [], sessionId: null }, at);
       let out = { task };
       if (b.start === true) {
-        const plan = this.startPlan(this.p.getTask(task.id)); // 409 (no live session) rolls the whole command back
+        const plan = this.startPlan(this.p.getTask(task.id)); // a 409 (status not startable) rolls the whole command back
         out = this.command('hub.task.start', { id: task.id, ...plan }, at);
       }
       const template = this.command('hub.template.used', { id }, at);
@@ -1126,11 +1128,11 @@ export class Hub {
       return this.command('hub.task.start', { id: task.id, ...plan }, at);
     });
   }
-  /** Validate a Start and build its note: { sessionId, text }. Throws 409 when not allowed / no live session. */
+  /** Validate a Start and build its note: { sessionId, text, noteIds }. sessionId is null when the project has no live session: the note is held. */
   startPlan(t) {
     if (toTask(t).interrupted) return this.resumePlan(t); // T-70: Start on an interrupted card is a Resume
     if (!START_FROM.includes(t.status)) throw new HttpError(409, `cannot start a task that is ${t.status}`);
-    const sessionId = this.pickJobSession(t.session_id, t.project_id);
+    const sessionId = this.findJobSession(t.session_id, t.project_id); // null: no live session in the project, the Start is queued for it
     // Draft notes on the task ride along with Start (v0.8): folded after the Brief, marked ran by the same event.
     const { drafts, notesBlock } = this.draftNotes(t);
     const text = `Start Helm task ${t.id} \u201c${t.title}\u201d.\n\nBrief:\n${t.description}\n\n${notesBlock}`
@@ -1155,7 +1157,7 @@ export class Hub {
     if (!t2.interrupted) throw new HttpError(409, 'only an interrupted task can be resumed');
     const inflight = t.start_note_id ? this.p.getNote(t.start_note_id) : null;
     if (inflight && (inflight.state === 'queued' || inflight.state === 'sending')) throw new HttpError(409, 'already starting');
-    const sessionId = this.pickJobSession(t.session_id, t.project_id);
+    const sessionId = this.findJobSession(t.session_id, t.project_id);
     const { drafts, notesBlock } = this.draftNotes(t);
     const text = `!${RESUME_MARK} Resume Helm task ${t.id} \u201c${t.title}\u201d: its agent was stopped mid-task.\n\n${notesBlock}`.trimEnd();
     return { sessionId, text, noteIds: drafts.map((n) => n.id), resume: true };
@@ -1165,6 +1167,14 @@ export class Hub {
     if (!t) throw notFound('task not found');
     const plan = this.resumePlan(t);
     return this.tx(() => this.command('hub.task.start', { id, ...plan }, at));
+  }
+  /** Cancel a Start that is still waiting for a session: the held note fails ("Cancelled"), the card goes back to the backlog. */
+  cancelStart(id, at = this.now()) {
+    const t = this.p.getTask(id);
+    if (!t) throw notFound('task not found');
+    const n = t.start_note_id ? this.p.getNote(t.start_note_id) : null;
+    if (!n || n.target_kind !== 'project' || n.state !== 'queued') throw new HttpError(409, 'this task is not waiting for a session');
+    return this.tx(() => this.command('hub.task.start.cancel', { id }, at));
   }
   startTask(id, at = this.now()) {
     const t = this.p.getTask(id);
@@ -1418,19 +1428,25 @@ export class Hub {
   }
 
   // ----------------------------------------------------------------- jobs
-  /** Who runs a model job: the task's session, else the project's newest live one, else any active session. */
-  pickJobSession(sessionId, projectId) {
-    const s = sessionId ? this.p.getSession(sessionId) : null;
-    if (s && s.status !== 'ended') return s.id;
-    if (projectId) {
-      const r = this.db.get(
-        `SELECT id FROM sessions WHERE project_id = ? AND status IN ('active','idle') ORDER BY last_seen_at DESC, rowid DESC LIMIT 1`,
-        projectId);
-      if (r) return r.id;
+  /**
+   * Who runs a job or a Start: the task's own session if it is live AND in `projectId`, else the project's newest live
+   * session (an idle one before a busy one), else null. With a project it NEVER looks outside it (a Start must not land
+   * in another project's session); with no project (a global digest / concept page) any active session will do.
+   */
+  findJobSession(sessionId, projectId) {
+    if (!projectId) {
+      return this.db.get(`SELECT id FROM sessions WHERE status = 'active' ORDER BY last_seen_at DESC, rowid DESC LIMIT 1`)?.id ?? null;
     }
-    const any = this.db.get(`SELECT id FROM sessions WHERE status = 'active' ORDER BY last_seen_at DESC, rowid DESC LIMIT 1`);
-    if (any) return any.id;
-    throw new HttpError(409, 'no live session');
+    const s = sessionId ? this.p.getSession(sessionId) : null;
+    if (s && s.status !== 'ended' && s.project_id === projectId) return s.id;
+    return this.db.get(
+      `SELECT id FROM sessions WHERE project_id = ? AND status IN ('active','idle')
+        ORDER BY (status = 'idle') DESC, last_seen_at DESC, rowid DESC LIMIT 1`, projectId)?.id ?? null;
+  }
+  pickJobSession(sessionId, projectId) {
+    const id = this.findJobSession(sessionId, projectId);
+    if (!id) throw new HttpError(409, 'no live session');
+    return id;
   }
   /** T-76: give every finished task without a recap one (see hub/recapjobs.mjs). Body: { dryRun, improve, taskIds, reports }. */
   backfillRecaps(body) {
@@ -1709,6 +1725,19 @@ export class Hub {
       for (const j of [...held, ...stranded]) {
         const sessionId = this.p.pickLive(j.projectId);
         if (sessionId) this.tx(() => this.command('hub.link.deliver', { noteId: j.noteId, sessionId }, at));
+      }
+      // Start / Resume notes held for a project with no live session. The choice (session, and whether it is a task note)
+      // is made here, once, and recorded in the event: replay never re-decides.
+      const starts = this.db.all(
+        `SELECT n.id, n.text, n.target_id AS project_id, t.id AS task_id FROM notes n JOIN tasks t ON t.start_note_id = n.id
+          WHERE n.target_kind = 'project' AND n.state = 'queued' ORDER BY n.rowid`);
+      for (const n of starts) {
+        const sessionId = this.findJobSession(null, n.project_id);
+        if (!sessionId) continue;
+        const resume = n.text.startsWith(`!${RESUME_MARK}`);
+        this.tx(() => this.command('hub.task.start.deliver', {
+          noteId: n.id, sessionId, targetKind: resume ? 'task' : 'session', targetId: resume ? n.task_id : sessionId,
+        }, at));
       }
     } catch (e) {
       this.log?.error('link delivery failed', e);

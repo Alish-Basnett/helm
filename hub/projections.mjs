@@ -707,6 +707,8 @@ export class Projector {
       case 'hub.note.retry': return this.hNoteRetry(ev);
       case 'hub.note.claim': return this.hNoteClaim(ev);
       case 'hub.task.start': return this.hTaskStart(ev);
+      case 'hub.task.start.deliver': return this.hStartDeliver(ev);
+      case 'hub.task.start.cancel': return this.hStartCancel(ev);
       case 'hub.task.autostart': return this.hTaskStart({ ...ev, data: { ...ev.data, id: ev.data.taskId } }, ev.data.reason || 'auto');
       case 'hub.question.dismiss': return this.hQuestionDismiss(ev);
       case 'hub.job.create': return this.hJobCreate(ev);
@@ -1787,16 +1789,24 @@ export class Projector {
       this.pushNote(fid);
     }
     const nid = this.nextId('N');
+    // A Start replaces an earlier one still held for the project: that one will never be delivered.
+    const old = t.start_note_id ? this.getNote(t.start_note_id) : null;
+    if (old && old.target_kind === 'project' && old.state === 'queued') {
+      this.upd('notes', old.id, { state: 'failed', ran_at: ev.at, error: 'Superseded by a newer start' });
+      this.pushNote(old.id);
+    }
     // T-70 Resume: a task-targeted note, so the mod spawns the follow-up builder itself (see register.ts runNote).
     const resume = ev.data.resume === true;
+    // No session (the project has none live): the note is held for the project, target 'project', until hub.task.start.deliver.
+    const held = !sessionId;
     this.db.run(
       `INSERT INTO notes(id, target_kind, target_id, session_id, text, state, created_at, queued_at, ran_at, via, error, sending_at)
        VALUES (?, ?, ?, ?, ?, 'queued', ?, ?, NULL, NULL, NULL, NULL)`,
-      nid, resume ? 'task' : 'session', resume ? id : sessionId, sessionId, text, ev.at, ev.at);
+      nid, held ? 'project' : resume ? 'task' : 'session', held ? t.project_id : resume ? id : sessionId, sessionId || '', text, ev.at, ev.at);
     this.indexNote(this.getNote(nid));
     this.pushNote(nid);
     this.addActivity({
-      sessionId, taskId: id, kind: 'note', summary: `Note ${nid} queued: ${cut(text, 200)}`, at: ev.at,
+      sessionId: sessionId || HUB_SESSION, taskId: id, kind: 'note', summary: `Note ${nid} queued: ${cut(text, 200)}`, at: ev.at,
     });
     this.setTaskStatus(t, 'next', ev.at, null);
     this.upd('tasks', id, { start_note_id: nid, auto_started_at: autoReason ? ev.at : null });
@@ -1806,6 +1816,29 @@ export class Projector {
     this.indexTask(this.getTask(id));
     this.pushTask(id);
     return { note: toNote(this.getNote(nid)), task: toTask(this.getTask(id)) };
+  }
+  /** hub.task.start.deliver { noteId, sessionId, targetKind, targetId }: a Start / Resume held for a project goes to a session that is now live. */
+  hStartDeliver(ev) {
+    const { noteId, sessionId, targetKind, targetId } = ev.data;
+    const n = this.getNote(noteId);
+    if (!n || n.target_kind !== 'project' || n.state !== 'queued') throw new Error('not a held start note');
+    this.upd('notes', n.id, { target_kind: targetKind, target_id: targetId, session_id: sessionId, queued_at: ev.at });
+    this.pushNote(n.id);
+    const t = this.db.get('SELECT id FROM tasks WHERE start_note_id = ?', n.id);
+    this.addActivity({ sessionId, taskId: t?.id ?? null, kind: 'note', summary: `Note ${n.id} queued: ${cut(n.text, 200)}`, at: ev.at });
+  }
+  /** hub.task.start.cancel { id }: drop a Start that is still waiting for a session; the card goes back to the backlog. */
+  hStartCancel(ev) {
+    const t = this.getTask(ev.data.id);
+    const n = t?.start_note_id ? this.getNote(t.start_note_id) : null;
+    if (!t || !n || n.target_kind !== 'project' || n.state !== 'queued') throw new Error('no held start to cancel');
+    this.upd('notes', n.id, { state: 'failed', ran_at: ev.at, error: 'Cancelled before a session was live' });
+    this.pushNote(n.id);
+    if (t.status === 'next') this.setTaskStatus(t, 'backlog', ev.at, null);
+    this.upd('tasks', t.id, { auto_started_at: null });
+    this.indexTask(this.getTask(t.id));
+    this.pushTask(t.id);
+    return { note: toNote(this.getNote(n.id)), task: toTask(this.getTask(t.id)) };
   }
   hNoteClaim(ev) {
     const out = [];
