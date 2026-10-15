@@ -405,6 +405,7 @@ export class Projector {
   joinTarget(folder, tail = '') {
     if (!folder) return undefined;
     const c = this.db.all('SELECT * FROM projects WHERE folder = ? AND archived = 0 ORDER BY rowid DESC', folder);
+    // Risk: two unrelated hand-made projects/folders with the same last segment (~/a/api and ~/b/api) would be taken for each other.
     if (!c.length && tail) { // none for the folder: a non-archived project made by hand with the folder's name and no folder yet
       return this.db.get('SELECT * FROM projects WHERE folder IS NULL AND archived = 0 AND name = ? COLLATE NOCASE ORDER BY rowid DESC LIMIT 1', tail);
     }

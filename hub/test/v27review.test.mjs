@@ -160,19 +160,30 @@ test('8. links between the two merged projects become answered and acknowledged'
   assert.deepEqual(h.hub.dump(), dump);
 });
 
-test('10. resolveFolder wants an absolute path and reads at most 4 KB of .git', () => {
+test('10. resolveFolder wants an absolute path', () => {
   assert.equal(resolveFolder('relative/dir'), null);
   assert.equal(resolveFolder('./x'), null);
-  const root = fs.realpathSync(tmpDir('helm-f-'));
-  try {
-    const main = path.join(root, 'main'), wt = path.join(root, 'wt'), far = path.join(root, 'far');
-    fs.mkdirSync(path.join(main, '.git', 'worktrees', 'wt'), { recursive: true });
-    fs.mkdirSync(wt); fs.mkdirSync(far);
-    fs.writeFileSync(path.join(wt, '.git'), `gitdir: ${main}/.git/worktrees/wt\n` + 'x'.repeat(100_000));
-    assert.equal(resolveFolder(wt), main, 'the first line is within 4 KB');
-    fs.writeFileSync(path.join(far, '.git'), 'x'.repeat(5000) + `\ngitdir: ${main}/.git/worktrees/wt\n`);
-    assert.equal(resolveFolder(far), far, 'a gitdir line past 4 KB is not read');
-  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('external git worktrees keep their own project: join, duplicates and refreshFolders leave them alone', async (t) => {
+  const root = fs.realpathSync(tmpDir('helm-f-')); t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const main = path.join(root, 'admin'), wt = path.join(root, 'KBank-check');
+  fs.mkdirSync(path.join(main, '.git', 'worktrees', 'KBank-check'), { recursive: true });
+  fs.mkdirSync(wt);
+  fs.writeFileSync(path.join(wt, '.git'), `gitdir: ${main}/.git/worktrees/KBank-check\n`);
+  const h = await startTest(); t.after(h.stop);
+  start(h, 'a1', main); start(h, 'k1', wt);
+  assert.deepEqual(h.state().projects.map((p) => p.folder), [main, wt]);
+  await h.api('POST', '/v1/projects/P-1/coordinator', { on: true });
+  end(h, 'k1');
+  start(h, 'k2', wt);
+  assert.equal(projectOf(h, 'k2'), 'P-2', 'the worktree session joins its own project, not the main repo\'s');
+  assert.deepEqual((await h.get('/v1/projects/duplicates')).json.groups, [], 'not grouped with the main repo');
+  assert.deepEqual(h.hub.refreshFolders(), []);
+  legacy(h, 'o1', wt, 1); // a legacy project for the worktree folder
+  h.hub.rebuild();
+  assert.equal(h.hub.refreshFolders().length, 0, 'boot does not rewrite a worktree\'s folder');
+  assert.ok(h.state().projects.every((p) => p.folder === main || p.folder === wt));
 });
 
 test('10. a session with a relative cwd has no folder and lands in Unassigned', async (t) => {

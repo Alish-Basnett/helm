@@ -22,7 +22,7 @@ test('normaliseFolder: slashes and Claude worktrees', () => {
   assert.equal(normaliseFolder('/r/proj/.claude/worktrees/agent-1/packages/x/'), '/r/proj');
 });
 
-test('resolveFolder: symlinks resolve, a git worktree maps to its main repo, a missing folder keeps its path', () => {
+test('resolveFolder: symlinks resolve, an external git worktree stays its own folder, a missing folder keeps its path', () => {
   const root = fs.realpathSync(tmpDir('helm-f-'));
   try {
     const main = path.join(root, 'main'), wt = path.join(root, 'wt'), link = path.join(root, 'link');
@@ -32,7 +32,7 @@ test('resolveFolder: symlinks resolve, a git worktree maps to its main repo, a m
     fs.symlinkSync(main, link);
     assert.equal(resolveFolder(link), main);
     assert.equal(resolveFolder(main + '/'), main);
-    assert.equal(resolveFolder(wt), main);
+    assert.equal(resolveFolder(wt), wt, 'an external git worktree is its own folder');
     assert.equal(resolveFolder(path.join(root, 'nope') + '/'), path.join(root, 'nope'));
     assert.equal(resolveFolder(''), null);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
